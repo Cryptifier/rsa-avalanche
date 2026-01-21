@@ -18,14 +18,15 @@ cargo run --bin analysis | tee output.txt
 
 # Experimental Notes
 - I suggest that 51% is a reasonable threshold for success.
-- With k=144 bits per trial, observe there is about a 1.5% advantage over random guessing.
+- All "max matching bits" logs are regarding the LSB's only. The overlap % is regarding all bits.
+- With k=144 bits with at least 51% of the bits matched, observe there is about a 1.5% advantage over random guessing at 1M iterations.
 - Canonically RSA should be resiliant against this type of attack.
 - Included in this repository are some example R candidates in r_candidates.csv to speed up testing.
 - Change the "alt_iterations" parameter in src/main.rs to adjust the number of trials (default 1,000,000). About 100,000 trials is more reasonable for quicker testing.
 
 # Results
 ### Parameters
-- Bits per trial: $$k = 144$$
+- Bits per trial: $$N = 144 \textbf{bits}$$
 - Threshold: **51%** → success iff $$X \ge 74$$ (since $$0.51 \cdot 144 = 73.44$$)  
 - Null model: $$X \sim \mathrm{Binomial}(144,\tfrac12)$$
 - Trials: $$n = 1{,}000{,}000$$  
