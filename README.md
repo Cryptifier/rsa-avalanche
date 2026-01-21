@@ -25,8 +25,8 @@ cargo run --bin analysis | tee output.txt
 
 # Results
 ### Parameters
-- Bits per trial: \(k = 144\)  
-- Threshold: **51%** → success iff \(X \ge 74\) (since \(0.51 \cdot 144 = 73.44\))  
+- Bits per trial: $$\(k = 144\)$$
+- Threshold: **51%** → success iff $$\(X \ge 74\)$$ (since $$\(0.51 \cdot 144 = 73.44\)$$)  
 - Null model: \(X \sim \mathrm{Binomial}(144,\tfrac12)\)  
 - Trials: \(n = 1{,}000{,}000\)  
 - Observed successes: \(y = 416{,}159\)
