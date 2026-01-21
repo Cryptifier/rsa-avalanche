@@ -26,17 +26,17 @@ cargo run --bin analysis | tee output.txt
 
 # Results
 ### Parameters
-- Bits per trial: $$N = 144 \textbf{bits}$$
+- Bits per trial: $$k = 144 \textbf{bits}$$
 - Threshold: **51%** → success iff $$X \ge 74$$ (since $$0.51 \cdot 144 = 73.44$$)  
-- Null model: $$X \sim \mathrm{Binomial}(144,\tfrac12)$$
-- Trials: $$n = 1{,}000{,}000$$  
-- Observed successes: $$y = 416{,}159$$
+- Null model: $$X \sim \mathrm{Binomial}(144,\frac{1}{2})$$
+- Trials: $$n = 1000000$$
+- Observed successes: $$y = 416159$$
 
 ---
 
 ### Expected success rate under randomness (null)
 Let
-$$q = \Pr[X \ge 74], \quad X \sim \mathrm{Binomial}(144,\tfrac12).$$
+$$q = \Pr[X \ge 74], \quad X \sim \mathrm{Binomial}(144,\frac{1}{2}).$$
 Using the normal approximation with continuity correction,
 $$q \approx 0.401.$$
 
@@ -46,28 +46,20 @@ $$\mathbb{E}[Y] = nq \approx 1{,}000{,}000 \cdot 0.401 = 401{,}000.$$
 ---
 
 ### Compare observation to expectation
-Observed excess:
-$$\Delta = y - \mathbb{E}[Y] \approx 416{,}159 - 401{,}000 = 15{,}159.$$
+Observed excess: $$\Delta = y - \mathbb{E}[Y] \approx 416159 - 401000 = 15159.$$
 
-Null standard deviation:
-$$\sigma_Y = \sqrt{nq(1-q)} \approx \sqrt{1{,}000{,}000 \cdot 0.401 \cdot 0.599} \approx \sqrt{240{,}199} \approx 490.$$
+Null standard deviation: $$\sigma_Y = \sqrt{nq(1-q)} \approx \sqrt{1000000 \cdot 0.401 \cdot 0.599} \approx \sqrt{240199} \approx 490.$$
 
-z-score:
-$$z \approx \frac{\Delta}{\sigma_Y} \approx \frac{15{,}159}{490} \approx 30.9.$$
+z-score: $$z \approx \frac{\Delta}{\sigma_Y} \approx \frac{15159}{490} \approx 30.9.$$
 
 ---
 
 ### Interpretation
-- Observed success rate:
-  $$\hat q = \frac{416{,}159}{1{,}000{,}000} = 0.416159.$$
-- Null expected rate: 
-$$q \approx 0.401$$.
-- The deviation is about **31σ**, i.e. astronomically inconsistent with the pure-random null  
-  (p-value effectively 
-  $$ \ll 10^{-100} $$
-  ).
+- Observed success rate: $$\hat q = \frac{416159}{1000000} = 0.416159.$$
+- Null expected rate: $$q \approx 0.401$$.
+- The deviation is about **31σ**, i.e. astronomically inconsistent with the pure-random null (p-value effectively $$10^{-100}$$).
 
-**Conclusion:**  
+**Conclusion:**
 At a 51% threshold with $$k=144$$, seeing **416,159 successes out of 1,000,000** is overwhelming evidence of a real upward bias, assuming independence and no multiple-comparisons cherry-picking.
 
 # Output
