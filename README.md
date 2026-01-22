@@ -7,7 +7,7 @@ This demo shows homomorphic key switching as a viable method to retrieve up to 5
 - Use the Tonelli-Shanks approach to increase the relation of the ciphertext mod N to the new ciphertext mod N^k for a small k = 3.
 - Use homomorphic base switching to go from mod N^k to mod R where R is an easily factored modulus with at least three factors (more than regular RSA).
 - Use the easy factorization of R to retrieve partial information about the original message by calculating a new d' such that ed' ≡ 1 (mod phi(R)).
-- Compute the difference between each independent trial with random message and ciphertext using modulus N in a random oracle model to retrieve percentage of bits matching the original message via the ciphertext using modulus R.
+- Compute the difference between each independent trial with random message and ciphertext using modulus N in a random oracle model to retrieve percentage of bits matching the original message via the ciphertext using modulus N.
 
 # Setup
 - Use Linux and install Rust.
