@@ -1,6 +1,8 @@
 # RSA Demo of Statistical Advantage
 This demo shows homomorphic key switching as a viable method to retrieve up to 51% of the bits of an RSA message given a modulus with private factorization and several homomorphically related keys with easier factorizations. This is statistically significant with 51% thresholding over 1,000,000 trials for messages of length k=144 bits.
 
+by Nicholas LaRoche <nlaroche@cryptifier.dev> during 2025.
+
 # Theory
 - Use regular RSA encryption using a large modulus N = pq where p and q are large private primes.
 - Use phi of phi(N) = (p-1)(q-1) to generate a public/private key pair (e, d) such that ed ≡ 1 (mod phi(N)).
