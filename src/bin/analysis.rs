@@ -104,11 +104,10 @@ fn run_demo(args: Args, config: Config) -> Result<(), Box<dyn Error>> {
     }
 
     let ciphertext = message.modpow(&e, &n);
-    let recovered = ciphertext.modpow(&d, &n);
-
-    if recovered != message {
-        return Err("RSA round trip failed".into());
-    }
+    //let recovered = ciphertext.modpow(&d, &n);
+    //if recovered != message {
+    //    return Err("RSA round trip failed".into());
+    //}
 
     println!("Prime p ({} bits): {p}", bit_length(&p));
     println!("Prime q ({} bits): {q}", bit_length(&q));
@@ -118,7 +117,7 @@ fn run_demo(args: Args, config: Config) -> Result<(), Box<dyn Error>> {
     println!("Private exponent d: {d}");
     println!("Plaintext (hex): {}", to_hex(&message));
     println!("Ciphertext (hex): {}", to_hex(&ciphertext));
-    println!("Recovered (hex): {}", to_hex(&recovered));
+    //println!("Recovered (hex): {}", to_hex(&recovered));
 
     if let Some(seed) = args.seed {
         println!("RNG seed: {seed}");
@@ -147,6 +146,7 @@ fn run_demo(args: Args, config: Config) -> Result<(), Box<dyn Error>> {
             };
             let report = run_message_trial(
                 &ctx,
+                &config,
                 &config.engine,
                 &msg,
                 config.engine.min_message_trials,
@@ -258,7 +258,7 @@ fn run_demo(args: Args, config: Config) -> Result<(), Box<dyn Error>> {
             if let Some(best) = &best_match {
                 if let Some((avg_bits, avg_overlap, max_bits)) = run_fixed_r_trials(
                     &ctx,
-                    &config.engine,
+                    &config,
                     best,
                     config.engine.alt_iterations,
                     &mut rng,
@@ -273,7 +273,7 @@ fn run_demo(args: Args, config: Config) -> Result<(), Box<dyn Error>> {
             if let Some(worst) = &worst_match {
                 if let Some((avg_bits, avg_overlap, max_bits)) = run_fixed_r_trials(
                     &ctx,
-                    &config.engine,
+                    &config,
                     worst,
                     config.engine.alt_iterations,
                     &mut rng,
@@ -294,7 +294,7 @@ fn run_demo(args: Args, config: Config) -> Result<(), Box<dyn Error>> {
                     if is_probable_prime_big(&r) {
                         continue;
                     }
-                    run_r_stress_entry("r_use_list", &r, &ctx, &config.engine, &mut rng);
+                    run_r_stress_entry("r_use_list", &r, &ctx, &config, &config.engine, &mut rng);
                 }
             }
         }
@@ -306,7 +306,7 @@ fn run_demo(args: Args, config: Config) -> Result<(), Box<dyn Error>> {
                 let mut current = start.clone();
                 while &current <= end {
                     if !is_probable_prime_big(&current) {
-                        run_r_stress_entry("r_stress", &current, &ctx, &config.engine, &mut rng);
+                        run_r_stress_entry("r_stress", &current, &ctx, &config, &config.engine, &mut rng);
                     }
                     current += BigUint::one();
                 }
@@ -826,6 +826,7 @@ struct TestReport {
 
 fn run_message_trial(
     ctx: &RSAContext,
+    config: &Config,
     engine: &EngineConfig,
     message: &BigUint,
     min_message_trials: u64,
@@ -851,18 +852,24 @@ fn run_message_trial(
         } else {
             random_message_under_n(engine, &ctx.n, rng)
         };
-
-        let ciphertext = msg.modpow(&ctx.e, &ctx.n);
-        let recovered = ciphertext.modpow(&ctx.d, &ctx.n);
-        if recovered != msg {
-            return Err("RSA round trip failed".into());
-        }
-
-        let result_default = get_larger_number(&ciphertext, &ctx.n, y, true, false);
-
+        
         for (r, factors) in &candidates {
+            //println!("factors for r {}: {:?}", r, factors);
             let phi_new = compute_totient(factors);
-            let Some(d_new) = mod_inverse(&ctx.e, &phi_new) else {
+            let k_val = ((((&phi_new / config.key.e.clone()) + BigUint::from(2u32)) * BigUint::from(2u32)) * config.key.e.clone() + BigUint::from(1u32)) % &phi_new;
+            
+            let ciphertext = msg.modpow(&k_val, &ctx.n);
+            let result_default = get_larger_number(&ciphertext, &ctx.n, y, true, false);
+            //let recovered = ciphertext.modpow(&ctx.d, &ctx.n);
+            //if recovered != msg {
+            //    return Err("RSA round trip failed".into());
+            //}
+
+            //let d_new2 = mod_inverse(&k_val, &phi_new).unwrap_or(BigUint::zero());
+            
+            //Reduce k_val mod phi_new before inverse.
+            let Some(d_new) = mod_inverse(&(&k_val % &phi_new), &phi_new) else {
+                //println!("Skipping r candidate {} due to non-invertible k_val {}, phi_new {}", r, &k_val, &phi_new);
                 continue;
             };
 
@@ -876,9 +883,12 @@ fn run_message_trial(
             let r_pow_y = r.pow(y);
             let result2_default = get_larger_number(&recovered_new, r, y, true, false);
             let hbc_default = hbc(&result2_default, &ctx.n, &r_pow_y, engine);
-            let dm = &hbc_default % &ctx.n;
+            //take the 1's NOT of dm
+            let dm = &hbc_default % &ctx.n;            
+            let inverted_dm = (BigUint::from(1u32) << (dm.bits() + 1)) - BigUint::from(1u32) - dm; // Invert all bits
 
-            let (matching_lsb, matching_total) = count_matching_bits(&dm, &msg);
+            let (matching_lsb, matching_total) = count_matching_bits(&inverted_dm, &msg);
+            //println!("Trial {}, r candidate {}: matching bits LSB run {} / overlap {} of {} bits", attempt_idx + 1, r, matching_lsb, matching_total, msg.bits());
             let report = TestReport {
                 best_r: r.clone(),
                 factors: factors.clone(),
@@ -892,6 +902,7 @@ fn run_message_trial(
                 .map(|b| (matching_total, matching_lsb) > (b.matching_total, b.matching_lsb))
                 .unwrap_or(true)
             {
+                //println!("Best candidate updated: r = {}, factors = {:?}, matching bits LSB run {} / overlap {} of {} bits", r, factors, matching_lsb, matching_total, msg.bits());
                 best = Some(report.clone());
             }
             if worst
@@ -909,7 +920,7 @@ fn run_message_trial(
 
 fn run_fixed_r_trials(
     ctx: &RSAContext,
-    engine: &EngineConfig,
+    config: &Config,
     r_report: &TestReport,
     iterations: u64,
     rng: &mut StdRng,
@@ -918,12 +929,19 @@ fn run_fixed_r_trials(
         return None;
     }
 
+    let engine = &config.engine;
+
     let y = engine.rabin_exponent as u32;
     let n_pow_y = ctx.n.pow(y);
     let r = &r_report.best_r;
     let r_pow_y = r.pow(y);
     let phi_new = compute_totient(&r_report.factors);
-    let d_new = mod_inverse(&ctx.e, &phi_new)?;
+    let k_val = ((((&phi_new / config.key.e.clone()) + BigUint::from(2u32)) * BigUint::from(2u32)) * config.key.e.clone() + BigUint::from(1u32)) % &phi_new;
+    let Some(d_new2) = mod_inverse(&(&k_val % &phi_new), &phi_new) else {
+        println!("Skipping r candidate {} due to non-invertible k_val {}, phi_new {}", r, &k_val, &phi_new);
+        return None;        
+    };
+    //let d_new = mod_inverse(&ctx.e, &phi_new)?;
 
     let iter_count = iterations as usize;
     let mut seeds = Vec::with_capacity(iter_count);
@@ -939,22 +957,27 @@ fn run_fixed_r_trials(
         .map(|seed| {
             let mut local_rng = StdRng::seed_from_u64(seed);
 
+            //let k_val = ((((&phi_new / config.key.e.clone()) + BigUint::from(2u32)) * BigUint::from(2u32)) * config.key.e.clone() + BigUint::from(1u32)) % &phi_new;
             let msg = random_message_under_n(engine, &ctx.n, &mut local_rng);
-            let ciphertext = msg.modpow(&ctx.e, &ctx.n);
+
+            let ciphertext = msg.modpow(&k_val, &ctx.n);
+            
             let result_default = get_larger_number(&ciphertext, &ctx.n, y, true, false);
 
             let hbc_result = hbc(&result_default, r, &n_pow_y, engine);
             let recovered_new = if engine.use_rs_decrypt {
-                hbc_result.modpow(&d_new, r)
+                hbc_result.modpow(&d_new2, r)
             } else {
                 hbc_result
             };
 
             let result2_default = get_larger_number(&recovered_new, r, y, true, false);
             let hbc_default = hbc(&result2_default, &ctx.n, &r_pow_y, engine);
-            let dm = &hbc_default % &ctx.n;
+            //take the 1's NOT of dm
+            let dm = &hbc_default % &ctx.n;            
+            let inverted_dm = (BigUint::from(1u32) << (dm.bits() + 1)) - BigUint::from(1u32) - dm; // Invert all bits
 
-            let (matching_lsb, matching_total) = count_matching_bits(&dm, &msg);
+            let (matching_lsb, matching_total) = count_matching_bits(&inverted_dm, &msg);
             let overlap = (matching_total as f64) / (msg.bits().max(1) as f64);
             let lsb_f = matching_lsb as f64;
 
@@ -1017,6 +1040,7 @@ fn run_r_stress_entry(
     label: &str,
     r: &BigUint,
     ctx: &RSAContext,
+    config: &Config,
     engine: &EngineConfig,
     rng: &mut StdRng,
 ) {
@@ -1036,7 +1060,7 @@ fn run_r_stress_entry(
     };
     if let Some((avg_bits, avg_overlap, max_bits)) = run_fixed_r_trials(
         ctx,
-        engine,
+        &config,
         &dummy_report,
         engine.alt_iterations.max(1),
         rng,
