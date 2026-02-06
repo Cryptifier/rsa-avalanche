@@ -105,10 +105,11 @@ fn run_demo(args: Args, config: Config) -> Result<(), Box<dyn Error>> {
     }
 
     let ciphertext = message.modpow(&e, &n);
-    //let recovered = ciphertext.modpow(&d, &n);
-    //if recovered != message {
-    //    return Err("RSA round trip failed".into());
-    //}
+    let recovered = ciphertext.modpow(&d, &n);
+
+    if recovered != message {
+        return Err("RSA round trip failed".into());
+    }
 
     println!("Prime p ({} bits): {p}", bit_length(&p));
     println!("Prime q ({} bits): {q}", bit_length(&q));
@@ -118,7 +119,7 @@ fn run_demo(args: Args, config: Config) -> Result<(), Box<dyn Error>> {
     println!("Private exponent d: {d}");
     println!("Plaintext (hex): {}", to_hex(&message));
     println!("Ciphertext (hex): {}", to_hex(&ciphertext));
-    //println!("Recovered (hex): {}", to_hex(&recovered));
+    println!("Recovered (hex): {}", to_hex(&recovered));
 
     if let Some(seed) = args.seed {
         println!("RNG seed: {seed}");
@@ -927,7 +928,7 @@ fn run_message_trial(
         } else {
             random_message_under_n(engine, &ctx.n, rng)
         };
-        
+
         let ciphertext = msg.modpow(&ctx.e, &ctx.n);
         let recovered = ciphertext.modpow(&ctx.d, &ctx.n);
         if recovered != msg {
@@ -1025,8 +1026,7 @@ fn run_fixed_r_trials(
         .into_par_iter()
         .map(|seed| {
             let mut local_rng = StdRng::seed_from_u64(seed);
-
-            //let k_val = ((((&phi_new / config.key.e.clone()) + BigUint::from(2u32)) * BigUint::from(2u32)) * config.key.e.clone() + BigUint::from(1u32)) % &phi_new;
+            
             let msg = random_message_under_n(engine, &ctx.n, &mut local_rng);
             let ciphertext = msg.modpow(&ctx.e, &ctx.n);
             let result_default = get_larger_number(&ciphertext, &ctx.n, y, true, false);
@@ -1081,10 +1081,7 @@ fn run_fixed_r_trials(
     let n = samples.len() as f64;
 
     let bits_values: Vec<f64> = samples.iter().map(|(b, _, _)| *b).collect();
-    let overlap_values_pct: Vec<f64> = overlaps_pct
-        .lock()
-        .map(|v| v.clone())
-        .unwrap_or_else(|_| Vec::new());
+    let overlap_values_pct: Vec<f64> = samples.iter().map(|(_, o, _)| o * 100.0).collect();
     let max_bits = samples.iter().map(|(_, _, mb)| *mb).max().unwrap_or(0);
 
     let bits_stats = compute_stats(&bits_values).unwrap();
