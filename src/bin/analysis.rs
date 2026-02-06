@@ -135,6 +135,7 @@ fn run_demo(args: Args, config: Config) -> Result<(), Box<dyn Error>> {
     };
 
     if config.engine.test_iterations > 0 {
+        let mut bit_hist = MatchHistogram::new();
         let iterations = config.engine.test_iterations;
         let mut reports = Vec::new();
         let mut next_pct = 10u64;
@@ -153,6 +154,7 @@ fn run_demo(args: Args, config: Config) -> Result<(), Box<dyn Error>> {
                 &msg,
                 config.engine.min_message_trials,
                 &mut rng,
+                &mut bit_hist,
             )?;
             reports.push(report);
 
@@ -318,6 +320,10 @@ fn run_demo(args: Args, config: Config) -> Result<(), Box<dyn Error>> {
                     current += BigUint::one();
                 }
             }
+        }
+
+        if let Err(err) = bit_hist.write_histogram("test_iterations_bit_matches") {
+            println!("Failed to write bit match histogram: {}", err);
         }
     }
 
@@ -900,13 +906,114 @@ struct TestReport {
     message_bits: usize,
 }
 
+#[derive(Clone, Debug, Default)]
+struct MatchHistogram {
+    matches: Vec<u64>,
+    samples: Vec<u64>,
+}
+
+impl MatchHistogram {
+    fn new() -> Self {
+        Self {
+            matches: Vec::new(),
+            samples: Vec::new(),
+        }
+    }
+
+    fn update(&mut self, a: &BigUint, b: &BigUint) {
+        let a_bits = a.to_str_radix(2);
+        let b_bits = b.to_str_radix(2);
+        let min_len = a_bits.len().min(b_bits.len());
+        if min_len == 0 {
+            return;
+        }
+
+        if self.matches.len() < min_len {
+            self.matches.resize(min_len, 0);
+            self.samples.resize(min_len, 0);
+        }
+
+        for i in 0..min_len {
+            let a_bit = a_bits.as_bytes()[a_bits.len() - 1 - i];
+            let b_bit = b_bits.as_bytes()[b_bits.len() - 1 - i];
+            self.samples[i] = self.samples[i].saturating_add(1);
+            if a_bit == b_bit {
+                self.matches[i] = self.matches[i].saturating_add(1);
+            }
+        }
+    }
+
+    fn write_histogram(&self, label: &str) -> Result<(), Box<dyn Error>> {
+        if self.samples.is_empty() {
+            return Ok(());
+        }
+
+        let images_dir = Path::new("./images");
+        fs::create_dir_all(images_dir)?;
+
+        static BIT_HIST_SEQ: AtomicUsize = AtomicUsize::new(0);
+        let seq = BIT_HIST_SEQ.fetch_add(1, Ordering::Relaxed);
+        let safe_label: String = label
+            .chars()
+            .map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '_' })
+            .collect();
+        let file_name = format!("bit_match_frequency_{}_{}.png", safe_label, seq);
+        let path = images_dir.join(file_name);
+
+        let data_len = self.samples.len();
+        let mut bars: Vec<(usize, f64)> = Vec::with_capacity(data_len);
+        for idx in 0..data_len {
+            let sample = self.samples[idx].max(1);
+            let pct = (self.matches[idx] as f64) / (sample as f64) * 100.0;
+            bars.push((idx, pct));
+        }
+
+        let max_pct = bars
+            .iter()
+            .map(|(_, pct)| *pct)
+            .fold(0.0_f64, f64::max)
+            .max(1.0);
+
+        let root = BitMapBackend::new(&path, (1400, 800)).into_drawing_area();
+        root.fill(&WHITE)?;
+        let mut chart = ChartBuilder::on(&root)
+            .caption(
+                format!("Bit Match Frequency (%) ({})", label),
+                ("sans-serif", 30).into_font(),
+            )
+            .margin(20)
+            .x_label_area_size(50)
+            .y_label_area_size(60)
+            .build_cartesian_2d(0usize..data_len, 0f64..max_pct)?;
+
+        chart
+            .configure_mesh()
+            .x_desc("Bit position (LSB=0)")
+            .y_desc("Match frequency %")
+            .y_label_formatter(&|v| format!("{:.0}", v))
+            .draw()?;
+
+        chart.draw_series(bars.iter().map(|(idx, pct)| {
+            Rectangle::new(
+                [(*idx, 0.0), (*idx + 1, *pct)],
+                BLUE.mix(0.7).filled(),
+            )
+        }))?;
+
+        root.present()?;
+        println!("Saved bit match frequency histogram to {}", path.display());
+        Ok(())
+    }
+}
+
 fn run_message_trial(
     ctx: &RSAContext,
-    config: &Config,
+    _config: &Config,
     engine: &EngineConfig,
     message: &BigUint,
     min_message_trials: u64,
     rng: &mut StdRng,
+    histogram: &mut MatchHistogram,
 ) -> Result<TestReport, Box<dyn Error>> {
     let attempts = min_message_trials.max(1);
     let mut best: Option<TestReport> = None;
@@ -958,6 +1065,7 @@ fn run_message_trial(
             let mask = (BigUint::one() << width) - BigUint::one();
             let inverted_dm = &mask ^ &dm_raw; // Invert within current width
             let dm = if engine.invert_bits { inverted_dm } else { dm_raw };
+            histogram.update(&dm, &msg);
 
             let (matching_lsb, matching_total) = count_matching_bits(&dm, &msg);
             //println!("Trial {}, r candidate {}: matching bits LSB run {} / overlap {} of {} bits", attempt_idx + 1, r, matching_lsb, matching_total, msg.bits());
@@ -1021,6 +1129,7 @@ fn run_fixed_r_trials(
     let next_pct = Arc::new(AtomicU64::new(10));
 
     let overlaps_pct = Arc::new(Mutex::new(Vec::with_capacity(iter_count)));
+    let bit_hist = Arc::new(Mutex::new(MatchHistogram::new()));
 
     let samples: Vec<(f64, f64, usize)> = seeds
         .into_par_iter()
@@ -1029,7 +1138,7 @@ fn run_fixed_r_trials(
             
             let msg = random_message_under_n(engine, &ctx.n, &mut local_rng);
             let ciphertext = msg.modpow(&ctx.e, &ctx.n);
-            let result_default = get_larger_number(&ciphertext, &ctx.n, y, true, false);
+            let result_default = get_larger_number(&ciphertext, &ctx.n, y, true, true);
 
             let hbc_result = hbc(&result_default, r, &n_pow_y, engine);
             let recovered_new = if engine.use_rs_decrypt {
@@ -1038,7 +1147,7 @@ fn run_fixed_r_trials(
                 hbc_result
             };
 
-            let result2_default = get_larger_number(&recovered_new, r, y, true, false);
+            let result2_default = get_larger_number(&recovered_new, r, y, true, true);
             let hbc_default = hbc(&result2_default, &ctx.n, &r_pow_y, engine);
             let dm_raw = &hbc_default % &ctx.n;
             let width = dm_raw.bits().max(1);
@@ -1047,6 +1156,9 @@ fn run_fixed_r_trials(
             let dm = if engine.invert_bits { inverted_dm } else { dm_raw };
 
             let (matching_lsb, matching_total) = count_matching_bits(&dm, &msg);
+            if let Ok(mut hist) = bit_hist.lock() {
+                hist.update(&dm, &msg);
+            }
             let overlap = (matching_total as f64) / (msg.bits().max(1) as f64);
             let lsb_f = matching_lsb as f64;
             if let Ok(mut guard) = overlaps_pct.lock() {
@@ -1078,10 +1190,15 @@ fn run_fixed_r_trials(
     if samples.is_empty() {
         return None;
     }
-    let n = samples.len() as f64;
+    let _n = samples.len() as f64;
 
     let bits_values: Vec<f64> = samples.iter().map(|(b, _, _)| *b).collect();
     let overlap_values_pct: Vec<f64> = samples.iter().map(|(_, o, _)| o * 100.0).collect();
+    if let Ok(hist) = bit_hist.lock() {
+        if let Err(err) = hist.write_histogram(&format!("{}_bit_matches", label)) {
+            println!("Failed to write bit match histogram (alt): {}", err);
+        }
+    }
     let max_bits = samples.iter().map(|(_, _, mb)| *mb).max().unwrap_or(0);
 
     let bits_stats = compute_stats(&bits_values).unwrap();
