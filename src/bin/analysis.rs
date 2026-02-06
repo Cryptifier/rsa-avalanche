@@ -10,12 +10,13 @@ use std::{
     path::Path,
     sync::{
         atomic::{AtomicU64, AtomicUsize, Ordering},
-        Arc,
+        Arc, Mutex,
     },
     time::{Duration, Instant},
 };
 
 use rayon::prelude::*;
+use plotters::prelude::*;
 
 use clap::Parser;
 use num_bigint::{BigInt, BigUint};
@@ -239,6 +240,9 @@ fn run_demo(args: Args, config: Config) -> Result<(), Box<dyn Error>> {
                 threshold,
                 over_threshold_count
             );
+            if let Err(err) = plot_overlap_histogram(&overlaps_pct, "test_iterations") {
+                println!("Failed to write overlap histogram: {}", err);
+            }
         } else {
             println!("Matching overlap stats: no samples");
         }
@@ -260,6 +264,7 @@ fn run_demo(args: Args, config: Config) -> Result<(), Box<dyn Error>> {
                     &ctx,
                     &config,
                     best,
+                    "best_r",
                     config.engine.alt_iterations,
                     &mut rng,
                 ) {
@@ -275,6 +280,7 @@ fn run_demo(args: Args, config: Config) -> Result<(), Box<dyn Error>> {
                     &ctx,
                     &config,
                     worst,
+                    "worst_r",
                     config.engine.alt_iterations,
                     &mut rng,
                 ) {
@@ -530,6 +536,68 @@ fn compute_stats(values: &[f64]) -> Option<StatSummary> {
         max,
         count,
     })
+}
+
+fn plot_overlap_histogram(overlaps_pct: &[f64], label: &str) -> Result<(), Box<dyn Error>> {
+    if overlaps_pct.is_empty() {
+        return Ok(());
+    }
+
+    let images_dir = Path::new("./images");
+    fs::create_dir_all(images_dir)?;
+
+    static HIST_SEQ: AtomicUsize = AtomicUsize::new(0);
+    let seq = HIST_SEQ.fetch_add(1, Ordering::Relaxed);
+    let safe_label: String = label
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '_' })
+        .collect();
+    let file_name = format!("overlap_histogram_{}_{}.png", safe_label, seq);
+    let path = images_dir.join(file_name);
+
+    let bin_count = 50usize;
+    let min_value = 0.0f64;
+    let max_value = 100.0f64;
+    let bin_width = (max_value - min_value) / bin_count as f64;
+    let mut counts = vec![0u32; bin_count];
+    for &value in overlaps_pct {
+        let clamped = value.clamp(min_value, max_value);
+        let mut idx = ((clamped - min_value) / bin_width) as usize;
+        if idx >= bin_count {
+            idx = bin_count - 1;
+        }
+        counts[idx] = counts[idx].saturating_add(1);
+    }
+
+    let max_count = counts.iter().copied().max().unwrap_or(0).max(1);
+
+    let root = BitMapBackend::new(&path, (1200, 800)).into_drawing_area();
+    root.fill(&WHITE)?;
+    let mut chart = ChartBuilder::on(&root)
+        .caption(
+            format!("Overlap Percentage Histogram ({})", label),
+            ("sans-serif", 30).into_font(),
+        )
+        .margin(20)
+        .x_label_area_size(40)
+        .y_label_area_size(50)
+        .build_cartesian_2d(min_value..max_value, 0u32..max_count)?;
+
+    chart
+        .configure_mesh()
+        .x_desc("Overlap %")
+        .y_desc("Count")
+        .draw()?;
+
+    chart.draw_series((0..bin_count).map(|idx| {
+        let x0 = min_value + (idx as f64) * bin_width;
+        let x1 = x0 + bin_width;
+        Rectangle::new([(x0, 0), (x1, counts[idx])], BLUE.filled())
+    }))?;
+
+    root.present()?;
+    println!("Saved overlap histogram to {}", path.display());
+    Ok(())
 }
 
 fn select_message(args_message: Option<String>, engine: &EngineConfig, rng: &mut StdRng) -> BigUint {
@@ -922,6 +990,7 @@ fn run_fixed_r_trials(
     ctx: &RSAContext,
     config: &Config,
     r_report: &TestReport,
+    label: &str,
     iterations: u64,
     rng: &mut StdRng,
 ) -> Option<(f64, f64, usize)> {
@@ -952,6 +1021,8 @@ fn run_fixed_r_trials(
     let done = Arc::new(AtomicU64::new(0));
     let next_pct = Arc::new(AtomicU64::new(10));
 
+    let overlaps_pct = Arc::new(Mutex::new(Vec::with_capacity(iter_count)));
+
     let samples: Vec<(f64, f64, usize)> = seeds
         .into_par_iter()
         .map(|seed| {
@@ -980,6 +1051,9 @@ fn run_fixed_r_trials(
             let (matching_lsb, matching_total) = count_matching_bits(&dm, &msg);
             let overlap = (matching_total as f64) / (msg.bits().max(1) as f64);
             let lsb_f = matching_lsb as f64;
+            if let Ok(mut guard) = overlaps_pct.lock() {
+                guard.push(overlap * 100.0);
+            }
 
             let finished = done.fetch_add(1, Ordering::Relaxed) + 1;
             let pct = finished.saturating_mul(100) / iterations;
@@ -1009,11 +1083,20 @@ fn run_fixed_r_trials(
     let n = samples.len() as f64;
 
     let bits_values: Vec<f64> = samples.iter().map(|(b, _, _)| *b).collect();
-    let overlap_values_pct: Vec<f64> = samples.iter().map(|(_, o, _)| o * 100.0).collect();
+    let overlap_values_pct: Vec<f64> = overlaps_pct
+        .lock()
+        .map(|v| v.clone())
+        .unwrap_or_else(|_| Vec::new());
     let max_bits = samples.iter().map(|(_, _, mb)| *mb).max().unwrap_or(0);
 
     let bits_stats = compute_stats(&bits_values).unwrap();
-    let overlap_stats = compute_stats(&overlap_values_pct).unwrap();
+    let overlap_stats = compute_stats(&overlap_values_pct).unwrap_or_else(|| StatSummary {
+        mean: 0.0,
+        stddev: 0.0,
+        min: 0.0,
+        max: 0.0,
+        count: 0,
+    });
 
     let threshold = engine.overlap_report_threshold;
     let over_threshold_count = overlap_values_pct.iter().filter(|v| **v >= threshold).count();
@@ -1032,6 +1115,10 @@ fn run_fixed_r_trials(
         over_threshold_count,
         max_bits
     );
+
+    if let Err(err) = plot_overlap_histogram(&overlap_values_pct, label) {
+        println!("Failed to write overlap histogram: {}", err);
+    }
 
     Some((bits_stats.mean, overlap_stats.mean, max_bits))
 }
@@ -1062,6 +1149,7 @@ fn run_r_stress_entry(
         ctx,
         &config,
         &dummy_report,
+        label,
         engine.alt_iterations.max(1),
         rng,
     ) {
