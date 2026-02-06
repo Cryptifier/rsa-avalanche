@@ -555,7 +555,7 @@ fn plot_overlap_histogram(overlaps_pct: &[f64], label: &str) -> Result<(), Box<d
     let file_name = format!("overlap_histogram_{}_{}.png", safe_label, seq);
     let path = images_dir.join(file_name);
 
-    let bin_count = 50usize;
+    let bin_count = 150usize;
     let min_value = 0.0f64;
     let max_value = 100.0f64;
     let bin_width = (max_value - min_value) / bin_count as f64;
