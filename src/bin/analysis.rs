@@ -358,6 +358,8 @@ struct MessageConfig {
 struct EngineConfig {
     #[serde(default = "default_base_convert")]
     base_convert: bool,
+    #[serde(default = "default_invert_bits")]
+    invert_bits: bool,
     #[serde(default = "default_rabin_exponent")]
     rabin_exponent: u64,
     #[serde(default = "default_min_message_trials")]
@@ -426,6 +428,7 @@ impl Default for EngineConfig {
     fn default() -> Self {
         Self {
             base_convert: default_base_convert(),
+            invert_bits: default_invert_bits(),
             rabin_exponent: default_rabin_exponent(),
             min_message_trials: default_min_message_trials(),
             overlap_report_threshold: default_overlap_report_threshold(),
@@ -649,6 +652,10 @@ fn default_message_bits() -> u32 {
 
 fn default_base_convert() -> bool {
     true
+}
+
+fn default_invert_bits() -> bool {
+    false
 }
 
 fn default_rabin_exponent() -> u64 {
@@ -921,23 +928,17 @@ fn run_message_trial(
             random_message_under_n(engine, &ctx.n, rng)
         };
         
-        for (r, factors) in &candidates {
-            //println!("factors for r {}: {:?}", r, factors);
-            let phi_new = compute_totient(factors);
-            let k_val = ((((&phi_new / config.key.e.clone()) + BigUint::from(2u32)) * BigUint::from(2u32)) * config.key.e.clone() + BigUint::from(1u32)) % &phi_new;
-            
-            let ciphertext = msg.modpow(&k_val, &ctx.n);
-            let result_default = get_larger_number(&ciphertext, &ctx.n, y, true, false);
-            //let recovered = ciphertext.modpow(&ctx.d, &ctx.n);
-            //if recovered != msg {
-            //    return Err("RSA round trip failed".into());
-            //}
+        let ciphertext = msg.modpow(&ctx.e, &ctx.n);
+        let recovered = ciphertext.modpow(&ctx.d, &ctx.n);
+        if recovered != msg {
+            return Err("RSA round trip failed".into());
+        }
 
-            //let d_new2 = mod_inverse(&k_val, &phi_new).unwrap_or(BigUint::zero());
-            
-            //Reduce k_val mod phi_new before inverse.
-            let Some(d_new) = mod_inverse(&(&k_val % &phi_new), &phi_new) else {
-                //println!("Skipping r candidate {} due to non-invertible k_val {}, phi_new {}", r, &k_val, &phi_new);
+        let result_default = get_larger_number(&ciphertext, &ctx.n, y, true, false);
+
+        for (r, factors) in &candidates {
+            let phi_new = compute_totient(factors);
+            let Some(d_new) = mod_inverse(&ctx.e, &phi_new) else {
                 continue;
             };
 
@@ -951,9 +952,11 @@ fn run_message_trial(
             let r_pow_y = r.pow(y);
             let result2_default = get_larger_number(&recovered_new, r, y, true, false);
             let hbc_default = hbc(&result2_default, &ctx.n, &r_pow_y, engine);
-            //take the 1's NOT of dm
-            let dm = &hbc_default % &ctx.n;            
-            let inverted_dm = (BigUint::from(1u32) << (dm.bits() + 1)) - BigUint::from(1u32) - &dm; // Invert all bits
+            let dm_raw = &hbc_default % &ctx.n;
+            let width = dm_raw.bits().max(1);
+            let mask = (BigUint::one() << width) - BigUint::one();
+            let inverted_dm = &mask ^ &dm_raw; // Invert within current width
+            let dm = if engine.invert_bits { inverted_dm } else { dm_raw };
 
             let (matching_lsb, matching_total) = count_matching_bits(&dm, &msg);
             //println!("Trial {}, r candidate {}: matching bits LSB run {} / overlap {} of {} bits", attempt_idx + 1, r, matching_lsb, matching_total, msg.bits());
@@ -1005,12 +1008,7 @@ fn run_fixed_r_trials(
     let r = &r_report.best_r;
     let r_pow_y = r.pow(y);
     let phi_new = compute_totient(&r_report.factors);
-    let k_val = ((((&phi_new / config.key.e.clone()) + BigUint::from(2u32)) * BigUint::from(2u32)) * config.key.e.clone() + BigUint::from(1u32)) % &phi_new;
-    let Some(d_new2) = mod_inverse(&(&k_val % &phi_new), &phi_new) else {
-        println!("Skipping r candidate {} due to non-invertible k_val {}, phi_new {}", r, &k_val, &phi_new);
-        return None;        
-    };
-    //let d_new = mod_inverse(&ctx.e, &phi_new)?;
+    let d_new = mod_inverse(&ctx.e, &phi_new)?;
 
     let iter_count = iterations as usize;
     let mut seeds = Vec::with_capacity(iter_count);
@@ -1030,23 +1028,23 @@ fn run_fixed_r_trials(
 
             //let k_val = ((((&phi_new / config.key.e.clone()) + BigUint::from(2u32)) * BigUint::from(2u32)) * config.key.e.clone() + BigUint::from(1u32)) % &phi_new;
             let msg = random_message_under_n(engine, &ctx.n, &mut local_rng);
-
-            let ciphertext = msg.modpow(&k_val, &ctx.n);
-            
+            let ciphertext = msg.modpow(&ctx.e, &ctx.n);
             let result_default = get_larger_number(&ciphertext, &ctx.n, y, true, false);
 
             let hbc_result = hbc(&result_default, r, &n_pow_y, engine);
             let recovered_new = if engine.use_rs_decrypt {
-                hbc_result.modpow(&d_new2, r)
+                hbc_result.modpow(&d_new, r)
             } else {
                 hbc_result
             };
 
             let result2_default = get_larger_number(&recovered_new, r, y, true, false);
             let hbc_default = hbc(&result2_default, &ctx.n, &r_pow_y, engine);
-            //take the 1's NOT of dm
-            let dm = &hbc_default % &ctx.n;            
-            let inverted_dm = (BigUint::from(1u32) << (dm.bits() + 1)) - BigUint::from(1u32) - &dm; // Invert all bits
+            let dm_raw = &hbc_default % &ctx.n;
+            let width = dm_raw.bits().max(1);
+            let mask = (BigUint::one() << width) - BigUint::one();
+            let inverted_dm = &mask ^ &dm_raw; // Invert within current width
+            let dm = if engine.invert_bits { inverted_dm } else { dm_raw };
 
             let (matching_lsb, matching_total) = count_matching_bits(&dm, &msg);
             let overlap = (matching_total as f64) / (msg.bits().max(1) as f64);
