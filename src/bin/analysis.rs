@@ -885,9 +885,9 @@ fn run_message_trial(
             let hbc_default = hbc(&result2_default, &ctx.n, &r_pow_y, engine);
             //take the 1's NOT of dm
             let dm = &hbc_default % &ctx.n;            
-            let inverted_dm = (BigUint::from(1u32) << (dm.bits() + 1)) - BigUint::from(1u32) - dm; // Invert all bits
+            let inverted_dm = (BigUint::from(1u32) << (dm.bits() + 1)) - BigUint::from(1u32) - &dm; // Invert all bits
 
-            let (matching_lsb, matching_total) = count_matching_bits(&inverted_dm, &msg);
+            let (matching_lsb, matching_total) = count_matching_bits(&dm, &msg);
             //println!("Trial {}, r candidate {}: matching bits LSB run {} / overlap {} of {} bits", attempt_idx + 1, r, matching_lsb, matching_total, msg.bits());
             let report = TestReport {
                 best_r: r.clone(),
@@ -975,9 +975,9 @@ fn run_fixed_r_trials(
             let hbc_default = hbc(&result2_default, &ctx.n, &r_pow_y, engine);
             //take the 1's NOT of dm
             let dm = &hbc_default % &ctx.n;            
-            let inverted_dm = (BigUint::from(1u32) << (dm.bits() + 1)) - BigUint::from(1u32) - dm; // Invert all bits
+            let inverted_dm = (BigUint::from(1u32) << (dm.bits() + 1)) - BigUint::from(1u32) - &dm; // Invert all bits
 
-            let (matching_lsb, matching_total) = count_matching_bits(&inverted_dm, &msg);
+            let (matching_lsb, matching_total) = count_matching_bits(&dm, &msg);
             let overlap = (matching_total as f64) / (msg.bits().max(1) as f64);
             let lsb_f = matching_lsb as f64;
 
