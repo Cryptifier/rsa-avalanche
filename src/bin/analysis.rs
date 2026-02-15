@@ -26,6 +26,8 @@ use rand::rngs::StdRng;
 use rand::{seq::SliceRandom, Rng, RngCore, SeedableRng};
 use serde::Deserialize;
 
+//use rsademo::dsp::{find_ramp_signals, ramp_signal_strength};
+
 #[derive(Parser, Debug)]
 #[command(name = "analysis", about = "Lightweight RSA round-trip demo", author, version)]
 struct Args {
@@ -1843,4 +1845,32 @@ fn decompose_big(mut value: BigUint) -> (BigUint, u32) {
         s += 1;
     }
     (value, s)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rsademo::dsp::{find_ramp_signals, ramp_signal_strength};
+
+    #[test]
+    fn test_ramp_detect () {
+        let mut hist = MatchHistogram::new();
+        let msg1 = BigUint::from(0b11110000u8);
+        let msg2 = BigUint::from(0b11100000u8);
+        hist.update(&msg1, &msg2);
+    }
+
+    #[test]
+    fn test_analysis_detect_ramp() {
+        // Sample dataset: mean is 10, ramp should be 11, 12, 13
+        let bins = vec![8, 9, 10, 11, 12, 13, 7, 8];
+        let ramps = find_ramp_signals(&bins, 3, 0);
+        println!("Detected ramps in analysis: {:?}", ramps);
+        let strength = ramp_signal_strength(&ramps);
+        println!("Signal strength in analysis: {}", strength);
+
+        // Check that at least one ramp is detected and signal strength is correct
+        assert!(!ramps.is_empty());
+        assert!(strength > 0);
+    }
 }
