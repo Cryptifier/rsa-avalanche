@@ -10,12 +10,13 @@ use std::{
     path::Path,
     sync::{
         atomic::{AtomicU64, AtomicUsize, Ordering},
-        Arc,
+        Arc, Mutex,
     },
     time::{Duration, Instant},
 };
 
 use rayon::prelude::*;
+use plotters::prelude::*;
 
 use clap::Parser;
 use num_bigint::{BigInt, BigUint};
@@ -134,6 +135,7 @@ fn run_demo(args: Args, config: Config) -> Result<(), Box<dyn Error>> {
     };
 
     if config.engine.test_iterations > 0 {
+        let mut bit_hist = MatchHistogram::new();
         let iterations = config.engine.test_iterations;
         let mut reports = Vec::new();
         let mut next_pct = 10u64;
@@ -147,10 +149,12 @@ fn run_demo(args: Args, config: Config) -> Result<(), Box<dyn Error>> {
             };
             let report = run_message_trial(
                 &ctx,
+                &config,
                 &config.engine,
                 &msg,
                 config.engine.min_message_trials,
                 &mut rng,
+                &mut bit_hist,
             )?;
             reports.push(report);
 
@@ -239,6 +243,9 @@ fn run_demo(args: Args, config: Config) -> Result<(), Box<dyn Error>> {
                 threshold,
                 over_threshold_count
             );
+            if let Err(err) = plot_overlap_histogram(&overlaps_pct, "test_iterations") {
+                println!("Failed to write overlap histogram: {}", err);
+            }
         } else {
             println!("Matching overlap stats: no samples");
         }
@@ -258,8 +265,9 @@ fn run_demo(args: Args, config: Config) -> Result<(), Box<dyn Error>> {
             if let Some(best) = &best_match {
                 if let Some((avg_bits, avg_overlap, max_bits)) = run_fixed_r_trials(
                     &ctx,
-                    &config.engine,
+                    &config,
                     best,
+                    "best_r",
                     config.engine.alt_iterations,
                     &mut rng,
                 ) {
@@ -273,8 +281,9 @@ fn run_demo(args: Args, config: Config) -> Result<(), Box<dyn Error>> {
             if let Some(worst) = &worst_match {
                 if let Some((avg_bits, avg_overlap, max_bits)) = run_fixed_r_trials(
                     &ctx,
-                    &config.engine,
+                    &config,
                     worst,
+                    "worst_r",
                     config.engine.alt_iterations,
                     &mut rng,
                 ) {
@@ -294,7 +303,7 @@ fn run_demo(args: Args, config: Config) -> Result<(), Box<dyn Error>> {
                     if is_probable_prime_big(&r) {
                         continue;
                     }
-                    run_r_stress_entry("r_use_list", &r, &ctx, &config.engine, &mut rng);
+                    run_r_stress_entry("r_use_list", &r, &ctx, &config, &config.engine, &mut rng);
                 }
             }
         }
@@ -306,11 +315,15 @@ fn run_demo(args: Args, config: Config) -> Result<(), Box<dyn Error>> {
                 let mut current = start.clone();
                 while &current <= end {
                     if !is_probable_prime_big(&current) {
-                        run_r_stress_entry("r_stress", &current, &ctx, &config.engine, &mut rng);
+                        run_r_stress_entry("r_stress", &current, &ctx, &config, &config.engine, &mut rng);
                     }
                     current += BigUint::one();
                 }
             }
+        }
+
+        if let Err(err) = bit_hist.write_histogram("test_iterations_bit_matches") {
+            println!("Failed to write bit match histogram: {}", err);
         }
     }
 
@@ -352,6 +365,8 @@ struct MessageConfig {
 struct EngineConfig {
     #[serde(default = "default_base_convert")]
     base_convert: bool,
+    #[serde(default = "default_invert_bits")]
+    invert_bits: bool,
     #[serde(default = "default_rabin_exponent")]
     rabin_exponent: u64,
     #[serde(default = "default_min_message_trials")]
@@ -420,6 +435,7 @@ impl Default for EngineConfig {
     fn default() -> Self {
         Self {
             base_convert: default_base_convert(),
+            invert_bits: default_invert_bits(),
             rabin_exponent: default_rabin_exponent(),
             min_message_trials: default_min_message_trials(),
             overlap_report_threshold: default_overlap_report_threshold(),
@@ -532,6 +548,68 @@ fn compute_stats(values: &[f64]) -> Option<StatSummary> {
     })
 }
 
+fn plot_overlap_histogram(overlaps_pct: &[f64], label: &str) -> Result<(), Box<dyn Error>> {
+    if overlaps_pct.is_empty() {
+        return Ok(());
+    }
+
+    let images_dir = Path::new("./images");
+    fs::create_dir_all(images_dir)?;
+
+    static HIST_SEQ: AtomicUsize = AtomicUsize::new(0);
+    let seq = HIST_SEQ.fetch_add(1, Ordering::Relaxed);
+    let safe_label: String = label
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '_' })
+        .collect();
+    let file_name = format!("overlap_histogram_{}_{}.png", safe_label, seq);
+    let path = images_dir.join(file_name);
+
+    let bin_count = 150usize;
+    let min_value = 0.0f64;
+    let max_value = 100.0f64;
+    let bin_width = (max_value - min_value) / bin_count as f64;
+    let mut counts = vec![0u32; bin_count];
+    for &value in overlaps_pct {
+        let clamped = value.clamp(min_value, max_value);
+        let mut idx = ((clamped - min_value) / bin_width) as usize;
+        if idx >= bin_count {
+            idx = bin_count - 1;
+        }
+        counts[idx] = counts[idx].saturating_add(1);
+    }
+
+    let max_count = counts.iter().copied().max().unwrap_or(0).max(1);
+
+    let root = BitMapBackend::new(&path, (1200, 800)).into_drawing_area();
+    root.fill(&WHITE)?;
+    let mut chart = ChartBuilder::on(&root)
+        .caption(
+            format!("Overlap Percentage Histogram ({})", label),
+            ("sans-serif", 30).into_font(),
+        )
+        .margin(20)
+        .x_label_area_size(40)
+        .y_label_area_size(50)
+        .build_cartesian_2d(min_value..max_value, 0u32..max_count)?;
+
+    chart
+        .configure_mesh()
+        .x_desc("Overlap %")
+        .y_desc("Count")
+        .draw()?;
+
+    chart.draw_series((0..bin_count).map(|idx| {
+        let x0 = min_value + (idx as f64) * bin_width;
+        let x1 = x0 + bin_width;
+        Rectangle::new([(x0, 0), (x1, counts[idx])], BLUE.filled())
+    }))?;
+
+    root.present()?;
+    println!("Saved overlap histogram to {}", path.display());
+    Ok(())
+}
+
 fn select_message(args_message: Option<String>, engine: &EngineConfig, rng: &mut StdRng) -> BigUint {
     if let Some(explicit) = args_message {
         return BigUint::from_bytes_be(explicit.as_bytes());
@@ -581,6 +659,10 @@ fn default_message_bits() -> u32 {
 
 fn default_base_convert() -> bool {
     true
+}
+
+fn default_invert_bits() -> bool {
+    false
 }
 
 fn default_rabin_exponent() -> u64 {
@@ -824,12 +906,114 @@ struct TestReport {
     message_bits: usize,
 }
 
+#[derive(Clone, Debug, Default)]
+struct MatchHistogram {
+    matches: Vec<u64>,
+    samples: Vec<u64>,
+}
+
+impl MatchHistogram {
+    fn new() -> Self {
+        Self {
+            matches: Vec::new(),
+            samples: Vec::new(),
+        }
+    }
+
+    fn update(&mut self, a: &BigUint, b: &BigUint) {
+        let a_bits = a.to_str_radix(2);
+        let b_bits = b.to_str_radix(2);
+        let min_len = a_bits.len().min(b_bits.len());
+        if min_len == 0 {
+            return;
+        }
+
+        if self.matches.len() < min_len {
+            self.matches.resize(min_len, 0);
+            self.samples.resize(min_len, 0);
+        }
+
+        for i in 0..min_len {
+            let a_bit = a_bits.as_bytes()[a_bits.len() - 1 - i];
+            let b_bit = b_bits.as_bytes()[b_bits.len() - 1 - i];
+            self.samples[i] = self.samples[i].saturating_add(1);
+            if a_bit == b_bit {
+                self.matches[i] = self.matches[i].saturating_add(1);
+            }
+        }
+    }
+
+    fn write_histogram(&self, label: &str) -> Result<(), Box<dyn Error>> {
+        if self.samples.is_empty() {
+            return Ok(());
+        }
+
+        let images_dir = Path::new("./images");
+        fs::create_dir_all(images_dir)?;
+
+        static BIT_HIST_SEQ: AtomicUsize = AtomicUsize::new(0);
+        let seq = BIT_HIST_SEQ.fetch_add(1, Ordering::Relaxed);
+        let safe_label: String = label
+            .chars()
+            .map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '_' })
+            .collect();
+        let file_name = format!("bit_match_frequency_{}_{}.png", safe_label, seq);
+        let path = images_dir.join(file_name);
+
+        let data_len = self.samples.len();
+        let mut bars: Vec<(usize, f64)> = Vec::with_capacity(data_len);
+        for idx in 0..data_len {
+            let sample = self.samples[idx].max(1);
+            let pct = (self.matches[idx] as f64) / (sample as f64) * 100.0;
+            bars.push((idx, pct));
+        }
+
+        let max_pct = bars
+            .iter()
+            .map(|(_, pct)| *pct)
+            .fold(0.0_f64, f64::max)
+            .max(1.0);
+
+        let root = BitMapBackend::new(&path, (1400, 800)).into_drawing_area();
+        root.fill(&WHITE)?;
+        let mut chart = ChartBuilder::on(&root)
+            .caption(
+                format!("Bit Match Frequency (%) ({})", label),
+                ("sans-serif", 30).into_font(),
+            )
+            .margin(20)
+            .x_label_area_size(50)
+            .y_label_area_size(60)
+            .build_cartesian_2d(0usize..data_len, 0f64..max_pct)?;
+
+        chart
+            .configure_mesh()
+            .x_desc("Bit position (LSB=0)")
+            .y_desc("Match frequency %")
+            .y_label_formatter(&|v| format!("{:.0}", v))
+            .draw()?;
+
+        chart.draw_series(bars.iter().map(|(idx, pct)| {
+            Rectangle::new(
+                [(*idx, 0.0), (*idx + 1, *pct)],
+                BLUE.mix(0.7).filled(),
+            )
+        }))?;
+
+        root.present()?;
+        println!("Saved bit match frequency histogram to {}", path.display());
+        Ok(())
+    }
+}
+
 fn run_message_trial(
     ctx: &RSAContext,
+    _config: &Config,
     engine: &EngineConfig,
     message: &BigUint,
     min_message_trials: u64,
     rng: &mut StdRng,
+    histogram: &mut MatchHistogram,
 ) -> Result<TestReport, Box<dyn Error>> {
     let attempts = min_message_trials.max(1);
     let mut best: Option<TestReport> = None;
@@ -876,9 +1060,15 @@ fn run_message_trial(
             let r_pow_y = r.pow(y);
             let result2_default = get_larger_number(&recovered_new, r, y, true, false);
             let hbc_default = hbc(&result2_default, &ctx.n, &r_pow_y, engine);
-            let dm = &hbc_default % &ctx.n;
+            let dm_raw = &hbc_default % &ctx.n;
+            let width = dm_raw.bits().max(1);
+            let mask = (BigUint::one() << width) - BigUint::one();
+            let inverted_dm = &mask ^ &dm_raw; // Invert within current width
+            let dm = if engine.invert_bits { inverted_dm } else { dm_raw };
+            histogram.update(&dm, &msg);
 
             let (matching_lsb, matching_total) = count_matching_bits(&dm, &msg);
+            //println!("Trial {}, r candidate {}: matching bits LSB run {} / overlap {} of {} bits", attempt_idx + 1, r, matching_lsb, matching_total, msg.bits());
             let report = TestReport {
                 best_r: r.clone(),
                 factors: factors.clone(),
@@ -892,6 +1082,7 @@ fn run_message_trial(
                 .map(|b| (matching_total, matching_lsb) > (b.matching_total, b.matching_lsb))
                 .unwrap_or(true)
             {
+                //println!("Best candidate updated: r = {}, factors = {:?}, matching bits LSB run {} / overlap {} of {} bits", r, factors, matching_lsb, matching_total, msg.bits());
                 best = Some(report.clone());
             }
             if worst
@@ -909,14 +1100,17 @@ fn run_message_trial(
 
 fn run_fixed_r_trials(
     ctx: &RSAContext,
-    engine: &EngineConfig,
+    config: &Config,
     r_report: &TestReport,
+    label: &str,
     iterations: u64,
     rng: &mut StdRng,
 ) -> Option<(f64, f64, usize)> {
     if iterations == 0 {
         return None;
     }
+
+    let engine = &config.engine;
 
     let y = engine.rabin_exponent as u32;
     let n_pow_y = ctx.n.pow(y);
@@ -934,14 +1128,17 @@ fn run_fixed_r_trials(
     let done = Arc::new(AtomicU64::new(0));
     let next_pct = Arc::new(AtomicU64::new(10));
 
+    let overlaps_pct = Arc::new(Mutex::new(Vec::with_capacity(iter_count)));
+    let bit_hist = Arc::new(Mutex::new(MatchHistogram::new()));
+
     let samples: Vec<(f64, f64, usize)> = seeds
         .into_par_iter()
         .map(|seed| {
             let mut local_rng = StdRng::seed_from_u64(seed);
-
+            
             let msg = random_message_under_n(engine, &ctx.n, &mut local_rng);
             let ciphertext = msg.modpow(&ctx.e, &ctx.n);
-            let result_default = get_larger_number(&ciphertext, &ctx.n, y, true, false);
+            let result_default = get_larger_number(&ciphertext, &ctx.n, y, true, true);
 
             let hbc_result = hbc(&result_default, r, &n_pow_y, engine);
             let recovered_new = if engine.use_rs_decrypt {
@@ -950,13 +1147,23 @@ fn run_fixed_r_trials(
                 hbc_result
             };
 
-            let result2_default = get_larger_number(&recovered_new, r, y, true, false);
+            let result2_default = get_larger_number(&recovered_new, r, y, true, true);
             let hbc_default = hbc(&result2_default, &ctx.n, &r_pow_y, engine);
-            let dm = &hbc_default % &ctx.n;
+            let dm_raw = &hbc_default % &ctx.n;
+            let width = dm_raw.bits().max(1);
+            let mask = (BigUint::one() << width) - BigUint::one();
+            let inverted_dm = &mask ^ &dm_raw; // Invert within current width
+            let dm = if engine.invert_bits { inverted_dm } else { dm_raw };
 
             let (matching_lsb, matching_total) = count_matching_bits(&dm, &msg);
+            if let Ok(mut hist) = bit_hist.lock() {
+                hist.update(&dm, &msg);
+            }
             let overlap = (matching_total as f64) / (msg.bits().max(1) as f64);
             let lsb_f = matching_lsb as f64;
+            if let Ok(mut guard) = overlaps_pct.lock() {
+                guard.push(overlap * 100.0);
+            }
 
             let finished = done.fetch_add(1, Ordering::Relaxed) + 1;
             let pct = finished.saturating_mul(100) / iterations;
@@ -983,14 +1190,25 @@ fn run_fixed_r_trials(
     if samples.is_empty() {
         return None;
     }
-    let n = samples.len() as f64;
+    let _n = samples.len() as f64;
 
     let bits_values: Vec<f64> = samples.iter().map(|(b, _, _)| *b).collect();
     let overlap_values_pct: Vec<f64> = samples.iter().map(|(_, o, _)| o * 100.0).collect();
+    if let Ok(hist) = bit_hist.lock() {
+        if let Err(err) = hist.write_histogram(&format!("{}_bit_matches", label)) {
+            println!("Failed to write bit match histogram (alt): {}", err);
+        }
+    }
     let max_bits = samples.iter().map(|(_, _, mb)| *mb).max().unwrap_or(0);
 
     let bits_stats = compute_stats(&bits_values).unwrap();
-    let overlap_stats = compute_stats(&overlap_values_pct).unwrap();
+    let overlap_stats = compute_stats(&overlap_values_pct).unwrap_or_else(|| StatSummary {
+        mean: 0.0,
+        stddev: 0.0,
+        min: 0.0,
+        max: 0.0,
+        count: 0,
+    });
 
     let threshold = engine.overlap_report_threshold;
     let over_threshold_count = overlap_values_pct.iter().filter(|v| **v >= threshold).count();
@@ -1010,6 +1228,10 @@ fn run_fixed_r_trials(
         max_bits
     );
 
+    if let Err(err) = plot_overlap_histogram(&overlap_values_pct, label) {
+        println!("Failed to write overlap histogram: {}", err);
+    }
+
     Some((bits_stats.mean, overlap_stats.mean, max_bits))
 }
 
@@ -1017,6 +1239,7 @@ fn run_r_stress_entry(
     label: &str,
     r: &BigUint,
     ctx: &RSAContext,
+    config: &Config,
     engine: &EngineConfig,
     rng: &mut StdRng,
 ) {
@@ -1036,8 +1259,9 @@ fn run_r_stress_entry(
     };
     if let Some((avg_bits, avg_overlap, max_bits)) = run_fixed_r_trials(
         ctx,
-        engine,
+        &config,
         &dummy_report,
+        label,
         engine.alt_iterations.max(1),
         rng,
     ) {
