@@ -26,7 +26,7 @@ use rand::rngs::StdRng;
 use rand::{seq::SliceRandom, Rng, RngCore, SeedableRng};
 use serde::Deserialize;
 
-//use rsademo::dsp::{find_ramp_signals, ramp_signal_strength};
+use rsademo::dsp::{find_ramp_signals_f64, ramp_signal_strength_f64};
 
 #[derive(Parser, Debug)]
 #[command(name = "analysis", about = "Lightweight RSA round-trip demo", author, version)]
@@ -64,7 +64,7 @@ fn run_demo(args: Args, config: Config) -> Result<(), Box<dyn Error>> {
         None => StdRng::from_rng(rand::thread_rng())?,
     };
 
-    let (p, q): (BigUint, BigUint) = if config.key.generate {
+    let (p, q): (BigUint, BigUint) = if config.rsa_keypair.generate {
         let p = random_prime_with_bits(args.bits, &mut rng);
         let mut q = random_prime_with_bits(args.bits, &mut rng);
         while q == p {
@@ -73,15 +73,15 @@ fn run_demo(args: Args, config: Config) -> Result<(), Box<dyn Error>> {
         (BigUint::from(p), BigUint::from(q))
     } else {
         let p = config
-            .key
+            .rsa_keypair
             .p
             .clone()
-            .ok_or("config.key.p must be set when generate is false")?;
+            .ok_or("config.rsa_keypair.p must be set when generate is false")?;
         let q = config
-            .key
+            .rsa_keypair
             .q
             .clone()
-            .ok_or("config.key.q must be set when generate is false")?;
+            .ok_or("config.rsa_keypair.q must be set when generate is false")?;
         (p, q)
     };
 
@@ -92,7 +92,7 @@ fn run_demo(args: Args, config: Config) -> Result<(), Box<dyn Error>> {
     let start_e = if args.public_exponent != 65_537 {
         args.public_exponent
     } else {
-        config.key.e
+        config.rsa_keypair.e
     };
     let e = choose_exponent(start_e, &phi);
     let d = mod_inverse(&e, &phi)
@@ -329,13 +329,19 @@ fn run_demo(args: Args, config: Config) -> Result<(), Box<dyn Error>> {
         }
     }
 
+    if config.engine.enciphered_export_enable {
+        if let Err(err) = run_enciphered_export(&ctx, &config.engine, &mut rng) {
+            println!("Enciphered export failed: {}", err);
+        }
+    }
+
     Ok(())
 }
 
 #[derive(Debug, Deserialize, Clone)]
 struct Config {
-    #[serde(default)]
-    key: KeyConfig,
+    #[serde(default, rename = "rsa_keypair", alias = "key", alias = "keys")]
+    rsa_keypair: KeyConfig,
     #[serde(default)]
     engine: EngineConfig,
 }
@@ -411,12 +417,32 @@ struct EngineConfig {
     reuse_r_candidates_append_only: bool,
     #[serde(default)]
     message: MessageConfig,
+    #[serde(default = "default_enciphered_export_enable")]
+    enciphered_export_enable: bool,
+    #[serde(default = "default_enciphered_export_iterations")]
+    enciphered_export_iterations: u64,
+    #[serde(default = "default_enciphered_export_bins")]
+    enciphered_export_bins: usize,
+    #[serde(default = "default_enciphered_export_window")]
+    enciphered_export_window: usize,
+    #[serde(default = "default_enciphered_export_stride")]
+    enciphered_export_stride: usize,
+    #[serde(default = "default_enciphered_export_output_csv")]
+    enciphered_export_output_csv: String,
+    #[serde(default = "default_enciphered_export_ramp_length")]
+    enciphered_export_ramp_length: usize,
+    #[serde(default = "default_enciphered_export_ramp_step_pct")]
+    enciphered_export_ramp_step_pct: f64,
+    #[serde(default = "default_enciphered_export_ramp_tolerances")]
+    enciphered_export_ramp_tolerances: Vec<f64>,
+    #[serde(default = "default_enciphered_export_ramp_csv")]
+    enciphered_export_ramp_csv: String,
 }
 
 impl Default for Config {
     fn default() -> Self {
         Self {
-            key: KeyConfig::default(),
+            rsa_keypair: KeyConfig::default(),
             engine: EngineConfig::default(),
         }
     }
@@ -459,6 +485,16 @@ impl Default for EngineConfig {
             reuse_r_candidates: default_reuse_r_candidates(),
             reuse_r_candidates_append_only: default_reuse_r_candidates_append_only(),
             message: MessageConfig::default(),
+            enciphered_export_enable: default_enciphered_export_enable(),
+            enciphered_export_iterations: default_enciphered_export_iterations(),
+            enciphered_export_bins: default_enciphered_export_bins(),
+            enciphered_export_window: default_enciphered_export_window(),
+            enciphered_export_stride: default_enciphered_export_stride(),
+            enciphered_export_output_csv: default_enciphered_export_output_csv(),
+            enciphered_export_ramp_length: default_enciphered_export_ramp_length(),
+            enciphered_export_ramp_step_pct: default_enciphered_export_ramp_step_pct(),
+            enciphered_export_ramp_tolerances: default_enciphered_export_ramp_tolerances(),
+            enciphered_export_ramp_csv: default_enciphered_export_ramp_csv(),
         }
     }
 }
@@ -612,6 +648,286 @@ fn plot_overlap_histogram(overlaps_pct: &[f64], label: &str) -> Result<(), Box<d
     Ok(())
 }
 
+#[derive(Default, Debug, Clone, Copy)]
+struct RampSummary {
+    frames_with_ramp: usize,
+    total_ramps: usize,
+    total_strength: usize,
+}
+
+fn mean_f64(values: &[f64]) -> f64 {
+    if values.is_empty() {
+        return 0.0;
+    }
+    let sum: f64 = values.iter().sum();
+    sum / values.len() as f64
+}
+
+struct ExportSample {
+    ciphertext: BigUint,
+    message_bytes_le: Vec<u8>,
+    decryption_bytes_le: Vec<u8>,
+}
+
+fn bit_from_bytes_le(bytes: &[u8], idx: usize) -> bool {
+    let byte_idx = idx / 8;
+    if byte_idx >= bytes.len() {
+        return false;
+    }
+    let bit_idx = idx % 8;
+    ((bytes[byte_idx] >> bit_idx) & 1) == 1
+}
+
+fn run_enciphered_export(
+    ctx: &RSAContext,
+    engine: &EngineConfig,
+    rng: &mut StdRng,
+) -> Result<(), Box<dyn Error>> {
+    let iterations = engine.enciphered_export_iterations.max(1) as usize;
+    let mut samples = Vec::with_capacity(iterations);
+    let mut next_pct = 10u64;
+    let fixed_message = if engine.message.is_random {
+        None
+    } else {
+        let msg = BigUint::from_bytes_be(engine.message.fixed_message.as_bytes());
+        if msg.is_zero() {
+            return Err("enciphered export fixed_message cannot be empty".into());
+        }
+        if msg >= ctx.n {
+            return Err("enciphered export fixed_message must be smaller than modulus n".into());
+        }
+        Some(msg)
+    };
+    let fixed_message_bits = fixed_message
+        .as_ref()
+        .map(|msg| msg.bits().max(1) as usize)
+        .unwrap_or(0);
+    let bit_width = engine
+        .message
+        .bits
+        .max(1)
+        .max(fixed_message_bits as u32) as usize;
+
+    let y = engine.rabin_exponent as u32;
+    let n_pow_y = ctx.n.pow(y);
+    let mut candidates = generate_r_candidates(&ctx.n, engine, rng);
+    if candidates.is_empty() {
+        return Err("no r candidates generated for enciphered export".into());
+    }
+    let (r, factors) = candidates
+        .drain(..1)
+        .next()
+        .ok_or("missing r candidate for enciphered export")?;
+    let phi_new = compute_totient(&factors);
+    let d_new = mod_inverse(&ctx.e, &phi_new)
+        .ok_or("public exponent is not invertible for export r candidate")?;
+
+    println!(
+        "Enciphered export using r candidate {} with factors {:?}",
+        r, factors
+    );
+
+    for i in 0..iterations {
+        let msg = if let Some(ref fixed) = fixed_message {
+            fixed.clone()
+        } else {
+            random_message_under_n(engine, &ctx.n, rng)
+        };
+        let ciphertext = msg.modpow(&ctx.e, &ctx.n);
+        let result_default = get_larger_number(&ciphertext, &ctx.n, y, true, false);
+        let hbc_result = hbc(&result_default, &r, &n_pow_y, engine);
+        let recovered_new = if engine.use_rs_decrypt {
+            hbc_result.modpow(&d_new, &r)
+        } else {
+            hbc_result
+        };
+        let r_pow_y = r.pow(y);
+        let result2_default = get_larger_number(&recovered_new, &r, y, true, false);
+        let hbc_default = hbc(&result2_default, &ctx.n, &r_pow_y, engine);
+        let dm_raw = &hbc_default % &ctx.n;
+        let width = dm_raw.bits().max(1);
+        let mask = (BigUint::one() << width) - BigUint::one();
+        let inverted_dm = &mask ^ &dm_raw;
+        let dm = if engine.invert_bits { inverted_dm } else { dm_raw };
+        samples.push(ExportSample {
+            ciphertext,
+            message_bytes_le: msg.to_bytes_le(),
+            decryption_bytes_le: dm.to_bytes_le(),
+        });
+        log_progress_every_ten_percent(
+            (i + 1) as u64,
+            iterations as u64,
+            &mut next_pct,
+            "Enciphered export iterations",
+        );
+    }
+
+    if samples.is_empty() {
+        return Err("no speculative decryptions generated for enciphered export".into());
+    }
+
+    samples.sort_by(|a, b| a.ciphertext.cmp(&b.ciphertext));
+    let min_ct = samples
+        .first()
+        .map(|s| s.ciphertext.clone())
+        .ok_or("missing min ciphertext")?;
+    let max_ct = samples
+        .last()
+        .map(|s| s.ciphertext.clone())
+        .ok_or("missing max ciphertext")?;
+
+    let bins = bit_width.max(1);
+    let window_size = engine
+        .enciphered_export_window
+        .max(1)
+        .min(samples.len());
+    let stride = engine.enciphered_export_stride.max(1);
+    let frame_count = if samples.len() <= window_size {
+        1
+    } else {
+        ((samples.len() - window_size) / stride) + 1
+    };
+
+    let output_path = engine.enciphered_export_output_csv.as_str();
+    let mut csv = OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(true)
+        .open(output_path)?;
+
+    writeln!(csv, "# enciphered_bins_export")?;
+    writeln!(csv, "# iterations={}", iterations)?;
+    writeln!(csv, "# bins={}", bins)?;
+    writeln!(csv, "# window_size={}", window_size)?;
+    writeln!(csv, "# stride={}", stride)?;
+    writeln!(csv, "# min_ciphertext={}", min_ct)?;
+    writeln!(csv, "# max_ciphertext={}", max_ct)?;
+    writeln!(csv, "# bit_width={}", bit_width)?;
+    writeln!(
+        csv,
+        "frame_index,frame_start,frame_end,bit_index,match_count,match_pct"
+    )?;
+
+    let ramp_tolerances = engine.enciphered_export_ramp_tolerances.clone();
+    let mut ramp_csv: Option<fs::File> = None;
+    if !ramp_tolerances.is_empty() {
+        let ramp_path = engine.enciphered_export_ramp_csv.as_str();
+        let mut file = OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(true)
+            .open(ramp_path)?;
+        writeln!(file, "# enciphered_ramps_export")?;
+        writeln!(file, "# ramp_length={}", engine.enciphered_export_ramp_length)?;
+        writeln!(
+            file,
+            "# ramp_step_pct={}",
+            engine.enciphered_export_ramp_step_pct
+        )?;
+        writeln!(file, "# tolerances={:?}", ramp_tolerances)?;
+        writeln!(
+            file,
+            "frame_index,tolerance,ramp_start,ramp_length,ramp_values,mean_count_pct"
+        )?;
+        ramp_csv = Some(file);
+    }
+
+    let mut summaries = vec![RampSummary::default(); ramp_tolerances.len()];
+
+    for frame_idx in 0..frame_count {
+        let start = frame_idx * stride;
+        let end = (start + window_size).min(samples.len());
+        let window = &samples[start..end];
+        let mut match_counts = vec![0u32; bins];
+        let window_len_f = window.len().max(1) as f64;
+
+        for sample in window {
+            for bit_idx in 0..bins {
+                let dm_bit = bit_from_bytes_le(&sample.decryption_bytes_le, bit_idx);
+                let msg_bit = bit_from_bytes_le(&sample.message_bytes_le, bit_idx);
+                if dm_bit == msg_bit {
+                    match_counts[bit_idx] = match_counts[bit_idx].saturating_add(1);
+                }
+            }
+        }
+
+        let mut counts_pct = vec![0.0_f64; bins];
+        for (bin_idx, count) in match_counts.iter().enumerate() {
+            let match_pct = (*count as f64 / window_len_f) * 100.0;
+            counts_pct[bin_idx] = match_pct;
+            writeln!(
+                csv,
+                "{},{},{},{},{},{:.8}",
+                frame_idx,
+                start,
+                end,
+                bin_idx,
+                count,
+                match_pct
+            )?;
+        }
+
+        if !ramp_tolerances.is_empty() {
+            let mean = mean_f64(&counts_pct);
+
+            for (idx, tol) in ramp_tolerances.iter().enumerate() {
+                let ramps = find_ramp_signals_f64(
+                    &counts_pct,
+                    engine.enciphered_export_ramp_length,
+                    engine.enciphered_export_ramp_step_pct,
+                    *tol,
+                );
+                let strength = ramp_signal_strength_f64(&ramps);
+                let entry = &mut summaries[idx];
+                if !ramps.is_empty() {
+                    entry.frames_with_ramp += 1;
+                }
+                entry.total_ramps = entry.total_ramps.saturating_add(ramps.len());
+                entry.total_strength = entry.total_strength.saturating_add(strength);
+
+                if let Some(file) = ramp_csv.as_mut() {
+                    for (ramp_start, ramp_len, ramp_vals) in ramps {
+                        let values_str = ramp_vals
+                            .iter()
+                            .map(|v| format!("{:.4}", v))
+                            .collect::<Vec<_>>()
+                            .join("|");
+                        writeln!(
+                            file,
+                            "{},{},{},{},{},{:.4}",
+                            frame_idx,
+                            tol,
+                            ramp_start,
+                            ramp_len,
+                            values_str,
+                            mean
+                        )?;
+                    }
+                }
+            }
+        }
+    }
+
+    println!(
+        "Enciphered export wrote {} frames to {}",
+        frame_count, output_path
+    );
+    if !summaries.is_empty() {
+        println!(
+            "Ramp summary (centered around mean, step {:.4}%):",
+            engine.enciphered_export_ramp_step_pct
+        );
+        for (tol, summary) in ramp_tolerances.iter().zip(summaries.iter()) {
+            println!(
+                "  tolerance {} -> frames with ramp {}, total ramps {}, total strength {}",
+                tol, summary.frames_with_ramp, summary.total_ramps, summary.total_strength
+            );
+        }
+    }
+
+    Ok(())
+}
+
 fn select_message(args_message: Option<String>, engine: &EngineConfig, rng: &mut StdRng) -> BigUint {
     if let Some(explicit) = args_message {
         return BigUint::from_bytes_be(explicit.as_bytes());
@@ -729,6 +1045,46 @@ fn default_reuse_r_candidates_path() -> String {
 
 fn default_reuse_r_candidates_append_only() -> bool {
     false
+}
+
+fn default_enciphered_export_enable() -> bool {
+    false
+}
+
+fn default_enciphered_export_iterations() -> u64 {
+    10_000
+}
+
+fn default_enciphered_export_bins() -> usize {
+    128
+}
+
+fn default_enciphered_export_window() -> usize {
+    512
+}
+
+fn default_enciphered_export_stride() -> usize {
+    64
+}
+
+fn default_enciphered_export_output_csv() -> String {
+    "enciphered_decryption_bins.csv".to_string()
+}
+
+fn default_enciphered_export_ramp_length() -> usize {
+    3
+}
+
+fn default_enciphered_export_ramp_step_pct() -> f64 {
+    0.05
+}
+
+fn default_enciphered_export_ramp_tolerances() -> Vec<f64> {
+    vec![0.005, 0.01, 0.02]
+}
+
+fn default_enciphered_export_ramp_csv() -> String {
+    "enciphered_ramps.csv".to_string()
 }
 
 fn deserialize_biguint_option<'de, D>(deserializer: D) -> Result<Option<BigUint>, D::Error>

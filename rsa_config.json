@@ -1,5 +1,5 @@
 {
-    "key" : {
+    "rsa_keypair" : {
         "generate" : false,
         "e" : 65537,
         "p" : "3030152311446024058741",
@@ -10,15 +10,12 @@
         "r_stress_test_enable" : false,
         "r_stress_start" : "12915501679859480667750241440843466838812811",
         "r_stress_end" : "12915501679859480667750241440843466838812814",
-        "r_use_list_enable" : true,
-        "r_use_list" : [
-            "12915501679859480667750241440843466838812811",
-            "12915501679859480667750241440843453530670637",
-        ],
+        "r_use_list_enable" : false,
+        "r_use_list" : [],
         "max_overlap_min" : 0.005,
         "override_best_r" : "",
-        "test_iterations" : 1,
-        "alt_iterations" : 50000,
+        "test_iterations" : 0,
+        "alt_iterations" : 0,
         "process_min_count" : 25,
         "process_count" : 25,
         "process_scale" : 12,
@@ -33,6 +30,16 @@
         "base_convert" : true,
         "invert_bits" : false,
         "use_rs_decrypt" : true,
+        "enciphered_export_enable" : true,
+        "enciphered_export_iterations" : 10000,
+        "enciphered_export_bins" : 150,
+        "enciphered_export_window" : 1,
+        "enciphered_export_stride" : 1,
+        "enciphered_export_output_csv" : "enciphered_decryption_bins.csv",
+        "enciphered_export_ramp_length" : 3,
+        "enciphered_export_ramp_step_pct" : 0.05,
+        "enciphered_export_ramp_tolerances" : [0.005, 0.01, 0.02],
+        "enciphered_export_ramp_csv" : "enciphered_ramps.csv",
         "message" : {
             "is_random" : true,
             "bits" : 128,

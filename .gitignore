@@ -2,3 +2,9 @@
 *.lock
 target/
 images/
+enciphered_bins_frames/
+enciphered_*.csv
+*.mp4
+enciphered_bins2_frames/
+*.pyc
+*.pyo
