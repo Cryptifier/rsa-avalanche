@@ -8,3 +8,4 @@ enciphered_*.csv
 enciphered_bins2_frames/
 *.pyc
 *.pyo
+*frames/

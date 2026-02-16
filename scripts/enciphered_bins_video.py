@@ -13,6 +13,7 @@ import matplotlib.pyplot as plt
 from matplotlib import animation
 from multiprocessing import Pool, cpu_count
 import subprocess
+import shutil
 
 
 def load_bins(path: Path, metric: str) -> np.ndarray:
@@ -44,6 +45,10 @@ def load_bins(path: Path, metric: str) -> np.ndarray:
     data = np.zeros((max_frame + 1, max_bin + 1), dtype=float)
     for frame_idx, bin_idx, value in rows:
         data[frame_idx, bin_idx] = value
+    if metric == "float":
+        max_val = float(np.max(data)) if data.size else 0.0
+        if max_val <= 1.5:
+            data *= 100.0
     return data
 
 
@@ -62,6 +67,8 @@ def render_video(
     cmap: str,
     z_percentile_low: float,
     z_percentile_high: float,
+    z_min: Optional[float],
+    z_max: Optional[float],
     z_scale: str,
     smooth_window: int,
 ) -> None:
@@ -76,10 +83,14 @@ def render_video(
     x = np.arange(bin_count)
     z_flat = data_plot.flatten() if data_plot.size else np.array([0.0])
     z_flat_scaled = apply_scale(z_flat, z_scale)
-    z_percentile_low = max(0.0, min(100.0, z_percentile_low))
-    z_percentile_high = max(z_percentile_low, min(100.0, z_percentile_high))
-    z_low = float(np.percentile(z_flat_scaled, z_percentile_low))
-    z_high = float(np.percentile(z_flat_scaled, z_percentile_high))
+    if z_min is not None and z_max is not None:
+        z_low = min(z_min, z_max)
+        z_high = max(z_min, z_max)
+    else:
+        z_percentile_low = max(0.0, min(100.0, z_percentile_low))
+        z_percentile_high = max(z_percentile_low, min(100.0, z_percentile_high))
+        z_low = float(np.percentile(z_flat_scaled, z_percentile_low))
+        z_high = float(np.percentile(z_flat_scaled, z_percentile_high))
     if z_high <= z_low:
         z_low = float(np.min(z_flat_scaled))
         z_high = float(np.max(z_flat_scaled))
@@ -280,6 +291,8 @@ def render_video_parallel(
     cmap: str,
     z_percentile_low: float,
     z_percentile_high: float,
+    z_min: Optional[float],
+    z_max: Optional[float],
     z_scale: str,
     smooth_window: int,
     workers: int,
@@ -293,10 +306,14 @@ def render_video_parallel(
     x = np.arange(bin_count)
     z_flat = data_plot.flatten() if data_plot.size else np.array([0.0])
     z_flat_scaled = apply_scale(z_flat, z_scale)
-    z_percentile_low = max(0.0, min(100.0, z_percentile_low))
-    z_percentile_high = max(z_percentile_low, min(100.0, z_percentile_high))
-    z_low = float(np.percentile(z_flat_scaled, z_percentile_low))
-    z_high = float(np.percentile(z_flat_scaled, z_percentile_high))
+    if z_min is not None and z_max is not None:
+        z_low = min(z_min, z_max)
+        z_high = max(z_min, z_max)
+    else:
+        z_percentile_low = max(0.0, min(100.0, z_percentile_low))
+        z_percentile_high = max(z_percentile_low, min(100.0, z_percentile_high))
+        z_low = float(np.percentile(z_flat_scaled, z_percentile_low))
+        z_high = float(np.percentile(z_flat_scaled, z_percentile_high))
     if z_high <= z_low:
         z_low = float(np.min(z_flat_scaled))
         z_high = float(np.max(z_flat_scaled))
@@ -354,6 +371,7 @@ def render_video_parallel(
             stderr=subprocess.DEVNULL,
         )
         print(f"Wrote video to {output}")
+        shutil.rmtree(frames_dir, ignore_errors=True)
     except Exception as exc:
         print(f"FFmpeg unavailable ({exc}); frames are in {frames_dir}")
 
@@ -399,6 +417,18 @@ def parse_args() -> argparse.Namespace:
         type=float,
         default=55.0,
         help="Upper percentile for z scaling",
+    )
+    parser.add_argument(
+        "--z-min",
+        type=float,
+        default=None,
+        help="Absolute minimum for z scale (overrides percentiles)",
+    )
+    parser.add_argument(
+        "--z-max",
+        type=float,
+        default=None,
+        help="Absolute maximum for z scale (overrides percentiles)",
     )
     parser.add_argument(
         "--z-scale",
@@ -453,6 +483,8 @@ def main() -> int:
             cmap=args.cmap,
             z_percentile_low=args.z_percentile_low,
             z_percentile_high=args.z_percentile_high,
+            z_min=args.z_min,
+            z_max=args.z_max,
             z_scale=args.z_scale,
             smooth_window=max(1, args.smooth_window),
             workers=args.workers,
@@ -473,6 +505,8 @@ def main() -> int:
             cmap=args.cmap,
             z_percentile_low=args.z_percentile_low,
             z_percentile_high=args.z_percentile_high,
+            z_min=args.z_min,
+            z_max=args.z_max,
             z_scale=args.z_scale,
             smooth_window=max(1, args.smooth_window),
         )
