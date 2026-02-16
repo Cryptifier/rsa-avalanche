@@ -5,6 +5,6 @@ python3 scripts/enciphered_bins_video.py \
   --metric float \
   --parallel \
   --z-scale linear \
-  --z-percentile-high 0.50 \
-  --z-percentile-low 0.45 \
-  --smooth-window 3
+  --z-max 75 \
+  --z-min 40 \
+  --smooth-window 1
