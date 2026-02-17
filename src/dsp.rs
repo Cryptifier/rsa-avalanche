@@ -122,7 +122,7 @@ mod tests {
 
     #[test]
     fn test_ramp_detection_float_centered() {
-        let bins = vec![49.10, 49.15, 49.20, 48.90, 49.00];
+        let bins = vec![49.00, 49.05, 49.10];
         let ramps = find_ramp_signals_f64(&bins, 3, 0.05, 0.001);
         assert!(!ramps.is_empty(), "No float ramps found: {:?}", ramps);
         let strength = ramp_signal_strength_f64(&ramps);

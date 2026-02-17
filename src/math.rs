@@ -1,0 +1,655 @@
+use num_bigint::{BigInt, BigUint};
+use num_integer::Integer;
+use num_traits::{One, Signed, Zero};
+use rand::rngs::StdRng;
+use rand::{Rng, RngCore};
+use std::time::Instant;
+
+pub fn choose_exponent(start: u64, phi: &BigUint) -> BigUint {
+    let mut candidate = BigUint::from(if start % 2 == 0 { start + 1 } else { start });
+    let step = BigUint::from(2u8);
+
+    while candidate.gcd(phi) != BigUint::one() {
+        candidate += &step;
+    }
+
+    candidate
+}
+
+pub fn mod_inverse(a: &BigUint, modulus: &BigUint) -> Option<BigUint> {
+    let a_int = BigInt::from(a.clone());
+    let m_int = BigInt::from(modulus.clone());
+
+    let egcd = a_int.extended_gcd(&m_int);
+    if egcd.gcd != BigInt::one() {
+        return None;
+    }
+
+    let mut x = egcd.x % &m_int;
+    if x.is_negative() {
+        x += m_int;
+    }
+
+    x.to_biguint()
+}
+
+pub fn to_hex(value: &BigUint) -> String {
+    let bytes = value.to_bytes_be();
+    if bytes.is_empty() || bytes.iter().all(|b| *b == 0) {
+        return "0".to_string();
+    }
+    let mut hex = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        let _ = std::fmt::Write::write_fmt(&mut hex, format_args!("{:02x}", byte));
+    }
+    hex
+}
+
+pub fn bit_length(value: &BigUint) -> u64 {
+    value.bits()
+}
+
+pub fn random_prime_with_bits(bits: u32, rng: &mut StdRng) -> u64 {
+    let lower = (1u64 << (bits.saturating_sub(1))).max(3);
+    let upper = (1u64 << bits) - 1;
+    loop {
+        let mut candidate = rng.gen_range(lower..=upper);
+        candidate |= 1; // force odd
+        if is_probable_prime(candidate) {
+            return candidate;
+        }
+    }
+}
+
+pub fn random_biguint_bits(bits: u32, rng: &mut StdRng) -> BigUint {
+    if bits == 0 {
+        return BigUint::zero();
+    }
+    let bytes_len = ((bits as usize) + 7) / 8;
+    let mut bytes = vec![0u8; bytes_len];
+    rng.fill_bytes(&mut bytes);
+    let leading_bits = (bits % 8) as u8;
+    if leading_bits != 0 {
+        let mask = (1u8 << leading_bits) - 1;
+        bytes[0] &= mask;
+    }
+    // Ensure the top bit is set so the value uses the requested width when possible.
+    let top_bit = if leading_bits == 0 { 0x80 } else { 1u8 << (leading_bits - 1) };
+    bytes[0] |= top_bit;
+    BigUint::from_bytes_be(&bytes)
+}
+
+pub fn is_probable_prime(n: u64) -> bool {
+    if n < 2 {
+        return false;
+    }
+    if n == 2 || n == 3 {
+        return true;
+    }
+    if n % 2 == 0 {
+        return false;
+    }
+
+    let (d, s) = decompose(n - 1);
+    const BASES: [u64; 3] = [2, 3, 5];
+    'outer: for a in BASES {
+        if a >= n {
+            continue;
+        }
+        let mut x = mod_pow_u64(a, d, n);
+        if x == 1 || x == n - 1 {
+            continue;
+        }
+        for _ in 1..s {
+            x = mod_pow_u64(x, 2, n);
+            if x == n - 1 {
+                continue 'outer;
+            }
+        }
+        return false;
+    }
+    true
+}
+
+fn decompose(mut value: u64) -> (u64, u32) {
+    let mut s = 0u32;
+    while value % 2 == 0 {
+        value /= 2;
+        s += 1;
+    }
+    (value, s)
+}
+
+fn mod_pow_u64(mut base: u64, mut exponent: u64, modulus: u64) -> u64 {
+    let mut result = 1u64 % modulus;
+    base %= modulus;
+    while exponent > 0 {
+        if exponent & 1 == 1 {
+            result = result.saturating_mul(base) % modulus;
+        }
+        base = base.saturating_mul(base) % modulus;
+        exponent >>= 1;
+    }
+    result
+}
+
+pub fn compute_totient(factors: &[(BigUint, u64)]) -> BigUint {
+    let mut phi = BigUint::one();
+    for (p, e) in factors {
+        if *e == 0 {
+            continue;
+        }
+        let term = (p - BigUint::one()) * p.pow((*e as u32).saturating_sub(1));
+        phi *= term;
+    }
+    phi
+}
+
+pub fn random_biguint_below(upper: &BigUint, rng: &mut StdRng) -> BigUint {
+    if upper.is_zero() {
+        return BigUint::zero();
+    }
+    let bits = upper.bits();
+    loop {
+        let candidate = random_biguint_bits(bits as u32, rng);
+        if &candidate < upper {
+            return candidate;
+        }
+    }
+}
+
+pub fn modular_sqrt(a: &BigUint, p: &BigUint) -> BigUint {
+    // Tonelli-Shanks for odd prime p; demo uses small-ish primes so this is fine.
+    if a.is_zero() {
+        return BigUint::zero();
+    }
+    if p == &BigUint::from(2u8) {
+        return BigUint::zero();
+    }
+    if legendre_symbol(a, p) != BigInt::one() {
+        return BigUint::one();
+    }
+
+    let mut q = p - BigUint::one();
+    let mut s = 0u32;
+    while (&q & BigUint::one()).is_zero() {
+        q >>= 1;
+        s += 1;
+    }
+
+    if s == 1 {
+        return a.modpow(&((p + BigUint::one()) >> 2), p);
+    }
+
+    let mut z = BigUint::from(2u8);
+    while legendre_symbol(&z, p) != BigInt::from(-1) {
+        z += BigUint::one();
+    }
+
+    let mut m = s;
+    let mut c = z.modpow(&q, p);
+    let mut t = a.modpow(&q, p);
+    let mut r = a.modpow(&((&q + BigUint::one()) >> 1), p);
+
+    while t != BigUint::one() {
+        let mut i = 1u32;
+        let mut t2i = t.modpow(&BigUint::from(2u32), p);
+        while t2i != BigUint::one() {
+            t2i = t2i.modpow(&BigUint::from(2u32), p);
+            i += 1;
+            if i == m {
+                break;
+            }
+        }
+        let b = c.modpow(&BigUint::from(1u64 << (m - i - 1)), p);
+        r = (&r * &b) % p;
+        c = (&b * &b) % p;
+        t = (&t * &c) % p;
+        m = i;
+    }
+    r
+}
+
+pub fn legendre_symbol(a: &BigUint, p: &BigUint) -> BigInt {
+    let ls = a.modpow(&((p - BigUint::one()) >> 1), p);
+    if ls.is_zero() {
+        BigInt::zero()
+    } else if ls == BigUint::one() {
+        BigInt::one()
+    } else {
+        BigInt::from(-1)
+    }
+}
+
+pub fn factor_composite_with_timeout(
+    n: &BigUint,
+    rng: &mut StdRng,
+    deadline: Instant,
+) -> Option<Vec<(BigUint, u64)>> {
+    let mut factors = Vec::new();
+    if !factor_recursive(n.clone(), &mut factors, rng, deadline) {
+        return None;
+    }
+    factors.sort_by(|a, b| a.0.cmp(&b.0));
+    Some(coalesce_factors(factors))
+}
+
+pub fn factor_recursive(n: BigUint, out: &mut Vec<(BigUint, u64)>, rng: &mut StdRng, deadline: Instant) -> bool {
+    if Instant::now() >= deadline {
+        return false;
+    }
+    if n <= BigUint::one() {
+        return true;
+    }
+    if is_probable_prime_big(&n) {
+        out.push((n, 1));
+        return true;
+    }
+    let Some(divisor) = pollard_rho(&n, rng, deadline) else {
+        return false;
+    };
+    let other = &n / &divisor;
+    factor_recursive(divisor, out, rng, deadline) && factor_recursive(other, out, rng, deadline)
+}
+
+pub fn coalesce_factors(mut factors: Vec<(BigUint, u64)>) -> Vec<(BigUint, u64)> {
+    if factors.is_empty() {
+        return factors;
+    }
+    factors.sort_by(|a, b| a.0.cmp(&b.0));
+    let mut merged: Vec<(BigUint, u64)> = Vec::new();
+    let mut current = factors[0].clone();
+    for item in factors.into_iter().skip(1) {
+        if item.0 == current.0 {
+            current.1 += item.1;
+        } else {
+            merged.push(current);
+            current = item;
+        }
+    }
+    merged.push(current);
+    merged
+}
+
+pub fn pollard_rho(n: &BigUint, rng: &mut StdRng, deadline: Instant) -> Option<BigUint> {
+    if n.is_even() {
+        return Some(BigUint::from(2u8));
+    }
+    let one = BigUint::one();
+    let two = &one + &one;
+
+    let mut c = random_biguint_below(n, rng);
+    let mut x = random_biguint_below(n, rng);
+    let mut y = x.clone();
+    let f = |val: &BigUint, c: &BigUint, n: &BigUint| (val.modpow(&two, n) + c) % n;
+    let mut iter: u64 = 0;
+
+    while Instant::now() < deadline {
+        iter += 1;
+        x = f(&x, &c, n);
+        y = f(&f(&y, &c, n), &c, n);
+        let diff = if &x >= &y { &x - &y } else { &y - &x };
+        let d = diff.gcd(n);
+        if d != one && d != *n {
+            return Some(d);
+        }
+        if d == *n || iter > 10_000 {
+            c = random_biguint_below(n, rng);
+            x = random_biguint_below(n, rng);
+            y = x.clone();
+            iter = 0;
+        }
+    }
+    None
+}
+
+pub fn is_probable_prime_big(n: &BigUint) -> bool {
+    if n <= &BigUint::from(3u8) {
+        return *n == BigUint::from(2u8) || *n == BigUint::from(3u8);
+    }
+    if n.is_even() {
+        return false;
+    }
+
+    const SMALL_PRIMES: [u64; 16] = [3, 5, 7, 11, 13, 17, 19, 23, 29, 31, 37, 41, 43, 47, 53, 59];
+    for p in SMALL_PRIMES {
+        let p_big = BigUint::from(p);
+        if n == &p_big {
+            return true;
+        }
+        if (n % &p_big).is_zero() {
+            return false;
+        }
+    }
+
+    let one = BigUint::one();
+    let two = &one + &one;
+    let n_minus_one = n - &one;
+    let (d, s) = decompose_big(n_minus_one.clone());
+
+    const BASES: [u64; 7] = [2, 3, 5, 7, 11, 13, 17];
+    'outer: for a in BASES {
+        let a = BigUint::from(a);
+        let mut x = a.modpow(&d, n);
+        if x == one || x == n_minus_one {
+            continue;
+        }
+        for _ in 1..s {
+            x = x.modpow(&two, n);
+            if x == n_minus_one {
+                continue 'outer;
+            }
+        }
+        return false;
+    }
+    true
+}
+
+pub fn decompose_big(mut value: BigUint) -> (BigUint, u32) {
+    let mut s = 0u32;
+    let one = BigUint::one();
+    while (&value & &one).is_zero() {
+        value >>= 1;
+        s += 1;
+    }
+    (value, s)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rand::SeedableRng;
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn test_choose_exponent_coprime() {
+        let phi = BigUint::from(40u8);
+        let e = choose_exponent(3, &phi);
+        assert_eq!(e, BigUint::from(3u8));
+    }
+
+    #[test]
+    fn test_choose_exponent_skips_even() {
+        let phi = BigUint::from(40u8);
+        let e = choose_exponent(10, &phi);
+        assert_eq!(e, BigUint::from(11u8));
+    }
+
+    #[test]
+    fn test_mod_inverse_exists() {
+        let a = BigUint::from(3u8);
+        let m = BigUint::from(11u8);
+        let inv = mod_inverse(&a, &m).expect("inverse missing");
+        assert_eq!((&a * &inv) % &m, BigUint::one());
+    }
+
+    #[test]
+    fn test_mod_inverse_missing() {
+        let a = BigUint::from(6u8);
+        let m = BigUint::from(12u8);
+        assert!(mod_inverse(&a, &m).is_none());
+    }
+
+    #[test]
+    fn test_to_hex_zero() {
+        let v = BigUint::zero();
+        assert_eq!(to_hex(&v), "0");
+    }
+
+    #[test]
+    fn test_to_hex_value() {
+        let v = BigUint::from_bytes_be(&[0xde, 0xad, 0xbe, 0xef]);
+        assert_eq!(to_hex(&v), "deadbeef");
+    }
+
+    #[test]
+    fn test_bit_length_zero() {
+        let v = BigUint::zero();
+        assert_eq!(bit_length(&v), 0);
+    }
+
+    #[test]
+    fn test_bit_length_value() {
+        let v = BigUint::from(10u8); // 1010
+        assert_eq!(bit_length(&v), 4);
+    }
+
+    #[test]
+    fn test_random_prime_with_bits_basic() {
+        let mut rng = StdRng::seed_from_u64(7);
+        let p = random_prime_with_bits(16, &mut rng);
+        assert!(is_probable_prime(p));
+        assert!(p >= (1u64 << 15));
+    }
+
+    #[test]
+    fn test_random_prime_with_bits_odd() {
+        let mut rng = StdRng::seed_from_u64(9);
+        let p = random_prime_with_bits(20, &mut rng);
+        assert_eq!(p % 2, 1);
+    }
+
+    #[test]
+    fn test_random_biguint_bits_zero() {
+        let mut rng = StdRng::seed_from_u64(1);
+        let v = random_biguint_bits(0, &mut rng);
+        assert!(v.is_zero());
+    }
+
+    #[test]
+    fn test_random_biguint_bits_range() {
+        let mut rng = StdRng::seed_from_u64(2);
+        let v = random_biguint_bits(8, &mut rng);
+        assert!(v.bits() <= 8);
+    }
+
+    #[test]
+    fn test_is_probable_prime_prime() {
+        assert!(is_probable_prime(65_537));
+    }
+
+    #[test]
+    fn test_is_probable_prime_composite() {
+        assert!(!is_probable_prime(221));
+    }
+
+    #[test]
+    fn test_decompose_even() {
+        let (d, s) = decompose(40);
+        assert_eq!(d, 5);
+        assert_eq!(s, 3);
+    }
+
+    #[test]
+    fn test_decompose_odd() {
+        let (d, s) = decompose(45);
+        assert_eq!(d, 45);
+        assert_eq!(s, 0);
+    }
+
+    #[test]
+    fn test_mod_pow_basic() {
+        let v = mod_pow_u64(2, 10, 1000);
+        assert_eq!(v, 24);
+    }
+
+    #[test]
+    fn test_mod_pow_zero_exp() {
+        let v = mod_pow_u64(5, 0, 7);
+        assert_eq!(v, 1);
+    }
+
+    #[test]
+    fn test_compute_totient_two_primes() {
+        let factors = vec![(BigUint::from(3u8), 1), (BigUint::from(5u8), 1)];
+        let phi = compute_totient(&factors);
+        assert_eq!(phi, BigUint::from(8u8));
+    }
+
+    #[test]
+    fn test_compute_totient_power() {
+        let factors = vec![(BigUint::from(2u8), 3)];
+        let phi = compute_totient(&factors);
+        assert_eq!(phi, BigUint::from(4u8));
+    }
+
+    #[test]
+    fn test_random_biguint_below() {
+        let mut rng = StdRng::seed_from_u64(3);
+        let upper = BigUint::from(10u8);
+        for _ in 0..5 {
+            let v = random_biguint_below(&upper, &mut rng);
+            assert!(v < upper);
+        }
+    }
+
+    #[test]
+    fn test_random_biguint_below_zero() {
+        let mut rng = StdRng::seed_from_u64(4);
+        let upper = BigUint::zero();
+        let v = random_biguint_below(&upper, &mut rng);
+        assert!(v.is_zero());
+    }
+
+    #[test]
+    fn test_modular_sqrt_residue() {
+        let p = BigUint::from(11u8);
+        let a = BigUint::from(9u8);
+        let r = modular_sqrt(&a, &p);
+        assert_eq!((&r * &r) % &p, a);
+    }
+
+    #[test]
+    fn test_modular_sqrt_zero() {
+        let p = BigUint::from(11u8);
+        let a = BigUint::zero();
+        let r = modular_sqrt(&a, &p);
+        assert!(r.is_zero());
+    }
+
+    #[test]
+    fn test_legendre_symbol_residue() {
+        let p = BigUint::from(11u8);
+        let a = BigUint::from(9u8);
+        let ls = legendre_symbol(&a, &p);
+        assert_eq!(ls, BigInt::one());
+    }
+
+    #[test]
+    fn test_legendre_symbol_non_residue() {
+        let p = BigUint::from(11u8);
+        let a = BigUint::from(2u8);
+        let ls = legendre_symbol(&a, &p);
+        assert_eq!(ls, BigInt::from(-1));
+    }
+
+    #[test]
+    fn test_is_probable_prime_big_prime() {
+        let p = BigUint::from(101u8);
+        assert!(is_probable_prime_big(&p));
+    }
+
+    #[test]
+    fn test_is_probable_prime_big_composite() {
+        let n = BigUint::from(121u8);
+        assert!(!is_probable_prime_big(&n));
+    }
+
+    #[test]
+    fn test_decompose_big_even() {
+        let (d, s) = decompose_big(BigUint::from(40u8));
+        assert_eq!(d, BigUint::from(5u8));
+        assert_eq!(s, 3);
+    }
+
+    #[test]
+    fn test_decompose_big_odd() {
+        let (d, s) = decompose_big(BigUint::from(45u8));
+        assert_eq!(d, BigUint::from(45u8));
+        assert_eq!(s, 0);
+    }
+
+    #[test]
+    fn test_pollard_rho_even() {
+        let mut rng = StdRng::seed_from_u64(11);
+        let n = BigUint::from(100u8);
+        let deadline = Instant::now() + Duration::from_millis(50);
+        let factor = pollard_rho(&n, &mut rng, deadline).expect("missing factor");
+        assert_eq!(factor, BigUint::from(2u8));
+    }
+
+    #[test]
+    fn test_pollard_rho_composite() {
+        let mut rng = StdRng::seed_from_u64(12);
+        let n = BigUint::from(8051u64); // 83 * 97
+        let deadline = Instant::now() + Duration::from_secs(1);
+        let factor = pollard_rho(&n, &mut rng, deadline).expect("missing factor");
+        assert!(&n % &factor == BigUint::zero());
+        assert!(factor != BigUint::one() && factor != n);
+    }
+
+    #[test]
+    fn test_factor_recursive_composite() {
+        let mut rng = StdRng::seed_from_u64(13);
+        let mut factors = Vec::new();
+        let deadline = Instant::now() + Duration::from_secs(1);
+        assert!(factor_recursive(BigUint::from(12u8), &mut factors, &mut rng, deadline));
+        let mut values: Vec<BigUint> = factors.into_iter().map(|(p, _)| p).collect();
+        values.sort();
+        assert!(values.contains(&BigUint::from(2u8)));
+        assert!(values.contains(&BigUint::from(3u8)));
+    }
+
+    #[test]
+    fn test_factor_recursive_one() {
+        let mut rng = StdRng::seed_from_u64(14);
+        let mut factors = Vec::new();
+        let deadline = Instant::now() + Duration::from_secs(1);
+        assert!(factor_recursive(BigUint::one(), &mut factors, &mut rng, deadline));
+        assert!(factors.is_empty());
+    }
+
+    #[test]
+    fn test_factor_composite_with_timeout() {
+        let mut rng = StdRng::seed_from_u64(15);
+        let n = BigUint::from(84u8);
+        let deadline = Instant::now() + Duration::from_secs(1);
+        let factors = factor_composite_with_timeout(&n, &mut rng, deadline).expect("missing factors");
+        let product = factors
+            .iter()
+            .fold(BigUint::one(), |acc, (p, e)| acc * p.pow(*e as u32));
+        assert_eq!(product, n);
+    }
+
+    #[test]
+    fn test_factor_composite_with_timeout_prime() {
+        let mut rng = StdRng::seed_from_u64(16);
+        let n = BigUint::from(13u8);
+        let deadline = Instant::now() + Duration::from_secs(1);
+        let factors = factor_composite_with_timeout(&n, &mut rng, deadline).expect("missing factors");
+        assert_eq!(factors.len(), 1);
+        assert_eq!(factors[0].0, n);
+        assert_eq!(factors[0].1, 1);
+    }
+
+    #[test]
+    fn test_coalesce_factors_merges() {
+        let factors = vec![
+            (BigUint::from(3u8), 1),
+            (BigUint::from(2u8), 1),
+            (BigUint::from(3u8), 2),
+        ];
+        let merged = coalesce_factors(factors);
+        assert_eq!(merged.len(), 2);
+        assert_eq!(merged[0].0, BigUint::from(2u8));
+        assert_eq!(merged[0].1, 1);
+        assert_eq!(merged[1].0, BigUint::from(3u8));
+        assert_eq!(merged[1].1, 3);
+    }
+
+    #[test]
+    fn test_coalesce_factors_empty() {
+        let merged = coalesce_factors(Vec::new());
+        assert!(merged.is_empty());
+    }
+}
