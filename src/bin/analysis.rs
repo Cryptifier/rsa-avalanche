@@ -826,8 +826,6 @@ fn run_enciphered_export(
     rng: &mut StdRng,
 ) -> Result<(), Box<dyn Error>> {
     let iterations = engine.enciphered_export_iterations.max(1) as usize;
-    let mut samples = Vec::with_capacity(iterations);
-    let mut next_pct = 10u64;
     let fixed_message = if engine.message.is_random {
         None
     } else {
@@ -871,40 +869,70 @@ fn run_enciphered_export(
         r, factors
     );
 
-    for i in 0..iterations {
-        let msg = if let Some(ref fixed) = fixed_message {
-            fixed.clone()
-        } else {
-            random_message_under_n(engine, &ctx.n, rng)
-        };
-        let ciphertext = msg.modpow(&ctx.e, &ctx.n);
-        let result_default = get_larger_number(&ciphertext, &ctx.n, y, true, false);
-        let hbc_result = hbc(&result_default, &r, &n_pow_y, engine);
-        let recovered_new = if engine.use_rs_decrypt {
-            hbc_result.modpow(&d_new, &r)
-        } else {
-            hbc_result
-        };
-        let r_pow_y = r.pow(y);
-        let result2_default = get_larger_number(&recovered_new, &r, y, true, false);
-        let hbc_default = hbc(&result2_default, &ctx.n, &r_pow_y, engine);
-        let dm_raw = &hbc_default % &ctx.n;
-        let width = dm_raw.bits().max(1);
-        let mask = (BigUint::one() << width) - BigUint::one();
-        let inverted_dm = &mask ^ &dm_raw;
-        let dm = if engine.invert_bits { inverted_dm } else { dm_raw };
-        samples.push(ExportSample {
-            ciphertext,
-            message_bytes_le: msg.to_bytes_le(),
-            decryption_bytes_le: dm.to_bytes_le(),
-        });
-        log_progress_every_ten_percent(
-            (i + 1) as u64,
-            iterations as u64,
-            &mut next_pct,
-            "Enciphered export iterations",
-        );
+    let r_pow_y = r.pow(y);
+    let mut seeds = Vec::with_capacity(iterations);
+    for _ in 0..iterations {
+        seeds.push(rng.next_u64());
     }
+
+    let done = Arc::new(AtomicU64::new(0));
+    let next_pct = Arc::new(AtomicU64::new(10));
+    let iterations_u64 = iterations as u64;
+    let mut samples: Vec<ExportSample> = seeds
+        .into_par_iter()
+        .map(|seed| {
+            let msg = if let Some(ref fixed) = fixed_message {
+                fixed.clone()
+            } else {
+                let mut local_rng = StdRng::seed_from_u64(seed);
+                random_message_under_n(engine, &ctx.n, &mut local_rng)
+            };
+            let ciphertext = msg.modpow(&ctx.e, &ctx.n);
+            let result_default = get_larger_number(&ciphertext, &ctx.n, y, true, false);
+            let hbc_result = hbc(&result_default, &r, &n_pow_y, engine);
+            let recovered_new = if engine.use_rs_decrypt {
+                hbc_result.modpow(&d_new, &r)
+            } else {
+                hbc_result
+            };
+            let result2_default = get_larger_number(&recovered_new, &r, y, true, false);
+            let hbc_default = hbc(&result2_default, &ctx.n, &r_pow_y, engine);
+            let dm_raw = &hbc_default % &ctx.n;
+            let width = dm_raw.bits().max(1);
+            let mask = (BigUint::one() << width) - BigUint::one();
+            let inverted_dm = &mask ^ &dm_raw;
+            let dm = if engine.invert_bits { inverted_dm } else { dm_raw };
+
+            let finished = done.fetch_add(1, Ordering::Relaxed) + 1;
+            let pct = finished.saturating_mul(100) / iterations_u64;
+            let mut current_next = next_pct.load(Ordering::Relaxed);
+            while pct >= current_next && current_next <= 100 {
+                let new_next = current_next.saturating_add(10);
+                match next_pct.compare_exchange(
+                    current_next,
+                    new_next,
+                    Ordering::Relaxed,
+                    Ordering::Relaxed,
+                ) {
+                    Ok(_) => {
+                        let display_pct = current_next.min(100);
+                        println!(
+                            "Enciphered export iterations progress: {}% ({}/{})",
+                            display_pct, finished, iterations_u64
+                        );
+                        break;
+                    }
+                    Err(actual) => current_next = actual,
+                }
+            }
+
+            ExportSample {
+                ciphertext,
+                message_bytes_le: msg.to_bytes_le(),
+                decryption_bytes_le: dm.to_bytes_le(),
+            }
+        })
+        .collect();
 
     if samples.is_empty() {
         return Err("no speculative decryptions generated for enciphered export".into());
