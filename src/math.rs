@@ -5,6 +5,17 @@ use rand::rngs::StdRng;
 use rand::{Rng, RngCore};
 use std::time::Instant;
 
+/// Selects the first odd public exponent `e >= start` that is coprime with `phi`.
+///
+/// # Parameters
+/// - `start`: Starting exponent candidate (will be adjusted to odd if even).
+/// - `phi`: Euler's totient of the RSA modulus.
+///
+/// # Returns
+/// - `BigUint`: The first odd `e` such that `gcd(e, phi) == 1`.
+///
+/// # Expected Output
+/// - Returns a valid RSA public exponent; no side effects.
 pub fn choose_exponent(start: u64, phi: &BigUint) -> BigUint {
     let mut candidate = BigUint::from(if start % 2 == 0 { start + 1 } else { start });
     let step = BigUint::from(2u8);
@@ -16,6 +27,17 @@ pub fn choose_exponent(start: u64, phi: &BigUint) -> BigUint {
     candidate
 }
 
+/// Computes the modular inverse of `a` modulo `modulus`, if it exists.
+///
+/// # Parameters
+/// - `a`: Value to invert.
+/// - `modulus`: Modulus for the inverse.
+///
+/// # Returns
+/// - `Option<BigUint>`: `Some(inv)` if `a * inv ≡ 1 (mod modulus)`, otherwise `None`.
+///
+/// # Expected Output
+/// - Returns `None` when `a` and `modulus` are not coprime; no side effects.
 pub fn mod_inverse(a: &BigUint, modulus: &BigUint) -> Option<BigUint> {
     let a_int = BigInt::from(a.clone());
     let m_int = BigInt::from(modulus.clone());
@@ -33,6 +55,16 @@ pub fn mod_inverse(a: &BigUint, modulus: &BigUint) -> Option<BigUint> {
     x.to_biguint()
 }
 
+/// Encodes a `BigUint` as a lowercase hexadecimal string.
+///
+/// # Parameters
+/// - `value`: Integer to encode.
+///
+/// # Returns
+/// - `String`: Hex string without `0x` prefix; `"0"` if the value is zero.
+///
+/// # Expected Output
+/// - Returns a lowercase hex representation; no side effects.
 pub fn to_hex(value: &BigUint) -> String {
     let bytes = value.to_bytes_be();
     if bytes.is_empty() || bytes.iter().all(|b| *b == 0) {
@@ -45,10 +77,31 @@ pub fn to_hex(value: &BigUint) -> String {
     hex
 }
 
+/// Returns the number of bits required to represent `value`.
+///
+/// # Parameters
+/// - `value`: Integer whose bit width is measured.
+///
+/// # Returns
+/// - `u64`: Bit length (0 for zero).
+///
+/// # Expected Output
+/// - Returns the bit length; no side effects.
 pub fn bit_length(value: &BigUint) -> u64 {
     value.bits()
 }
 
+/// Samples a probable prime with the specified bit width.
+///
+/// # Parameters
+/// - `bits`: Desired bit width (must fit in `u64` range).
+/// - `rng`: Random number generator for candidate selection.
+///
+/// # Returns
+/// - `u64`: A probable prime with the requested bit width (odd).
+///
+/// # Expected Output
+/// - Returns a probable prime; no stdout/stderr output.
 pub fn random_prime_with_bits(bits: u32, rng: &mut StdRng) -> u64 {
     let lower = (1u64 << (bits.saturating_sub(1))).max(3);
     let upper = (1u64 << bits) - 1;
@@ -61,6 +114,17 @@ pub fn random_prime_with_bits(bits: u32, rng: &mut StdRng) -> u64 {
     }
 }
 
+/// Generates a random `BigUint` with up to the requested bit width.
+///
+/// # Parameters
+/// - `bits`: Requested bit width (0 yields 0).
+/// - `rng`: Random number generator for bytes.
+///
+/// # Returns
+/// - `BigUint`: Random value with the top bit set when possible.
+///
+/// # Expected Output
+/// - Returns a random integer with the requested width; no side effects.
 pub fn random_biguint_bits(bits: u32, rng: &mut StdRng) -> BigUint {
     if bits == 0 {
         return BigUint::zero();
@@ -79,6 +143,16 @@ pub fn random_biguint_bits(bits: u32, rng: &mut StdRng) -> BigUint {
     BigUint::from_bytes_be(&bytes)
 }
 
+/// Performs a Miller-Rabin probable-prime test for `u64` values.
+///
+/// # Parameters
+/// - `n`: Integer to test.
+///
+/// # Returns
+/// - `bool`: `true` if `n` is a probable prime, `false` if composite.
+///
+/// # Expected Output
+/// - Returns a deterministic answer for the selected bases; no side effects.
 pub fn is_probable_prime(n: u64) -> bool {
     if n < 2 {
         return false;
@@ -111,6 +185,16 @@ pub fn is_probable_prime(n: u64) -> bool {
     true
 }
 
+/// Decomposes `value` into `d * 2^s` with `d` odd.
+///
+/// # Parameters
+/// - `value`: Integer to decompose.
+///
+/// # Returns
+/// - `(u64, u32)`: Tuple of `(d, s)` such that `value = d * 2^s`.
+///
+/// # Expected Output
+/// - Returns the odd component and exponent; no side effects.
 fn decompose(mut value: u64) -> (u64, u32) {
     let mut s = 0u32;
     while value % 2 == 0 {
@@ -120,6 +204,18 @@ fn decompose(mut value: u64) -> (u64, u32) {
     (value, s)
 }
 
+/// Computes `base^exponent mod modulus` using exponentiation by squaring.
+///
+/// # Parameters
+/// - `base`: Base value.
+/// - `exponent`: Exponent value.
+/// - `modulus`: Modulus for reduction.
+///
+/// # Returns
+/// - `u64`: Modular exponentiation result.
+///
+/// # Expected Output
+/// - Returns the modular power; no side effects.
 fn mod_pow_u64(mut base: u64, mut exponent: u64, modulus: u64) -> u64 {
     let mut result = 1u64 % modulus;
     base %= modulus;
@@ -133,6 +229,16 @@ fn mod_pow_u64(mut base: u64, mut exponent: u64, modulus: u64) -> u64 {
     result
 }
 
+/// Computes Euler's totient from a factorization `(p, e)` list.
+///
+/// # Parameters
+/// - `factors`: Prime power factors for `n`, as `(prime, exponent)`.
+///
+/// # Returns
+/// - `BigUint`: `phi(n)` computed as `Π (p-1) * p^(e-1)`.
+///
+/// # Expected Output
+/// - Returns the totient value; no side effects.
 pub fn compute_totient(factors: &[(BigUint, u64)]) -> BigUint {
     let mut phi = BigUint::one();
     for (p, e) in factors {
@@ -145,6 +251,17 @@ pub fn compute_totient(factors: &[(BigUint, u64)]) -> BigUint {
     phi
 }
 
+/// Samples a random `BigUint` in the range `[0, upper)`.
+///
+/// # Parameters
+/// - `upper`: Exclusive upper bound.
+/// - `rng`: Random number generator for sampling.
+///
+/// # Returns
+/// - `BigUint`: A uniformly sampled value below `upper` (or 0 if `upper` is 0).
+///
+/// # Expected Output
+/// - Returns a random value below `upper`; no side effects.
 pub fn random_biguint_below(upper: &BigUint, rng: &mut StdRng) -> BigUint {
     if upper.is_zero() {
         return BigUint::zero();
@@ -158,6 +275,17 @@ pub fn random_biguint_below(upper: &BigUint, rng: &mut StdRng) -> BigUint {
     }
 }
 
+/// Computes a modular square root using Tonelli-Shanks for odd prime `p`.
+///
+/// # Parameters
+/// - `a`: Value whose square root is sought.
+/// - `p`: Odd prime modulus.
+///
+/// # Returns
+/// - `BigUint`: A square root `r` such that `r^2 ≡ a (mod p)` when one exists.
+///
+/// # Expected Output
+/// - Returns `0` for `a = 0`; returns `1` when no root exists per Legendre symbol.
 pub fn modular_sqrt(a: &BigUint, p: &BigUint) -> BigUint {
     // Tonelli-Shanks for odd prime p; demo uses small-ish primes so this is fine.
     if a.is_zero() {
@@ -210,6 +338,17 @@ pub fn modular_sqrt(a: &BigUint, p: &BigUint) -> BigUint {
     r
 }
 
+/// Computes the Legendre symbol `(a | p)`.
+///
+/// # Parameters
+/// - `a`: Value to test.
+/// - `p`: Odd prime modulus.
+///
+/// # Returns
+/// - `BigInt`: `1` if `a` is a quadratic residue, `-1` if non-residue, `0` if divisible.
+///
+/// # Expected Output
+/// - Returns the Legendre symbol value; no side effects.
 pub fn legendre_symbol(a: &BigUint, p: &BigUint) -> BigInt {
     let ls = a.modpow(&((p - BigUint::one()) >> 1), p);
     if ls.is_zero() {
@@ -221,6 +360,18 @@ pub fn legendre_symbol(a: &BigUint, p: &BigUint) -> BigInt {
     }
 }
 
+/// Attempts to factor `n` into prime powers before a deadline.
+///
+/// # Parameters
+/// - `n`: Composite (or prime) integer to factor.
+/// - `rng`: Random number generator used by Pollard Rho.
+/// - `deadline`: Time limit for the factorization attempt.
+///
+/// # Returns
+/// - `Option<Vec<(BigUint, u64)>>`: `Some` list of factors on success, `None` on timeout.
+///
+/// # Expected Output
+/// - Returns a sorted, coalesced factor list when successful; no stdout/stderr output.
 pub fn factor_composite_with_timeout(
     n: &BigUint,
     rng: &mut StdRng,
@@ -234,6 +385,19 @@ pub fn factor_composite_with_timeout(
     Some(coalesce_factors(factors))
 }
 
+/// Recursively factors `n`, populating `out` with prime factors.
+///
+/// # Parameters
+/// - `n`: Integer to factor.
+/// - `out`: Output list to be populated with `(prime, exponent)` pairs.
+/// - `rng`: Random number generator for Pollard Rho steps.
+/// - `deadline`: Time limit; the function returns `false` if exceeded.
+///
+/// # Returns
+/// - `bool`: `true` if factorization completed before the deadline.
+///
+/// # Expected Output
+/// - On success, `out` is extended with factors; no stdout/stderr output.
 pub fn factor_recursive(n: BigUint, out: &mut Vec<(BigUint, u64)>, rng: &mut StdRng, deadline: Instant) -> bool {
     if Instant::now() >= deadline {
         return false;
@@ -252,6 +416,16 @@ pub fn factor_recursive(n: BigUint, out: &mut Vec<(BigUint, u64)>, rng: &mut Std
     factor_recursive(divisor, out, rng, deadline) && factor_recursive(other, out, rng, deadline)
 }
 
+/// Merges duplicate prime factors by summing their exponents.
+///
+/// # Parameters
+/// - `factors`: Unsorted list of `(prime, exponent)` entries.
+///
+/// # Returns
+/// - `Vec<(BigUint, u64)>`: Sorted list with merged exponents.
+///
+/// # Expected Output
+/// - Returns an empty vector when given no factors; no side effects.
 pub fn coalesce_factors(mut factors: Vec<(BigUint, u64)>) -> Vec<(BigUint, u64)> {
     if factors.is_empty() {
         return factors;
@@ -271,6 +445,18 @@ pub fn coalesce_factors(mut factors: Vec<(BigUint, u64)>) -> Vec<(BigUint, u64)>
     merged
 }
 
+/// Attempts to find a non-trivial factor of `n` using Pollard's Rho.
+///
+/// # Parameters
+/// - `n`: Integer to factor (must be composite for success).
+/// - `rng`: Random number generator for selecting the polynomial constant and seeds.
+/// - `deadline`: Time limit for the search.
+///
+/// # Returns
+/// - `Option<BigUint>`: `Some(factor)` if found before the deadline; otherwise `None`.
+///
+/// # Expected Output
+/// - Returns `2` immediately when `n` is even; no stdout/stderr output.
 pub fn pollard_rho(n: &BigUint, rng: &mut StdRng, deadline: Instant) -> Option<BigUint> {
     if n.is_even() {
         return Some(BigUint::from(2u8));
@@ -303,6 +489,16 @@ pub fn pollard_rho(n: &BigUint, rng: &mut StdRng, deadline: Instant) -> Option<B
     None
 }
 
+/// Performs a Miller-Rabin probable-prime test for `BigUint` values.
+///
+/// # Parameters
+/// - `n`: Integer to test.
+///
+/// # Returns
+/// - `bool`: `true` if `n` is a probable prime, `false` if composite.
+///
+/// # Expected Output
+/// - Returns a deterministic answer for the selected bases; no side effects.
 pub fn is_probable_prime_big(n: &BigUint) -> bool {
     if n <= &BigUint::from(3u8) {
         return *n == BigUint::from(2u8) || *n == BigUint::from(3u8);
@@ -345,6 +541,16 @@ pub fn is_probable_prime_big(n: &BigUint) -> bool {
     true
 }
 
+/// Decomposes `value` into `d * 2^s` with `d` odd (BigUint variant).
+///
+/// # Parameters
+/// - `value`: Integer to decompose.
+///
+/// # Returns
+/// - `(BigUint, u32)`: Tuple of `(d, s)` such that `value = d * 2^s`.
+///
+/// # Expected Output
+/// - Returns the odd component and exponent; no side effects.
 pub fn decompose_big(mut value: BigUint) -> (BigUint, u32) {
     let mut s = 0u32;
     let one = BigUint::one();

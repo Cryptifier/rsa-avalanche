@@ -43,6 +43,18 @@ pub struct RCandidateSettings {
     pub small_prime_factors_per_candidate: usize,
 }
 
+/// Generates `r` candidates using the configured strategy.
+///
+/// # Parameters
+/// - `n`: RSA modulus used to bound/scale candidates in factoring mode.
+/// - `settings`: Candidate generation configuration.
+/// - `rng`: Random number generator for sampling candidates.
+///
+/// # Returns
+/// - `Vec<(BigUint, Vec<(BigUint, u64)>)>`: List of `(r, factors)` pairs.
+///
+/// # Expected Output
+/// - Returns an empty list when no candidates are found; may print progress logs.
 pub fn generate_r_candidates(
     n: &BigUint,
     settings: &RCandidateSettings,
@@ -54,6 +66,19 @@ pub fn generate_r_candidates(
     }
 }
 
+/// Generates a batch of `r` candidates with a fixed batch size.
+///
+/// # Parameters
+/// - `n`: RSA modulus used to bound/scale candidates in factoring mode.
+/// - `settings`: Candidate generation configuration (cloned and adjusted for batch size).
+/// - `rng`: Random number generator for sampling candidates.
+/// - `batch_size`: Target number of candidates to produce.
+///
+/// # Returns
+/// - `Vec<(BigUint, Vec<(BigUint, u64)>)>`: List of `(r, factors)` pairs.
+///
+/// # Expected Output
+/// - Returns a list with up to `batch_size` entries; may print progress logs.
 pub fn generate_r_candidates_batch(
     n: &BigUint,
     settings: &RCandidateSettings,
@@ -67,6 +92,17 @@ pub fn generate_r_candidates_batch(
     generate_r_candidates(n, &batch_settings, rng)
 }
 
+/// Builds `r` candidates by multiplying distinct small primes.
+///
+/// # Parameters
+/// - `settings`: Candidate generation configuration (uses `small_primes` list).
+/// - `rng`: Random number generator for shuffling prime selections.
+///
+/// # Returns
+/// - `Vec<(BigUint, Vec<(BigUint, u64)>)>`: List of `(r, factors)` pairs.
+///
+/// # Expected Output
+/// - Returns an empty list if not enough primes are available; may read/write reuse files.
 pub fn generate_r_candidates_from_small_primes(
     settings: &RCandidateSettings,
     rng: &mut StdRng,
@@ -172,6 +208,18 @@ pub fn generate_r_candidates_from_small_primes(
     collected
 }
 
+/// Builds `r` candidates by sampling composites and factoring them.
+///
+/// # Parameters
+/// - `n`: RSA modulus used to scale candidate selection.
+/// - `settings`: Candidate generation configuration (including reuse and override options).
+/// - `rng`: Random number generator for candidate sampling.
+///
+/// # Returns
+/// - `Vec<(BigUint, Vec<(BigUint, u64)>)>`: List of `(r, factors)` pairs.
+///
+/// # Expected Output
+/// - Returns a list of candidates meeting factor constraints; may print progress logs.
 pub fn generate_r_candidates_via_factoring(
     n: &BigUint,
     settings: &RCandidateSettings,
@@ -299,6 +347,16 @@ pub fn generate_r_candidates_via_factoring(
     collected
 }
 
+/// Loads previously generated `r` candidates from a CSV file.
+///
+/// # Parameters
+/// - `path`: Path to the reuse CSV file.
+///
+/// # Returns
+/// - `Vec<(BigUint, Vec<(BigUint, u64)>)>`: Parsed `(r, factors)` entries.
+///
+/// # Expected Output
+/// - Returns an empty list on missing/invalid files; may print parsing errors.
 fn load_reuse_candidates(path: &str) -> Vec<(BigUint, Vec<(BigUint, u64)>)> {
     let file = match fs::File::open(path) {
         Ok(f) => f,
@@ -362,6 +420,17 @@ fn load_reuse_candidates(path: &str) -> Vec<(BigUint, Vec<(BigUint, u64)>)> {
     entries
 }
 
+/// Appends newly generated `r` candidates to a reuse CSV file.
+///
+/// # Parameters
+/// - `path`: Path to the reuse CSV file.
+/// - `entries`: Candidate entries to append.
+///
+/// # Returns
+/// - `()`: This function returns nothing.
+///
+/// # Expected Output
+/// - Appends lines to the file when possible; may print I/O errors.
 fn append_reuse_candidates(path: &str, entries: &[(BigUint, Vec<(BigUint, u64)>)]) {
     if entries.is_empty() {
         return;
@@ -384,6 +453,16 @@ fn append_reuse_candidates(path: &str, entries: &[(BigUint, Vec<(BigUint, u64)>)
     }
 }
 
+/// Parses a `p^e;...` factor list from CSV form.
+///
+/// # Parameters
+/// - `raw`: Raw CSV factors string (e.g., `"3^1;5^2"`).
+///
+/// # Returns
+/// - `Option<Vec<(BigUint, u64)>>`: Parsed factor list or `None` if invalid.
+///
+/// # Expected Output
+/// - Returns `None` on parse errors or empty input; no side effects.
 fn parse_factors_csv(raw: &str) -> Option<Vec<(BigUint, u64)>> {
     let mut factors = Vec::new();
 
@@ -404,6 +483,16 @@ fn parse_factors_csv(raw: &str) -> Option<Vec<(BigUint, u64)>> {
     }
 }
 
+/// Formats a factor list as `p^e;...` for CSV output.
+///
+/// # Parameters
+/// - `factors`: Factor list to format.
+///
+/// # Returns
+/// - `String`: CSV-friendly factor string (empty for no factors).
+///
+/// # Expected Output
+/// - Returns a formatted string; no side effects.
 fn format_factors_csv(factors: &[(BigUint, u64)]) -> String {
     factors
         .iter()

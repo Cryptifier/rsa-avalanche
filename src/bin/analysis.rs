@@ -57,12 +57,33 @@ struct Args {
     config: String,
 }
 
+/// Entry point for the RSA round-trip demo CLI.
+///
+/// # Parameters
+/// - None.
+///
+/// # Returns
+/// - `Result<(), Box<dyn Error>>`: `Ok(())` on success or an error on failure.
+///
+/// # Expected Output
+/// - Prints key generation, encryption/decryption, and analysis results; may write output files.
 fn main() -> Result<(), Box<dyn Error>> {
     let args = Args::parse();
     let config = load_config(&args.config)?;
     run_demo(args, config)
 }
 
+/// Runs the core RSA demo and analysis pipeline.
+///
+/// # Parameters
+/// - `args`: Parsed CLI arguments controlling key generation and message selection.
+/// - `config`: Loaded configuration driving analysis features.
+///
+/// # Returns
+/// - `Result<(), Box<dyn Error>>`: `Ok(())` on success or an error on failure.
+///
+/// # Expected Output
+/// - Prints RSA parameters and analysis summaries; may emit CSV/PNG artifacts.
 fn run_demo(args: Args, config: Config) -> Result<(), Box<dyn Error>> {
     let mut rng: StdRng = match args.seed {
         Some(seed) => StdRng::seed_from_u64(seed),
@@ -573,6 +594,16 @@ impl Default for EngineConfig {
     }
 }
 
+/// Loads the JSON/JSON5 config from disk, falling back to defaults if missing.
+///
+/// # Parameters
+/// - `path`: Path to the configuration file.
+///
+/// # Returns
+/// - `Result<Config, Box<dyn Error>>`: Parsed config or a default config if not found.
+///
+/// # Expected Output
+/// - Prints a notice when the file is missing; no other side effects on success.
 fn load_config(path: &str) -> Result<Config, Box<dyn Error>> {
     let cfg_path = Path::new(path);
     if !cfg_path.exists() {
@@ -597,6 +628,19 @@ fn load_config(path: &str) -> Result<Config, Box<dyn Error>> {
     Ok(config)
 }
 
+/// Logs progress updates at 10% increments.
+///
+/// # Parameters
+/// - `done`: Number of completed items.
+/// - `total`: Total number of items.
+/// - `next_pct`: Mutable threshold for the next log event.
+/// - `label`: Human-readable label for the progress report.
+///
+/// # Returns
+/// - `()`: This function returns nothing.
+///
+/// # Expected Output
+/// - Prints progress updates to stdout when thresholds are reached.
 fn log_progress_every_ten_percent(done: u64, total: u64, next_pct: &mut u64, label: &str) {
     if total == 0 {
         return;
@@ -625,6 +669,16 @@ struct StatSummary {
     count: usize,
 }
 
+/// Computes mean, standard deviation, min, and max for a slice of values.
+///
+/// # Parameters
+/// - `values`: Input values to summarize.
+///
+/// # Returns
+/// - `Option<StatSummary>`: Summary statistics or `None` if `values` is empty.
+///
+/// # Expected Output
+/// - Returns `None` on empty input; no side effects.
 fn compute_stats(values: &[f64]) -> Option<StatSummary> {
     if values.is_empty() {
         return None;
@@ -660,6 +714,17 @@ fn compute_stats(values: &[f64]) -> Option<StatSummary> {
     })
 }
 
+/// Writes a histogram image for overlap percentages.
+///
+/// # Parameters
+/// - `overlaps_pct`: Overlap values in percentage form.
+/// - `label`: Label used in the chart caption and filename.
+///
+/// # Returns
+/// - `Result<(), Box<dyn Error>>`: `Ok(())` on success or an I/O/plotting error.
+///
+/// # Expected Output
+/// - Writes a PNG into `./images` and prints the output path.
 fn plot_overlap_histogram(overlaps_pct: &[f64], label: &str) -> Result<(), Box<dyn Error>> {
     if overlaps_pct.is_empty() {
         return Ok(());
@@ -729,6 +794,16 @@ struct RampSummary {
     total_strength: usize,
 }
 
+/// Computes the mean of a slice of `f64` values.
+///
+/// # Parameters
+/// - `values`: Input values.
+///
+/// # Returns
+/// - `f64`: Arithmetic mean (0.0 for empty input).
+///
+/// # Expected Output
+/// - Returns a floating-point mean; no side effects.
 fn mean_f64(values: &[f64]) -> f64 {
     if values.is_empty() {
         return 0.0;
@@ -743,6 +818,17 @@ struct ExportSample {
     decryption_bytes_le: Vec<u8>,
 }
 
+/// Reads a single bit from a little-endian byte slice.
+///
+/// # Parameters
+/// - `bytes`: Little-endian byte slice.
+/// - `idx`: Bit index (LSB = 0).
+///
+/// # Returns
+/// - `bool`: The bit value at the requested index.
+///
+/// # Expected Output
+/// - Returns `false` for out-of-range indices; no side effects.
 fn bit_from_bytes_le(bytes: &[u8], idx: usize) -> bool {
     let byte_idx = idx / 8;
     if byte_idx >= bytes.len() {
@@ -752,6 +838,17 @@ fn bit_from_bytes_le(bytes: &[u8], idx: usize) -> bool {
     ((bytes[byte_idx] >> bit_idx) & 1) == 1
 }
 
+/// Converts a `BigUint` to a fixed-width little-endian bit vector.
+///
+/// # Parameters
+/// - `value`: Integer to convert.
+/// - `width`: Number of bits to emit.
+///
+/// # Returns
+/// - `Vec<bool>`: Little-endian bit vector of length `width`.
+///
+/// # Expected Output
+/// - Returns a vector padded with `false` bits if needed; no side effects.
 fn biguint_to_bits_le(value: &BigUint, width: usize) -> Vec<bool> {
     let bytes = value.to_bytes_le();
     (0..width)
@@ -759,6 +856,20 @@ fn biguint_to_bits_le(value: &BigUint, width: usize) -> Vec<bool> {
         .collect()
 }
 
+/// Builds speculative oracle bit vectors using `r` candidates and HBC transforms.
+///
+/// # Parameters
+/// - `ctx`: RSA context containing key material.
+/// - `engine`: Engine configuration controlling HBC and candidate settings.
+/// - `message`: Plaintext message used to derive oracle bits.
+/// - `k_oracles`: Maximum number of oracle samples to collect.
+/// - `rng`: Random number generator used for candidate sampling.
+///
+/// # Returns
+/// - `Result<Vec<Vec<bool>>, Box<dyn Error>>`: Oracle bit vectors or an error if none.
+///
+/// # Expected Output
+/// - Returns a non-empty list of bit vectors on success; no direct stdout output.
 fn collect_speculative_oracle_bits(
     ctx: &RSAContext,
     engine: &EngineConfig,
@@ -820,6 +931,18 @@ fn collect_speculative_oracle_bits(
     Ok(oracles)
 }
 
+/// Runs the enciphered export pipeline and writes per-bit match statistics.
+///
+/// # Parameters
+/// - `ctx`: RSA context containing key material.
+/// - `engine`: Engine configuration controlling export behavior.
+/// - `rng`: Random number generator used for sampling messages.
+///
+/// # Returns
+/// - `Result<(), Box<dyn Error>>`: `Ok(())` on success or an error on failure.
+///
+/// # Expected Output
+/// - Writes CSV outputs (and optional ramp CSV), prints progress and summary lines.
 fn run_enciphered_export(
     ctx: &RSAContext,
     engine: &EngineConfig,
@@ -1100,6 +1223,18 @@ fn run_enciphered_export(
     Ok(())
 }
 
+/// Selects the plaintext message according to CLI args and configuration.
+///
+/// # Parameters
+/// - `args_message`: Optional CLI-provided message override.
+/// - `engine`: Engine configuration with message settings.
+/// - `rng`: Random number generator for random message selection.
+///
+/// # Returns
+/// - `BigUint`: Selected message as a big integer.
+///
+/// # Expected Output
+/// - Returns the selected message; no side effects.
 fn select_message(args_message: Option<String>, engine: &EngineConfig, rng: &mut StdRng) -> BigUint {
     if let Some(explicit) = args_message {
         return BigUint::from_bytes_be(explicit.as_bytes());
@@ -1110,6 +1245,18 @@ fn select_message(args_message: Option<String>, engine: &EngineConfig, rng: &mut
     BigUint::from_bytes_be(engine.message.fixed_message.as_bytes())
 }
 
+/// Samples a random message that is non-zero and less than `n` (when provided).
+///
+/// # Parameters
+/// - `engine`: Engine configuration with message bit-length settings.
+/// - `n`: Optional modulus bound; use zero to skip the bound.
+/// - `rng`: Random number generator for sampling.
+///
+/// # Returns
+/// - `BigUint`: Random message value.
+///
+/// # Expected Output
+/// - Returns a non-zero value under `n` when `n` is non-zero; no side effects.
 fn random_message_under_n(engine: &EngineConfig, n: &BigUint, rng: &mut StdRng) -> BigUint {
     let mut target_bits = engine.message.bits.max(1);
     if !n.is_zero() {
@@ -1127,6 +1274,16 @@ fn random_message_under_n(engine: &EngineConfig, n: &BigUint, rng: &mut StdRng) 
     }
 }
 
+/// Builds `RCandidateSettings` from the engine configuration.
+///
+/// # Parameters
+/// - `engine`: Engine configuration containing candidate fields.
+///
+/// # Returns
+/// - `RCandidateSettings`: Fully populated candidate settings.
+///
+/// # Expected Output
+/// - Returns a settings struct; no side effects.
 fn build_r_candidate_settings(engine: &EngineConfig) -> RCandidateSettings {
     let override_best_r = engine.override_best_r.as_ref().and_then(|raw| {
         let trimmed = raw.trim();
@@ -1156,166 +1313,576 @@ fn build_r_candidate_settings(engine: &EngineConfig) -> RCandidateSettings {
     }
 }
 
+/// Default flag for RSA key generation.
+///
+/// # Parameters
+/// - None.
+///
+/// # Returns
+/// - `bool`: `true` to generate keys by default.
+///
+/// # Expected Output
+/// - Returns a constant default value; no side effects.
 fn default_generate() -> bool {
     true
 }
 
+/// Default RSA public exponent.
+///
+/// # Parameters
+/// - None.
+///
+/// # Returns
+/// - `u64`: Default public exponent value.
+///
+/// # Expected Output
+/// - Returns a constant default value; no side effects.
 fn default_e() -> u64 {
     65_537
 }
 
+/// Default fixed plaintext message.
+///
+/// # Parameters
+/// - None.
+///
+/// # Returns
+/// - `String`: Default message string.
+///
+/// # Expected Output
+/// - Returns a constant default value; no side effects.
 fn default_fixed_message() -> String {
     "afterstate".to_string()
 }
 
+/// Default flag for random message selection.
+///
+/// # Parameters
+/// - None.
+///
+/// # Returns
+/// - `bool`: `false` to use a fixed message by default.
+///
+/// # Expected Output
+/// - Returns a constant default value; no side effects.
 fn default_message_random() -> bool {
     false
 }
 
+/// Default message bit length for random generation.
+///
+/// # Parameters
+/// - None.
+///
+/// # Returns
+/// - `u32`: Default bit length.
+///
+/// # Expected Output
+/// - Returns a constant default value; no side effects.
 fn default_message_bits() -> u32 {
     56
 }
 
+/// Default flag for homomorphic base conversion.
+///
+/// # Parameters
+/// - None.
+///
+/// # Returns
+/// - `bool`: Default base conversion setting.
+///
+/// # Expected Output
+/// - Returns a constant default value; no side effects.
 fn default_base_convert() -> bool {
     true
 }
 
+/// Default flag for inverting derived message bits.
+///
+/// # Parameters
+/// - None.
+///
+/// # Returns
+/// - `bool`: Default invert-bits setting.
+///
+/// # Expected Output
+/// - Returns a constant default value; no side effects.
 fn default_invert_bits() -> bool {
     false
 }
 
+/// Default Rabin exponent used in HBC-related computations.
+///
+/// # Parameters
+/// - None.
+///
+/// # Returns
+/// - `u64`: Default exponent value.
+///
+/// # Expected Output
+/// - Returns a constant default value; no side effects.
 fn default_rabin_exponent() -> u64 {
     2
 }
 
+/// Default minimum number of message trials.
+///
+/// # Parameters
+/// - None.
+///
+/// # Returns
+/// - `u64`: Default minimum trials.
+///
+/// # Expected Output
+/// - Returns a constant default value; no side effects.
 fn default_min_message_trials() -> u64 {
     1
 }
 
+/// Default overlap percentage threshold for reporting.
+///
+/// # Parameters
+/// - None.
+///
+/// # Returns
+/// - `f64`: Default threshold in percent.
+///
+/// # Expected Output
+/// - Returns a constant default value; no side effects.
 fn default_overlap_report_threshold() -> f64 {
     51.0
 }
 
+/// Default minimum number of r candidates to generate.
+///
+/// # Parameters
+/// - None.
+///
+/// # Returns
+/// - `u64`: Default minimum count.
+///
+/// # Expected Output
+/// - Returns a constant default value; no side effects.
 fn default_process_min_count() -> u64 {
     1
 }
 
+/// Default number of r candidates to generate.
+///
+/// # Parameters
+/// - None.
+///
+/// # Returns
+/// - `u64`: Default count.
+///
+/// # Expected Output
+/// - Returns a constant default value; no side effects.
 fn default_process_count() -> u64 {
     8
 }
 
+/// Default scaling factor for candidate sampling.
+///
+/// # Parameters
+/// - None.
+///
+/// # Returns
+/// - `u32`: Default scale value.
+///
+/// # Expected Output
+/// - Returns a constant default value; no side effects.
 fn default_process_scale() -> u32 {
     8
 }
 
+/// Default maximum attempts for selecting a best r candidate.
+///
+/// # Parameters
+/// - None.
+///
+/// # Returns
+/// - `u64`: Default attempt count.
+///
+/// # Expected Output
+/// - Returns a constant default value; no side effects.
 fn default_process_max_best_attempts() -> u64 {
     4
 }
 
+/// Default minimum prime factor for r candidates.
+///
+/// # Parameters
+/// - None.
+///
+/// # Returns
+/// - `u64`: Default minimum factor.
+///
+/// # Expected Output
+/// - Returns a constant default value; no side effects.
 fn default_process_min_factor() -> u64 {
     3
 }
 
+/// Default flag for using RSA decryption in HBC flow.
+///
+/// # Parameters
+/// - None.
+///
+/// # Returns
+/// - `bool`: Default decrypt setting.
+///
+/// # Expected Output
+/// - Returns a constant default value; no side effects.
 fn default_use_rs_decrypt() -> bool {
     true
 }
 
+/// Default number of test iterations.
+///
+/// # Parameters
+/// - None.
+///
+/// # Returns
+/// - `u64`: Default test iteration count.
+///
+/// # Expected Output
+/// - Returns a constant default value; no side effects.
 fn default_test_iterations() -> u64 {
     1
 }
 
+/// Default number of alternate iterations for fixed r testing.
+///
+/// # Parameters
+/// - None.
+///
+/// # Returns
+/// - `u64`: Default alternate iteration count.
+///
+/// # Expected Output
+/// - Returns a constant default value; no side effects.
 fn default_alt_iterations() -> u64 {
     0
 }
 
+/// Default flag for r_use_list stress tests.
+///
+/// # Parameters
+/// - None.
+///
+/// # Returns
+/// - `bool`: Default enable setting.
+///
+/// # Expected Output
+/// - Returns a constant default value; no side effects.
 fn default_r_use_list_enable() -> bool {
     false
 }
 
+/// Default flag for r_stress range testing.
+///
+/// # Parameters
+/// - None.
+///
+/// # Returns
+/// - `bool`: Default enable setting.
+///
+/// # Expected Output
+/// - Returns a constant default value; no side effects.
 fn default_r_stress_test_enable() -> bool {
     false
 }
 
+/// Default flag for reusing previously generated r candidates.
+///
+/// # Parameters
+/// - None.
+///
+/// # Returns
+/// - `bool`: Default reuse setting.
+///
+/// # Expected Output
+/// - Returns a constant default value; no side effects.
 fn default_reuse_r_candidates() -> bool {
     false
 }
 
+/// Default path for the r candidates reuse file.
+///
+/// # Parameters
+/// - None.
+///
+/// # Returns
+/// - `String`: Default reuse path.
+///
+/// # Expected Output
+/// - Returns a constant default value; no side effects.
 fn default_reuse_r_candidates_path() -> String {
     "r_candidates.csv".to_string()
 }
 
+/// Default flag for append-only reuse file behavior.
+///
+/// # Parameters
+/// - None.
+///
+/// # Returns
+/// - `bool`: Default append-only setting.
+///
+/// # Expected Output
+/// - Returns a constant default value; no side effects.
 fn default_reuse_r_candidates_append_only() -> bool {
     false
 }
 
+/// Default r candidate generation mode.
+///
+/// # Parameters
+/// - None.
+///
+/// # Returns
+/// - `RCandidateMode`: Default mode.
+///
+/// # Expected Output
+/// - Returns a constant default value; no side effects.
 fn default_r_candidate_mode() -> RCandidateMode {
     RCandidateMode::Factoring
 }
 
+/// Default list of small primes for r candidate generation.
+///
+/// # Parameters
+/// - None.
+///
+/// # Returns
+/// - `Vec<u64>`: Default small primes list.
+///
+/// # Expected Output
+/// - Returns a constant default value; no side effects.
 fn default_r_candidate_small_primes() -> Vec<u64> {
     vec![3, 5, 7, 11, 13, 17]
 }
 
+/// Default count of small prime factors per r candidate.
+///
+/// # Parameters
+/// - None.
+///
+/// # Returns
+/// - `usize`: Default factor count.
+///
+/// # Expected Output
+/// - Returns a constant default value; no side effects.
 fn default_r_candidate_small_prime_factors() -> usize {
     3
 }
 
+/// Default flag for enabling the combiner experiment.
+///
+/// # Parameters
+/// - None.
+///
+/// # Returns
+/// - `bool`: Default enable setting.
+///
+/// # Expected Output
+/// - Returns a constant default value; no side effects.
 fn default_combiner_enable() -> bool {
     false
 }
 
+/// Default number of oracles for the combiner experiment.
+///
+/// # Parameters
+/// - None.
+///
+/// # Returns
+/// - `usize`: Default oracle count.
+///
+/// # Expected Output
+/// - Returns a constant default value; no side effects.
 fn default_combiner_k_oracles() -> usize {
     5
 }
 
+/// Default match probability for oracle sampling.
+///
+/// # Parameters
+/// - None.
+///
+/// # Returns
+/// - `f64`: Default match probability.
+///
+/// # Expected Output
+/// - Returns a constant default value; no side effects.
 fn default_combiner_match_probability() -> f64 {
     0.75
 }
 
+/// Default tie-breaker bit for combiner voting.
+///
+/// # Parameters
+/// - None.
+///
+/// # Returns
+/// - `bool`: Default tie-breaker value.
+///
+/// # Expected Output
+/// - Returns a constant default value; no side effects.
 fn default_combiner_tie_breaker() -> bool {
     true
 }
 
+/// Default flag for enciphered export generation.
+///
+/// # Parameters
+/// - None.
+///
+/// # Returns
+/// - `bool`: Default enable setting.
+///
+/// # Expected Output
+/// - Returns a constant default value; no side effects.
 fn default_enciphered_export_enable() -> bool {
     false
 }
 
+/// Default number of enciphered export iterations.
+///
+/// # Parameters
+/// - None.
+///
+/// # Returns
+/// - `u64`: Default iteration count.
+///
+/// # Expected Output
+/// - Returns a constant default value; no side effects.
 fn default_enciphered_export_iterations() -> u64 {
     10_000
 }
 
+/// Default number of bins for enciphered export histograms.
+///
+/// # Parameters
+/// - None.
+///
+/// # Returns
+/// - `usize`: Default bin count.
+///
+/// # Expected Output
+/// - Returns a constant default value; no side effects.
 fn default_enciphered_export_bins() -> usize {
     128
 }
 
+/// Default window size for enciphered export frames.
+///
+/// # Parameters
+/// - None.
+///
+/// # Returns
+/// - `usize`: Default window size.
+///
+/// # Expected Output
+/// - Returns a constant default value; no side effects.
 fn default_enciphered_export_window() -> usize {
     512
 }
 
+/// Default stride between enciphered export frames.
+///
+/// # Parameters
+/// - None.
+///
+/// # Returns
+/// - `usize`: Default stride.
+///
+/// # Expected Output
+/// - Returns a constant default value; no side effects.
 fn default_enciphered_export_stride() -> usize {
     64
 }
 
+/// Default output CSV path for enciphered export.
+///
+/// # Parameters
+/// - None.
+///
+/// # Returns
+/// - `String`: Default CSV path.
+///
+/// # Expected Output
+/// - Returns a constant default value; no side effects.
 fn default_enciphered_export_output_csv() -> String {
     "enciphered_decryption_bins.csv".to_string()
 }
 
+/// Default ramp length for ramp detection in enciphered export.
+///
+/// # Parameters
+/// - None.
+///
+/// # Returns
+/// - `usize`: Default ramp length.
+///
+/// # Expected Output
+/// - Returns a constant default value; no side effects.
 fn default_enciphered_export_ramp_length() -> usize {
     3
 }
 
+/// Default ramp step percentage for ramp detection.
+///
+/// # Parameters
+/// - None.
+///
+/// # Returns
+/// - `f64`: Default ramp step percentage.
+///
+/// # Expected Output
+/// - Returns a constant default value; no side effects.
 fn default_enciphered_export_ramp_step_pct() -> f64 {
     0.05
 }
 
+/// Default list of tolerances for ramp detection.
+///
+/// # Parameters
+/// - None.
+///
+/// # Returns
+/// - `Vec<f64>`: Default tolerance values.
+///
+/// # Expected Output
+/// - Returns a constant default value; no side effects.
 fn default_enciphered_export_ramp_tolerances() -> Vec<f64> {
     vec![0.005, 0.01, 0.02]
 }
 
+/// Default output CSV path for ramp detection results.
+///
+/// # Parameters
+/// - None.
+///
+/// # Returns
+/// - `String`: Default CSV path.
+///
+/// # Expected Output
+/// - Returns a constant default value; no side effects.
 fn default_enciphered_export_ramp_csv() -> String {
     "enciphered_ramps.csv".to_string()
 }
 
+/// Deserializes an optional `BigUint` from a string or number JSON value.
+///
+/// # Parameters
+/// - `deserializer`: Serde deserializer provided by the caller.
+///
+/// # Returns
+/// - `Result<Option<BigUint>, D::Error>`: Parsed value or `None` when absent.
+///
+/// # Expected Output
+/// - Returns a parse error if the value is not a string/number or is invalid.
 fn deserialize_biguint_option<'de, D>(deserializer: D) -> Result<Option<BigUint>, D::Error>
 where
     D: serde::Deserializer<'de>,
@@ -1364,6 +1931,16 @@ struct MatchHistogram {
 }
 
 impl MatchHistogram {
+    /// Creates an empty match histogram.
+    ///
+    /// # Parameters
+    /// - None.
+    ///
+    /// # Returns
+    /// - `MatchHistogram`: A histogram with empty counters.
+    ///
+    /// # Expected Output
+    /// - Returns a new histogram; no side effects.
     fn new() -> Self {
         Self {
             matches: Vec::new(),
@@ -1371,6 +1948,17 @@ impl MatchHistogram {
         }
     }
 
+    /// Updates match counts for corresponding bits between two values.
+    ///
+    /// # Parameters
+    /// - `a`: First value to compare.
+    /// - `b`: Second value to compare.
+    ///
+    /// # Returns
+    /// - `()`: This method returns nothing.
+    ///
+    /// # Expected Output
+    /// - Updates internal counts; no stdout/stderr output.
     fn update(&mut self, a: &BigUint, b: &BigUint) {
         let a_bits = a.to_str_radix(2);
         let b_bits = b.to_str_radix(2);
@@ -1394,6 +1982,16 @@ impl MatchHistogram {
         }
     }
 
+    /// Writes a PNG histogram showing per-bit match frequency.
+    ///
+    /// # Parameters
+    /// - `label`: Label used in the chart caption and output filename.
+    ///
+    /// # Returns
+    /// - `Result<(), Box<dyn Error>>`: `Ok(())` on success or an I/O/plotting error.
+    ///
+    /// # Expected Output
+    /// - Writes a PNG into `./images` and prints the output path.
     fn write_histogram(&self, label: &str) -> Result<(), Box<dyn Error>> {
         if self.samples.is_empty() {
             return Ok(());
@@ -1457,6 +2055,22 @@ impl MatchHistogram {
     }
 }
 
+/// Runs message trials against generated r candidates and returns the best match report.
+///
+/// # Parameters
+/// - `ctx`: RSA context containing key material.
+/// - `_config`: Full config (currently unused).
+/// - `engine`: Engine configuration controlling trial behavior.
+/// - `message`: Base message to test (used on first trial).
+/// - `min_message_trials`: Minimum number of trial messages to run.
+/// - `rng`: Random number generator for sampling messages/candidates.
+/// - `histogram`: Histogram updated with match frequencies.
+///
+/// # Returns
+/// - `Result<TestReport, Box<dyn Error>>`: Best matching report or an error.
+///
+/// # Expected Output
+/// - Prints candidate generation info; updates `histogram` in-place.
 fn run_message_trial(
     ctx: &RSAContext,
     _config: &Config,
@@ -1551,6 +2165,21 @@ fn run_message_trial(
     best.ok_or_else(|| "no valid r candidates after filtering".into())
 }
 
+/// Runs multiple trials for a fixed r candidate and summarizes statistics.
+///
+/// # Parameters
+/// - `ctx`: RSA context containing key material.
+/// - `config`: Full config with engine settings.
+/// - `r_report`: Report describing the fixed r candidate to test.
+/// - `label`: Label used for logging and output filenames.
+/// - `iterations`: Number of iterations to run.
+/// - `rng`: Random number generator for sampling messages.
+///
+/// # Returns
+/// - `Option<(f64, f64, usize)>`: `(avg_bits, avg_overlap_pct, max_bits)` or `None` if skipped.
+///
+/// # Expected Output
+/// - Prints progress and statistics; may write histogram and overlap plots.
 fn run_fixed_r_trials(
     ctx: &RSAContext,
     config: &Config,
@@ -1688,6 +2317,21 @@ fn run_fixed_r_trials(
     Some((bits_stats.mean, overlap_stats.mean, max_bits))
 }
 
+/// Runs a stress test for a single r value and prints summary stats.
+///
+/// # Parameters
+/// - `label`: Label identifying the stress-test source.
+/// - `r`: Candidate r value to test.
+/// - `ctx`: RSA context containing key material.
+/// - `config`: Full configuration.
+/// - `engine`: Engine configuration controlling trial behavior.
+/// - `rng`: Random number generator for factorization/trials.
+///
+/// # Returns
+/// - `()`: This function returns nothing.
+///
+/// # Expected Output
+/// - Prints summary stats when factorization and trials succeed.
 fn run_r_stress_entry(
     label: &str,
     r: &BigUint,
@@ -1725,6 +2369,17 @@ fn run_r_stress_entry(
     }
 }
 
+/// Counts matching bits between two values (total and LSB run).
+///
+/// # Parameters
+/// - `a`: First value to compare.
+/// - `b`: Second value to compare.
+///
+/// # Returns
+/// - `(usize, usize)`: `(matching_lsb_run, matching_total)` counts.
+///
+/// # Expected Output
+/// - Returns counts based on binary string comparisons; no side effects.
 fn count_matching_bits(a: &BigUint, b: &BigUint) -> (usize, usize) {
     let a_bits = a.to_str_radix(2);
     let b_bits = b.to_str_radix(2);
@@ -1749,6 +2404,20 @@ fn count_matching_bits(a: &BigUint, b: &BigUint) -> (usize, usize) {
     (matching_lsb, matching_total)
 }
 
+/// Computes a derived value used in homomorphic base conversion flows.
+///
+/// # Parameters
+/// - `x`: Input value.
+/// - `p`: Modulus base.
+/// - `y`: Exponent parameter.
+/// - `apply_mod`: Whether to apply modulus at the end.
+/// - `use_other_root`: Whether to use the alternate square root branch.
+///
+/// # Returns
+/// - `BigUint`: Derived value based on modular square roots and exponentiation.
+///
+/// # Expected Output
+/// - Returns a computed `BigUint`; no side effects.
 fn get_larger_number(x: &BigUint, p: &BigUint, y: u32, apply_mod: bool, use_other_root: bool) -> BigUint {
     let p_y = p.pow(y);
     let p_y_minus_one = p.pow(y.saturating_sub(1));
@@ -1769,6 +2438,18 @@ fn get_larger_number(x: &BigUint, p: &BigUint, y: u32, apply_mod: bool, use_othe
     }
 }
 
+/// Applies the homomorphic base conversion formula.
+///
+/// # Parameters
+/// - `x`: Input value to convert.
+/// - `r`: Target modulus.
+/// - `p`: Source modulus.
+///
+/// # Returns
+/// - `BigUint`: Converted value reduced modulo `r`.
+///
+/// # Expected Output
+/// - Returns the base-converted value; no side effects.
 fn homomorphic_base_conversion(x: &BigUint, r: &BigUint, p: &BigUint) -> BigUint {
     let y = x % p;
     let z = p % r;
@@ -1777,6 +2458,19 @@ fn homomorphic_base_conversion(x: &BigUint, r: &BigUint, p: &BigUint) -> BigUint
     reduced % r
 }
 
+/// Dispatches between base conversion and division-based conversion.
+///
+/// # Parameters
+/// - `x`: Input value to convert.
+/// - `r`: Target modulus.
+/// - `p`: Source modulus.
+/// - `engine`: Engine configuration controlling conversion mode.
+///
+/// # Returns
+/// - `BigUint`: Converted value.
+///
+/// # Expected Output
+/// - Returns a converted value based on configuration; no side effects.
 fn hbc(x: &BigUint, r: &BigUint, p: &BigUint, engine: &EngineConfig) -> BigUint {
     if engine.base_convert {
         homomorphic_base_conversion(x, r, p)
@@ -1787,6 +2481,17 @@ fn hbc(x: &BigUint, r: &BigUint, p: &BigUint, engine: &EngineConfig) -> BigUint 
 }
 
 #[allow(dead_code)]
+/// Picks a subset product of prime factors closest to a target value.
+///
+/// # Parameters
+/// - `target_n`: Target value to approximate.
+/// - `prime_factors`: Candidate prime factors.
+///
+/// # Returns
+/// - `BigUint`: Product of a subset of factors closest to `target_n`.
+///
+/// # Expected Output
+/// - Returns `1` if `prime_factors` is empty; no side effects.
 fn construct_from_factors_close_to_target_n(target_n: &BigUint, prime_factors: &[BigUint]) -> BigUint {
     if prime_factors.is_empty() {
         return BigUint::one();

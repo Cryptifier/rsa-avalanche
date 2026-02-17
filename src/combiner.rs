@@ -50,6 +50,16 @@ impl std::fmt::Display for CombinerError {
 
 impl std::error::Error for CombinerError {}
 
+/// Validates oracle vectors for non-emptiness and consistent bit lengths.
+///
+/// # Parameters
+/// - `oracles`: Slice of oracle bit vectors to validate.
+///
+/// # Returns
+/// - `Result<usize, CombinerError>`: On success, the common bit length for all oracles.
+///
+/// # Expected Output
+/// - Returns the bit length when valid; otherwise a `CombinerError`.
 fn validate_oracles(oracles: &[Vec<bool>]) -> Result<usize, CombinerError> {
     if oracles.is_empty() {
         return Err(CombinerError::EmptyOracles);
@@ -64,6 +74,18 @@ fn validate_oracles(oracles: &[Vec<bool>]) -> Result<usize, CombinerError> {
     Ok(bit_len)
 }
 
+/// Generates a noisy oracle sample by flipping bits with a given mismatch rate.
+///
+/// # Parameters
+/// - `majority_bits`: Reference bit string used as the oracle target.
+/// - `match_probability`: Probability that each oracle bit matches the reference.
+/// - `rng`: Random number generator used to sample matches vs. flips.
+///
+/// # Returns
+/// - `Vec<bool>`: A bit vector with each position matching or flipped from `majority_bits`.
+///
+/// # Expected Output
+/// - Returns a vector of equal length to `majority_bits`; no stdout/stderr output.
 pub fn generate_oracle_samples(
     majority_bits: &[bool],
     match_probability: f64,
@@ -82,6 +104,17 @@ pub fn generate_oracle_samples(
         .collect()
 }
 
+/// Computes the majority bit per position across multiple oracles.
+///
+/// # Parameters
+/// - `oracles`: Collection of oracle bit vectors (must be non-empty and equal length).
+/// - `tie_breaker`: Bit value to use when a position has an equal number of 0s and 1s.
+///
+/// # Returns
+/// - `Result<Vec<bool>, CombinerError>`: The majority bit vector, or a validation error.
+///
+/// # Expected Output
+/// - Returns a bit vector with the same length as each oracle; no side effects.
 pub fn majority_vote_per_bit(
     oracles: &[Vec<bool>],
     tie_breaker: bool,
@@ -107,6 +140,17 @@ pub fn majority_vote_per_bit(
     Ok(majority)
 }
 
+/// Computes the majority bit per position and returns full per-bit distribution stats.
+///
+/// # Parameters
+/// - `oracles`: Collection of oracle bit vectors (must be non-empty and equal length).
+/// - `tie_breaker`: Bit value to use when a position has an equal number of 0s and 1s.
+///
+/// # Returns
+/// - `Result<MajorityDistribution, CombinerError>`: Majority bits plus counts/probabilities.
+///
+/// # Expected Output
+/// - Returns distribution information for each bit position; no stdout/stderr output.
 pub fn majority_vote_with_distribution(
     oracles: &[Vec<bool>],
     tie_breaker: bool,
@@ -146,6 +190,18 @@ pub fn majority_vote_with_distribution(
     })
 }
 
+/// Runs a full combiner experiment by sampling oracles and voting against a target.
+///
+/// # Parameters
+/// - `majority_bits`: Ground-truth bit vector to compare against.
+/// - `config`: Combiner configuration controlling oracle count and sampling.
+/// - `rng`: Random number generator used to seed oracle sampling.
+///
+/// # Returns
+/// - `Result<CombinerResult, CombinerError>`: Majority vote results and accuracy metrics.
+///
+/// # Expected Output
+/// - Returns accuracy statistics for the simulated combiner run; no stdout/stderr output.
 pub fn optimal_combiner_test(
     majority_bits: &[bool],
     config: &CombinerConfig,

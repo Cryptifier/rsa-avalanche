@@ -4,16 +4,45 @@
  * The module provides functions to find ramps and calculate their strength.
  */
 
+/// # Parameters
+/// - `data`: Slice of integer samples to average.
+///
+/// # Returns
+/// - `f64`: The arithmetic mean of the input values.
+///
+/// # Expected Output
+/// - Returns the mean as a floating-point value; no side effects.
 fn mean_i32(data: &[i32]) -> f64 {
     let sum: i32 = data.iter().sum();
     sum as f64 / data.len() as f64
 }
 
+/// # Parameters
+/// - `data`: Slice of floating-point samples to average.
+///
+/// # Returns
+/// - `f64`: The arithmetic mean of the input values.
+///
+/// # Expected Output
+/// - Returns the mean as a floating-point value; no side effects.
 fn mean_f64(data: &[f64]) -> f64 {
     let sum: f64 = data.iter().sum();
     sum / data.len() as f64
 }
 
+/// Finds integer ramp segments centered around the rounded mean of the data.
+///
+/// # Parameters
+/// - `bins`: Sequence of binned integer values to scan.
+/// - `ramp_length`: Number of points expected in a ramp.
+/// - `tolerance`: Maximum absolute deviation allowed per point.
+///
+/// # Returns
+/// - `Vec<(usize, usize, Vec<i32>)>`: Triples of `(start_index, ramp_length, ramp_values)` for
+///   each detected ramp.
+///
+/// # Expected Output
+/// - Returns a possibly empty list of detected ramps; no stdout/stderr output.
 pub fn find_ramp_signals(
     bins: &[i32],
     ramp_length: usize,
@@ -44,6 +73,20 @@ pub fn find_ramp_signals(
     ramps
 }
 
+/// Finds floating-point ramp segments centered around the mean of the data.
+///
+/// # Parameters
+/// - `bins`: Sequence of binned floating-point values to scan.
+/// - `ramp_length`: Number of points expected in a ramp.
+/// - `step`: Step size between ramp points (centered around the mean).
+/// - `tolerance`: Maximum absolute deviation allowed per point.
+///
+/// # Returns
+/// - `Vec<(usize, usize, Vec<f64>)>`: Triples of `(start_index, ramp_length, ramp_values)` for
+///   each detected ramp.
+///
+/// # Expected Output
+/// - Returns a possibly empty list of detected ramps; no stdout/stderr output.
 pub fn find_ramp_signals_f64(
     bins: &[f64],
     ramp_length: usize,
@@ -79,10 +122,30 @@ pub fn find_ramp_signals_f64(
     ramps
 }
 
+/// Computes total ramp strength by summing the lengths of each ramp.
+///
+/// # Parameters
+/// - `ramps`: Ramp tuples as returned by `find_ramp_signals`.
+///
+/// # Returns
+/// - `usize`: Sum of all ramp lengths.
+///
+/// # Expected Output
+/// - Returns `0` when `ramps` is empty; no side effects.
 pub fn ramp_signal_strength(ramps: &[(usize, usize, Vec<i32>)]) -> usize {
     ramps.iter().map(|(_, len, _)| *len).sum()
 }
 
+/// Computes total ramp strength by summing the lengths of each ramp.
+///
+/// # Parameters
+/// - `ramps`: Ramp tuples as returned by `find_ramp_signals_f64`.
+///
+/// # Returns
+/// - `usize`: Sum of all ramp lengths.
+///
+/// # Expected Output
+/// - Returns `0` when `ramps` is empty; no side effects.
 pub fn ramp_signal_strength_f64(ramps: &[(usize, usize, Vec<f64>)]) -> usize {
     ramps.iter().map(|(_, len, _)| *len).sum()
 }
