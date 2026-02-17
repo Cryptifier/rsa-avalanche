@@ -18,6 +18,15 @@ pub struct CombinerResult {
     pub accuracy: f64,
 }
 
+#[derive(Debug, Clone)]
+pub struct MajorityDistribution {
+    pub majority_bits: Vec<bool>,
+    pub ones_count: Vec<usize>,
+    pub zeros_count: Vec<usize>,
+    pub probability_one: Vec<f64>,
+    pub total_oracles: usize,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CombinerError {
     EmptyOracles,
@@ -41,6 +50,20 @@ impl std::fmt::Display for CombinerError {
 
 impl std::error::Error for CombinerError {}
 
+fn validate_oracles(oracles: &[Vec<bool>]) -> Result<usize, CombinerError> {
+    if oracles.is_empty() {
+        return Err(CombinerError::EmptyOracles);
+    }
+    let bit_len = oracles[0].len();
+    if bit_len == 0 {
+        return Err(CombinerError::EmptyMajorityBits);
+    }
+    if oracles.iter().any(|o| o.len() != bit_len) {
+        return Err(CombinerError::InconsistentLengths);
+    }
+    Ok(bit_len)
+}
+
 pub fn generate_oracle_samples(
     majority_bits: &[bool],
     match_probability: f64,
@@ -63,16 +86,7 @@ pub fn majority_vote_per_bit(
     oracles: &[Vec<bool>],
     tie_breaker: bool,
 ) -> Result<Vec<bool>, CombinerError> {
-    if oracles.is_empty() {
-        return Err(CombinerError::EmptyOracles);
-    }
-    let bit_len = oracles[0].len();
-    if bit_len == 0 {
-        return Err(CombinerError::EmptyMajorityBits);
-    }
-    if oracles.iter().any(|o| o.len() != bit_len) {
-        return Err(CombinerError::InconsistentLengths);
-    }
+    let bit_len = validate_oracles(oracles)?;
 
     let majority = (0..bit_len)
         .into_par_iter()
@@ -91,6 +105,45 @@ pub fn majority_vote_per_bit(
         .collect::<Vec<_>>();
 
     Ok(majority)
+}
+
+pub fn majority_vote_with_distribution(
+    oracles: &[Vec<bool>],
+    tie_breaker: bool,
+) -> Result<MajorityDistribution, CombinerError> {
+    let bit_len = validate_oracles(oracles)?;
+    let total_oracles = oracles.len();
+    let mut ones_count = vec![0usize; bit_len];
+
+    for oracle in oracles {
+        for (idx, &bit) in oracle.iter().enumerate() {
+            if bit {
+                ones_count[idx] += 1;
+            }
+        }
+    }
+
+    let zeros_count: Vec<usize> = ones_count
+        .iter()
+        .map(|&ones| total_oracles - ones)
+        .collect();
+    let probability_one: Vec<f64> = ones_count
+        .iter()
+        .map(|&ones| ones as f64 / total_oracles as f64)
+        .collect();
+    let majority_bits = ones_count
+        .iter()
+        .zip(zeros_count.iter())
+        .map(|(&ones, &zeros)| if ones == zeros { tie_breaker } else { ones > zeros })
+        .collect();
+
+    Ok(MajorityDistribution {
+        majority_bits,
+        ones_count,
+        zeros_count,
+        probability_one,
+        total_oracles,
+    })
 }
 
 pub fn optimal_combiner_test(
@@ -177,6 +230,21 @@ mod tests {
         let oracles = vec![vec![true], vec![false]];
         let majority = majority_vote_per_bit(&oracles, true).expect("majority failed");
         assert_eq!(majority, vec![true]);
+    }
+
+    #[test]
+    fn test_majority_vote_distribution_basic() {
+        let oracles = vec![
+            vec![true, false, true],
+            vec![false, false, true],
+            vec![true, true, false],
+        ];
+        let result = majority_vote_with_distribution(&oracles, false).expect("distribution failed");
+        assert_eq!(result.total_oracles, 3);
+        assert_eq!(result.ones_count, vec![2, 1, 2]);
+        assert_eq!(result.zeros_count, vec![1, 2, 1]);
+        assert_eq!(result.majority_bits, vec![true, false, true]);
+        assert_eq!(result.probability_one, vec![2.0 / 3.0, 1.0 / 3.0, 2.0 / 3.0]);
     }
 
     #[test]

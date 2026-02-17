@@ -24,7 +24,7 @@ use rand::rngs::StdRng;
 use rand::{RngCore, SeedableRng};
 use serde::Deserialize;
 
-use rsademo::combiner::{optimal_combiner_test, CombinerConfig};
+use rsademo::combiner::majority_vote_with_distribution;
 use rsademo::dsp::{find_ramp_signals_f64, ramp_signal_strength_f64};
 use rsademo::math::{
     bit_length, choose_exponent, compute_totient, factor_composite_with_timeout,
@@ -144,23 +144,47 @@ fn run_demo(args: Args, config: Config) -> Result<(), Box<dyn Error>> {
     if config.engine.combiner_enable {
         let bit_width = message.bits().max(1) as usize;
         let majority_bits = biguint_to_bits_le(&message, bit_width);
-        let combiner_config = CombinerConfig {
-            k_oracles: config.engine.combiner_k_oracles,
-            match_probability: config.engine.combiner_match_probability,
-            tie_breaker: config.engine.combiner_tie_breaker,
-        };
-        match optimal_combiner_test(&majority_bits, &combiner_config, &mut rng) {
-            Ok(result) => {
-                println!(
-                    "Optimal combiner majority vote: accuracy {:.2}% ({} of {} bits) using {} oracles",
-                    result.accuracy * 100.0,
-                    result.correct_bits,
-                    result.total_bits,
-                    combiner_config.k_oracles
-                );
-            }
+        let requested_oracles = config.engine.combiner_k_oracles;
+        match collect_speculative_oracle_bits(&ctx, &config.engine, &message, requested_oracles, &mut rng) {
+            Ok(oracles) => match majority_vote_with_distribution(&oracles, config.engine.combiner_tie_breaker) {
+                Ok(distribution) => {
+                    let mut correct = 0usize;
+                    for (a, b) in distribution
+                        .majority_bits
+                        .iter()
+                        .zip(majority_bits.iter())
+                    {
+                        if a == b {
+                            correct += 1;
+                        }
+                    }
+                    let total = majority_bits.len();
+                    let accuracy = correct as f64 / total as f64;
+                    println!(
+                        "Speculative combiner majority vote: accuracy {:.2}% ({} of {} bits) using {} oracles (requested {})",
+                        accuracy * 100.0,
+                        correct,
+                        total,
+                        distribution.total_oracles,
+                        requested_oracles
+                    );
+                    if let Some(stats) = compute_stats(&distribution.probability_one) {
+                        println!(
+                            "Speculative combiner bit probability P(1) stats: mean {:.4}, std dev {:.4}, min {:.4}, max {:.4}, n {}",
+                            stats.mean,
+                            stats.stddev,
+                            stats.min,
+                            stats.max,
+                            stats.count
+                        );
+                    }
+                }
+                Err(err) => {
+                    println!("Speculative combiner majority vote failed: {}", err);
+                }
+            },
             Err(err) => {
-                println!("Optimal combiner test failed: {}", err);
+                println!("Speculative combiner setup failed: {}", err);
             }
         }
     }
@@ -733,6 +757,67 @@ fn biguint_to_bits_le(value: &BigUint, width: usize) -> Vec<bool> {
     (0..width)
         .map(|idx| bit_from_bytes_le(&bytes, idx))
         .collect()
+}
+
+fn collect_speculative_oracle_bits(
+    ctx: &RSAContext,
+    engine: &EngineConfig,
+    message: &BigUint,
+    k_oracles: usize,
+    rng: &mut StdRng,
+) -> Result<Vec<Vec<bool>>, Box<dyn Error>> {
+    if k_oracles == 0 {
+        return Err("combiner_k_oracles must be >= 1".into());
+    }
+
+    let bit_width = message.bits().max(1) as usize;
+    let settings = build_r_candidate_settings(engine);
+    let batch_size = engine.process_count.max(engine.process_min_count).max(1) as usize;
+    let candidates = generate_r_candidates_batch(&ctx.n, &settings, rng, batch_size);
+    if candidates.is_empty() {
+        return Err("no r candidates generated for combiner".into());
+    }
+
+    let y = engine.rabin_exponent as u32;
+    let n_pow_y = ctx.n.pow(y);
+    let ciphertext = message.modpow(&ctx.e, &ctx.n);
+    let result_default = get_larger_number(&ciphertext, &ctx.n, y, true, false);
+
+    let mut oracles = Vec::with_capacity(k_oracles.min(candidates.len()));
+    for (r, factors) in candidates {
+        if oracles.len() >= k_oracles {
+            break;
+        }
+
+        let phi_new = compute_totient(&factors);
+        let Some(d_new) = mod_inverse(&ctx.e, &phi_new) else {
+            continue;
+        };
+
+        let hbc_result = hbc(&result_default, &r, &n_pow_y, engine);
+        let recovered_new = if engine.use_rs_decrypt {
+            hbc_result.modpow(&d_new, &r)
+        } else {
+            hbc_result
+        };
+
+        let r_pow_y = r.pow(y);
+        let result2_default = get_larger_number(&recovered_new, &r, y, true, false);
+        let hbc_default = hbc(&result2_default, &ctx.n, &r_pow_y, engine);
+        let dm_raw = &hbc_default % &ctx.n;
+        let width = dm_raw.bits().max(1);
+        let mask = (BigUint::one() << width) - BigUint::one();
+        let inverted_dm = &mask ^ &dm_raw;
+        let dm = if engine.invert_bits { inverted_dm } else { dm_raw };
+
+        oracles.push(biguint_to_bits_le(&dm, bit_width));
+    }
+
+    if oracles.is_empty() {
+        return Err("no valid r candidates for combiner".into());
+    }
+
+    Ok(oracles)
 }
 
 fn run_enciphered_export(
