@@ -2,7 +2,7 @@ use num_bigint::{BigInt, BigUint};
 use num_integer::Integer;
 use num_traits::{One, Signed, Zero};
 use rand::rngs::StdRng;
-use rand::{Rng, RngCore};
+use rand::RngCore;
 use std::time::Instant;
 
 /// Selects the first odd public exponent `e >= start` that is coprime with `phi`.
@@ -98,17 +98,21 @@ pub fn bit_length(value: &BigUint) -> u64 {
 /// - `rng`: Random number generator for candidate selection.
 ///
 /// # Returns
-/// - `u64`: A probable prime with the requested bit width (odd).
+/// - `BigUint`: A probable prime with the requested bit width (odd).
 ///
 /// # Expected Output
 /// - Returns a probable prime; no stdout/stderr output.
-pub fn random_prime_with_bits(bits: u32, rng: &mut StdRng) -> u64 {
-    let lower = (1u64 << (bits.saturating_sub(1))).max(3);
-    let upper = (1u64 << bits) - 1;
+pub fn random_prime_with_bits(bits: u32, rng: &mut StdRng) -> BigUint {
+    let min_prime = BigUint::from(3u8);
     loop {
-        let mut candidate = rng.gen_range(lower..=upper);
-        candidate |= 1; // force odd
-        if is_probable_prime(candidate) {
+        let mut candidate = random_biguint_bits(bits, rng);
+        if candidate < min_prime {
+            candidate = min_prime.clone();
+        }
+        if candidate.is_even() {
+            candidate += BigUint::one();
+        }
+        if is_probable_prime_big(&candidate) {
             return candidate;
         }
     }
@@ -153,81 +157,6 @@ pub fn random_biguint_bits(bits: u32, rng: &mut StdRng) -> BigUint {
 ///
 /// # Expected Output
 /// - Returns a deterministic answer for the selected bases; no side effects.
-pub fn is_probable_prime(n: u64) -> bool {
-    if n < 2 {
-        return false;
-    }
-    if n == 2 || n == 3 {
-        return true;
-    }
-    if n % 2 == 0 {
-        return false;
-    }
-
-    let (d, s) = decompose(n - 1);
-    const BASES: [u64; 3] = [2, 3, 5];
-    'outer: for a in BASES {
-        if a >= n {
-            continue;
-        }
-        let mut x = mod_pow_u64(a, d, n);
-        if x == 1 || x == n - 1 {
-            continue;
-        }
-        for _ in 1..s {
-            x = mod_pow_u64(x, 2, n);
-            if x == n - 1 {
-                continue 'outer;
-            }
-        }
-        return false;
-    }
-    true
-}
-
-/// Decomposes `value` into `d * 2^s` with `d` odd.
-///
-/// # Parameters
-/// - `value`: Integer to decompose.
-///
-/// # Returns
-/// - `(u64, u32)`: Tuple of `(d, s)` such that `value = d * 2^s`.
-///
-/// # Expected Output
-/// - Returns the odd component and exponent; no side effects.
-fn decompose(mut value: u64) -> (u64, u32) {
-    let mut s = 0u32;
-    while value % 2 == 0 {
-        value /= 2;
-        s += 1;
-    }
-    (value, s)
-}
-
-/// Computes `base^exponent mod modulus` using exponentiation by squaring.
-///
-/// # Parameters
-/// - `base`: Base value.
-/// - `exponent`: Exponent value.
-/// - `modulus`: Modulus for reduction.
-///
-/// # Returns
-/// - `u64`: Modular exponentiation result.
-///
-/// # Expected Output
-/// - Returns the modular power; no side effects.
-fn mod_pow_u64(mut base: u64, mut exponent: u64, modulus: u64) -> u64 {
-    let mut result = 1u64 % modulus;
-    base %= modulus;
-    while exponent > 0 {
-        if exponent & 1 == 1 {
-            result = result.saturating_mul(base) % modulus;
-        }
-        base = base.saturating_mul(base) % modulus;
-        exponent >>= 1;
-    }
-    result
-}
 
 /// Computes Euler's totient from a factorization `(p, e)` list.
 ///
@@ -624,15 +553,15 @@ mod tests {
     fn test_random_prime_with_bits_basic() {
         let mut rng = StdRng::seed_from_u64(7);
         let p = random_prime_with_bits(16, &mut rng);
-        assert!(is_probable_prime(p));
-        assert!(p >= (1u64 << 15));
+        assert!(is_probable_prime_big(&p));
+        assert!(p.bits() >= 16u64);
     }
 
     #[test]
     fn test_random_prime_with_bits_odd() {
         let mut rng = StdRng::seed_from_u64(9);
         let p = random_prime_with_bits(20, &mut rng);
-        assert_eq!(p % 2, 1);
+        assert!(p.is_odd());
     }
 
     #[test]
@@ -647,42 +576,6 @@ mod tests {
         let mut rng = StdRng::seed_from_u64(2);
         let v = random_biguint_bits(8, &mut rng);
         assert!(v.bits() <= 8);
-    }
-
-    #[test]
-    fn test_is_probable_prime_prime() {
-        assert!(is_probable_prime(65_537));
-    }
-
-    #[test]
-    fn test_is_probable_prime_composite() {
-        assert!(!is_probable_prime(221));
-    }
-
-    #[test]
-    fn test_decompose_even() {
-        let (d, s) = decompose(40);
-        assert_eq!(d, 5);
-        assert_eq!(s, 3);
-    }
-
-    #[test]
-    fn test_decompose_odd() {
-        let (d, s) = decompose(45);
-        assert_eq!(d, 45);
-        assert_eq!(s, 0);
-    }
-
-    #[test]
-    fn test_mod_pow_basic() {
-        let v = mod_pow_u64(2, 10, 1000);
-        assert_eq!(v, 24);
-    }
-
-    #[test]
-    fn test_mod_pow_zero_exp() {
-        let v = mod_pow_u64(5, 0, 7);
-        assert_eq!(v, 1);
     }
 
     #[test]

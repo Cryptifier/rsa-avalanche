@@ -246,7 +246,7 @@ fn resolve_modulus(
         while q == p {
             q = random_prime_with_bits(bits, rng);
         }
-        return Ok(Some(BigUint::from(p) * BigUint::from(q)));
+        return Ok(Some(p * q));
     }
 
     if let (Some(p), Some(q)) = (

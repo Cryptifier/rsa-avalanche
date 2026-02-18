@@ -95,7 +95,7 @@ fn run_demo(args: Args, config: Config) -> Result<(), Box<dyn Error>> {
         while q == p {
             q = random_prime_with_bits(args.bits, &mut rng);
         }
-        (BigUint::from(p), BigUint::from(q))
+        (p, q)
     } else {
         let p = config
             .rsa_keypair
@@ -688,21 +688,18 @@ fn collect_speculative_oracle_bits(
             continue;
         };
 
-        let hbc_result = hbc(&result_default, &r, &n_pow_y, engine);
-        let recovered_new = if engine.use_rs_decrypt {
-            hbc_result.modpow(&d_new, &r)
-        } else {
-            hbc_result
-        };
-
         let r_pow_y = r.pow(y);
-        let result2_default = get_larger_number(&recovered_new, &r, y, true, false);
-        let hbc_default = hbc(&result2_default, &ctx.n, &r_pow_y, engine);
-        let dm_raw = &hbc_default % &ctx.n;
-        let width = dm_raw.bits().max(1);
-        let mask = (BigUint::one() << width) - BigUint::one();
-        let inverted_dm = &mask ^ &dm_raw;
-        let dm = if engine.invert_bits { inverted_dm } else { dm_raw };
+        let dm = derive_candidate_message_from_result(
+            ctx,
+            engine,
+            &result_default,
+            &r,
+            &d_new,
+            &n_pow_y,
+            &r_pow_y,
+            y,
+            false,
+        );
 
         oracles.push(biguint_to_bits_le(&dm, bit_width));
     }
@@ -794,20 +791,17 @@ fn run_enciphered_export(
                 random_message_under_n(engine, &ctx.n, &mut local_rng)
             };
             let ciphertext = msg.modpow(&ctx.e, &ctx.n);
-            let result_default = get_larger_number(&ciphertext, &ctx.n, y, true, false);
-            let hbc_result = hbc(&result_default, &r, &n_pow_y, engine);
-            let recovered_new = if engine.use_rs_decrypt {
-                hbc_result.modpow(&d_new, &r)
-            } else {
-                hbc_result
-            };
-            let result2_default = get_larger_number(&recovered_new, &r, y, true, false);
-            let hbc_default = hbc(&result2_default, &ctx.n, &r_pow_y, engine);
-            let dm_raw = &hbc_default % &ctx.n;
-            let width = dm_raw.bits().max(1);
-            let mask = (BigUint::one() << width) - BigUint::one();
-            let inverted_dm = &mask ^ &dm_raw;
-            let dm = if engine.invert_bits { inverted_dm } else { dm_raw };
+            let dm = derive_candidate_message(
+                ctx,
+                engine,
+                &ciphertext,
+                &r,
+                &d_new,
+                &n_pow_y,
+                &r_pow_y,
+                y,
+                false,
+            );
 
             let finished = done.fetch_add(1, Ordering::Relaxed) + 1;
             let pct = finished.saturating_mul(100) / iterations_u64;
@@ -1309,21 +1303,18 @@ fn run_message_trial(
                 continue;
             };
 
-            let hbc_result = hbc(&result_default, r, &n_pow_y, engine);
-            let recovered_new = if engine.use_rs_decrypt {
-                hbc_result.modpow(&d_new, r)
-            } else {
-                hbc_result
-            };
-
             let r_pow_y = r.pow(y);
-            let result2_default = get_larger_number(&recovered_new, r, y, true, false);
-            let hbc_default = hbc(&result2_default, &ctx.n, &r_pow_y, engine);
-            let dm_raw = &hbc_default % &ctx.n;
-            let width = dm_raw.bits().max(1);
-            let mask = (BigUint::one() << width) - BigUint::one();
-            let inverted_dm = &mask ^ &dm_raw; // Invert within current width
-            let dm = if engine.invert_bits { inverted_dm } else { dm_raw };
+            let dm = derive_candidate_message_from_result(
+                ctx,
+                engine,
+                &result_default,
+                r,
+                &d_new,
+                &n_pow_y,
+                &r_pow_y,
+                y,
+                false,
+            );
             histogram.update(&dm, &msg);
 
             let (matching_lsb, matching_total) = count_matching_bits(&dm, &msg);
@@ -1412,22 +1403,17 @@ fn run_fixed_r_trials(
             
             let msg = random_message_under_n(engine, &ctx.n, &mut local_rng);
             let ciphertext = msg.modpow(&ctx.e, &ctx.n);
-            let result_default = get_larger_number(&ciphertext, &ctx.n, y, true, true);
-
-            let hbc_result = hbc(&result_default, r, &n_pow_y, engine);
-            let recovered_new = if engine.use_rs_decrypt {
-                hbc_result.modpow(&d_new, r)
-            } else {
-                hbc_result
-            };
-
-            let result2_default = get_larger_number(&recovered_new, r, y, true, true);
-            let hbc_default = hbc(&result2_default, &ctx.n, &r_pow_y, engine);
-            let dm_raw = &hbc_default % &ctx.n;
-            let width = dm_raw.bits().max(1);
-            let mask = (BigUint::one() << width) - BigUint::one();
-            let inverted_dm = &mask ^ &dm_raw; // Invert within current width
-            let dm = if engine.invert_bits { inverted_dm } else { dm_raw };
+            let dm = derive_candidate_message(
+                ctx,
+                engine,
+                &ciphertext,
+                r,
+                &d_new,
+                &n_pow_y,
+                &r_pow_y,
+                y,
+                true,
+            );
 
             let (matching_lsb, matching_total) = count_matching_bits(&dm, &msg);
             if let Ok(mut hist) = bit_hist.lock() {
@@ -1672,6 +1658,94 @@ fn hbc(x: &BigUint, r: &BigUint, p: &BigUint, engine: &EngineConfig) -> BigUint 
     }
 }
 
+/// Derives the candidate message for a given ciphertext and r candidate.
+///
+/// # Parameters
+/// - `ctx`: RSA context containing key material.
+/// - `engine`: Engine configuration controlling HBC behavior.
+/// - `ciphertext`: Ciphertext to transform through the HBC flow.
+/// - `r`: Candidate modulus for alternate decryption.
+/// - `d_new`: Private exponent corresponding to `r`.
+/// - `n_pow_y`: Precomputed `n^y` value.
+/// - `r_pow_y`: Precomputed `r^y` value.
+/// - `y`: Rabin exponent used for modular transforms.
+/// - `use_other_root`: Whether to use the alternate square root branch.
+///
+/// # Returns
+/// - `BigUint`: Derived candidate message modulo `n`.
+///
+/// # Expected Output
+/// - Returns the derived message; no side effects.
+fn derive_candidate_message(
+    ctx: &RSAContext,
+    engine: &EngineConfig,
+    ciphertext: &BigUint,
+    r: &BigUint,
+    d_new: &BigUint,
+    n_pow_y: &BigUint,
+    r_pow_y: &BigUint,
+    y: u32,
+    use_other_root: bool,
+) -> BigUint {
+    let result_default = get_larger_number(ciphertext, &ctx.n, y, true, use_other_root);
+    derive_candidate_message_from_result(
+        ctx,
+        engine,
+        &result_default,
+        r,
+        d_new,
+        n_pow_y,
+        r_pow_y,
+        y,
+        use_other_root,
+    )
+}
+
+/// Derives the candidate message given a precomputed first-stage result.
+///
+/// # Parameters
+/// - `ctx`: RSA context containing key material.
+/// - `engine`: Engine configuration controlling HBC behavior.
+/// - `result_default`: Output from the first `get_larger_number` stage.
+/// - `r`: Candidate modulus for alternate decryption.
+/// - `d_new`: Private exponent corresponding to `r`.
+/// - `n_pow_y`: Precomputed `n^y` value.
+/// - `r_pow_y`: Precomputed `r^y` value.
+/// - `y`: Rabin exponent used for modular transforms.
+/// - `use_other_root`: Whether to use the alternate square root branch.
+///
+/// # Returns
+/// - `BigUint`: Derived candidate message modulo `n`.
+///
+/// # Expected Output
+/// - Returns the derived message; no side effects.
+fn derive_candidate_message_from_result(
+    ctx: &RSAContext,
+    engine: &EngineConfig,
+    result_default: &BigUint,
+    r: &BigUint,
+    d_new: &BigUint,
+    n_pow_y: &BigUint,
+    r_pow_y: &BigUint,
+    y: u32,
+    use_other_root: bool,
+) -> BigUint {
+    let hbc_result = hbc(result_default, r, n_pow_y, engine);
+    let recovered_new = if engine.use_rs_decrypt {
+        hbc_result.modpow(d_new, r)
+    } else {
+        hbc_result
+    };
+
+    let result2_default = get_larger_number(&recovered_new, r, y, true, use_other_root);
+    let hbc_default = hbc(&result2_default, &ctx.n, r_pow_y, engine);
+    let dm_raw = &hbc_default % &ctx.n;
+    let width = dm_raw.bits().max(1);
+    let mask = (BigUint::one() << width) - BigUint::one();
+    let inverted_dm = &mask ^ &dm_raw;
+    if engine.invert_bits { inverted_dm } else { dm_raw }
+}
+
 #[allow(dead_code)]
 /// Picks a subset product of prime factors closest to a target value.
 ///
@@ -1721,6 +1795,7 @@ fn construct_from_factors_close_to_target_n(target_n: &BigUint, prime_factors: &
 mod tests {
     use super::*;
     use rsademo::dsp::{find_ramp_signals, ramp_signal_strength};
+    use rsademo::r_candidates::RCandidateMode;
     use rand::SeedableRng;
 
     #[test]
