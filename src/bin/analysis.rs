@@ -3,10 +3,9 @@
 /// Copyright (c) 2025 Nicholas LaRoche <nlaroche@cryptifier.dev>
 
 use std::{
-    collections::HashSet,
     error::Error,
     fs::{self, OpenOptions},
-    io::{BufRead, BufReader, Write},
+    io::Write,
     path::Path,
     sync::{
         atomic::{AtomicU64, AtomicUsize, Ordering},
@@ -19,12 +18,19 @@ use rayon::prelude::*;
 use plotters::prelude::*;
 
 use clap::Parser;
-use num_bigint::{BigInt, BigUint};
-use num_integer::Integer;
-use num_traits::{One, Signed, Zero};
+use num_bigint::BigUint;
+use num_traits::{One, Zero};
 use rand::rngs::StdRng;
-use rand::{seq::SliceRandom, Rng, RngCore, SeedableRng};
-use serde::Deserialize;
+use rand::{RngCore, SeedableRng};
+use rsademo::config::{load_config, Config, EngineConfig};
+use rsademo::combiner::majority_vote_with_distribution;
+use rsademo::dsp::{find_ramp_signals_f64, ramp_signal_strength_f64};
+use rsademo::math::{
+    bit_length, choose_exponent, compute_totient, factor_composite_with_timeout,
+    is_probable_prime_big, mod_inverse, modular_sqrt, random_biguint_bits,
+    random_prime_with_bits, to_hex,
+};
+use rsademo::r_candidates::{generate_r_candidates_batch, RCandidateSettings};
 
 #[derive(Parser, Debug)]
 #[command(name = "analysis", about = "Lightweight RSA round-trip demo", author, version)]
@@ -50,36 +56,57 @@ struct Args {
     config: String,
 }
 
+/// Entry point for the RSA round-trip demo CLI.
+///
+/// # Parameters
+/// - None.
+///
+/// # Returns
+/// - `Result<(), Box<dyn Error>>`: `Ok(())` on success or an error on failure.
+///
+/// # Expected Output
+/// - Prints key generation, encryption/decryption, and analysis results; may write output files.
 fn main() -> Result<(), Box<dyn Error>> {
     let args = Args::parse();
     let config = load_config(&args.config)?;
     run_demo(args, config)
 }
 
+/// Runs the core RSA demo and analysis pipeline.
+///
+/// # Parameters
+/// - `args`: Parsed CLI arguments controlling key generation and message selection.
+/// - `config`: Loaded configuration driving analysis features.
+///
+/// # Returns
+/// - `Result<(), Box<dyn Error>>`: `Ok(())` on success or an error on failure.
+///
+/// # Expected Output
+/// - Prints RSA parameters and analysis summaries; may emit CSV/PNG artifacts.
 fn run_demo(args: Args, config: Config) -> Result<(), Box<dyn Error>> {
     let mut rng: StdRng = match args.seed {
         Some(seed) => StdRng::seed_from_u64(seed),
         None => StdRng::from_rng(rand::thread_rng())?,
     };
 
-    let (p, q): (BigUint, BigUint) = if config.key.generate {
+    let (p, q): (BigUint, BigUint) = if config.rsa_keypair.generate {
         let p = random_prime_with_bits(args.bits, &mut rng);
         let mut q = random_prime_with_bits(args.bits, &mut rng);
         while q == p {
             q = random_prime_with_bits(args.bits, &mut rng);
         }
-        (BigUint::from(p), BigUint::from(q))
+        (p, q)
     } else {
         let p = config
-            .key
+            .rsa_keypair
             .p
             .clone()
-            .ok_or("config.key.p must be set when generate is false")?;
+            .ok_or("config.rsa_keypair.p must be set when generate is false")?;
         let q = config
-            .key
+            .rsa_keypair
             .q
             .clone()
-            .ok_or("config.key.q must be set when generate is false")?;
+            .ok_or("config.rsa_keypair.q must be set when generate is false")?;
         (p, q)
     };
 
@@ -90,7 +117,7 @@ fn run_demo(args: Args, config: Config) -> Result<(), Box<dyn Error>> {
     let start_e = if args.public_exponent != 65_537 {
         args.public_exponent
     } else {
-        config.key.e
+        config.rsa_keypair.e
     };
     let e = choose_exponent(start_e, &phi);
     let d = mod_inverse(&e, &phi)
@@ -133,6 +160,54 @@ fn run_demo(args: Args, config: Config) -> Result<(), Box<dyn Error>> {
         e: e.clone(),
         d: d.clone(),
     };
+
+    if config.engine.combiner_enable {
+        let bit_width = message.bits().max(1) as usize;
+        let majority_bits = biguint_to_bits_le(&message, bit_width);
+        let requested_oracles = config.engine.combiner_k_oracles;
+        match collect_speculative_oracle_bits(&ctx, &config.engine, &message, requested_oracles, &mut rng) {
+            Ok(oracles) => match majority_vote_with_distribution(&oracles, config.engine.combiner_tie_breaker) {
+                Ok(distribution) => {
+                    let mut correct = 0usize;
+                    for (a, b) in distribution
+                        .majority_bits
+                        .iter()
+                        .zip(majority_bits.iter())
+                    {
+                        if a == b {
+                            correct += 1;
+                        }
+                    }
+                    let total = majority_bits.len();
+                    let accuracy = correct as f64 / total as f64;
+                    println!(
+                        "Speculative combiner majority vote: accuracy {:.2}% ({} of {} bits) using {} oracles (requested {})",
+                        accuracy * 100.0,
+                        correct,
+                        total,
+                        distribution.total_oracles,
+                        requested_oracles
+                    );
+                    if let Some(stats) = compute_stats(&distribution.probability_one) {
+                        println!(
+                            "Speculative combiner bit probability P(1) stats: mean {:.4}, std dev {:.4}, min {:.4}, max {:.4}, n {}",
+                            stats.mean,
+                            stats.stddev,
+                            stats.min,
+                            stats.max,
+                            stats.count
+                        );
+                    }
+                }
+                Err(err) => {
+                    println!("Speculative combiner majority vote failed: {}", err);
+                }
+            },
+            Err(err) => {
+                println!("Speculative combiner setup failed: {}", err);
+            }
+        }
+    }
 
     if config.engine.test_iterations > 0 {
         let mut bit_hist = MatchHistogram::new();
@@ -327,164 +402,28 @@ fn run_demo(args: Args, config: Config) -> Result<(), Box<dyn Error>> {
         }
     }
 
+    if config.engine.enciphered_export_enable {
+        if let Err(err) = run_enciphered_export(&ctx, &config.engine, &mut rng) {
+            println!("Enciphered export failed: {}", err);
+        }
+    }
+
     Ok(())
 }
 
-#[derive(Debug, Deserialize, Clone)]
-struct Config {
-    #[serde(default)]
-    key: KeyConfig,
-    #[serde(default)]
-    engine: EngineConfig,
-}
-
-#[derive(Debug, Deserialize, Clone)]
-struct KeyConfig {
-    #[serde(default = "default_generate")]
-    generate: bool,
-    #[serde(default, deserialize_with = "deserialize_biguint_option")]
-    p: Option<BigUint>,
-    #[serde(default, deserialize_with = "deserialize_biguint_option")]
-    q: Option<BigUint>,
-    #[serde(default = "default_e")]
-    e: u64,
-}
-
-#[derive(Debug, Deserialize, Clone, Default)]
-struct MessageConfig {
-    #[serde(default = "default_fixed_message")]
-    fixed_message: String,
-    #[serde(default = "default_message_random")]
-    is_random: bool,
-    #[serde(default = "default_message_bits")]
-    bits: u32,
-}
-
-#[allow(dead_code)]
-#[derive(Debug, Deserialize, Clone)]
-struct EngineConfig {
-    #[serde(default = "default_base_convert")]
-    base_convert: bool,
-    #[serde(default = "default_invert_bits")]
-    invert_bits: bool,
-    #[serde(default = "default_rabin_exponent")]
-    rabin_exponent: u64,
-    #[serde(default = "default_min_message_trials")]
-    min_message_trials: u64,
-    #[serde(default = "default_overlap_report_threshold")]
-    overlap_report_threshold: f64,
-    #[serde(default = "default_process_min_count")]
-    process_min_count: u64,
-    #[serde(default = "default_process_count")]
-    process_count: u64,
-    #[serde(default = "default_process_scale")]
-    process_scale: u32,
-    #[serde(default = "default_process_max_best_attempts")]
-    process_max_best_attempts: u64,
-    #[serde(default = "default_process_min_factor")]
-    process_min_factor: u64,
-    #[serde(default = "default_use_rs_decrypt")]
-    use_rs_decrypt: bool,
-    #[serde(default = "default_test_iterations")]
-    test_iterations: u64,
-    #[serde(default = "default_alt_iterations")]
-    alt_iterations: u64,
-    #[serde(default = "default_r_use_list_enable")]
-    r_use_list_enable: bool,
-    #[serde(default)]
-    r_use_list: Vec<String>,
-    #[serde(default = "default_r_stress_test_enable")]
-    r_stress_test_enable: bool,
-    #[serde(default, deserialize_with = "deserialize_biguint_option")]
-    r_stress_start: Option<BigUint>,
-    #[serde(default, deserialize_with = "deserialize_biguint_option")]
-    r_stress_end: Option<BigUint>,
-    #[serde(default)]
-    override_best_r: Option<String>,
-    #[serde(default = "default_reuse_r_candidates_path")]
-    reuse_r_candidates_path: String,
-    #[serde(default = "default_reuse_r_candidates")]
-    reuse_r_candidates: bool,
-    #[serde(default = "default_reuse_r_candidates_append_only")]
-    reuse_r_candidates_append_only: bool,
-    #[serde(default)]
-    message: MessageConfig,
-}
-
-impl Default for Config {
-    fn default() -> Self {
-        Self {
-            key: KeyConfig::default(),
-            engine: EngineConfig::default(),
-        }
-    }
-}
-
-impl Default for KeyConfig {
-    fn default() -> Self {
-        Self {
-            generate: default_generate(),
-            p: None,
-            q: None,
-            e: default_e(),
-        }
-    }
-}
-
-impl Default for EngineConfig {
-    fn default() -> Self {
-        Self {
-            base_convert: default_base_convert(),
-            invert_bits: default_invert_bits(),
-            rabin_exponent: default_rabin_exponent(),
-            min_message_trials: default_min_message_trials(),
-            overlap_report_threshold: default_overlap_report_threshold(),
-            process_min_count: default_process_min_count(),
-            process_count: default_process_count(),
-            process_scale: default_process_scale(),
-            process_max_best_attempts: default_process_max_best_attempts(),
-            process_min_factor: default_process_min_factor(),
-            use_rs_decrypt: default_use_rs_decrypt(),
-            test_iterations: default_test_iterations(),
-            alt_iterations: default_alt_iterations(),
-            r_use_list_enable: default_r_use_list_enable(),
-            r_use_list: Vec::new(),
-            r_stress_test_enable: default_r_stress_test_enable(),
-            r_stress_start: None,
-            r_stress_end: None,
-            override_best_r: None,
-            reuse_r_candidates_path: default_reuse_r_candidates_path(),
-            reuse_r_candidates: default_reuse_r_candidates(),
-            reuse_r_candidates_append_only: default_reuse_r_candidates_append_only(),
-            message: MessageConfig::default(),
-        }
-    }
-}
-
-fn load_config(path: &str) -> Result<Config, Box<dyn Error>> {
-    let cfg_path = Path::new(path);
-    if !cfg_path.exists() {
-        println!("Config file {path} not found; using defaults");
-        return Ok(Config::default());
-    }
-
-    let raw = fs::read_to_string(cfg_path)?;
-    let config = match serde_json::from_str(&raw) {
-        Ok(cfg) => cfg,
-        Err(json_err) => match json5::from_str(&raw) {
-            Ok(cfg) => cfg,
-            Err(json5_err) => {
-                return Err(format!(
-                    "failed to parse config file {path}: json error: {json_err}; json5 fallback error: {json5_err}"
-                )
-                .into())
-            }
-        },
-    };
-
-    Ok(config)
-}
-
+/// Logs progress updates at 10% increments.
+///
+/// # Parameters
+/// - `done`: Number of completed items.
+/// - `total`: Total number of items.
+/// - `next_pct`: Mutable threshold for the next log event.
+/// - `label`: Human-readable label for the progress report.
+///
+/// # Returns
+/// - `()`: This function returns nothing.
+///
+/// # Expected Output
+/// - Prints progress updates to stdout when thresholds are reached.
 fn log_progress_every_ten_percent(done: u64, total: u64, next_pct: &mut u64, label: &str) {
     if total == 0 {
         return;
@@ -513,6 +452,16 @@ struct StatSummary {
     count: usize,
 }
 
+/// Computes mean, standard deviation, min, and max for a slice of values.
+///
+/// # Parameters
+/// - `values`: Input values to summarize.
+///
+/// # Returns
+/// - `Option<StatSummary>`: Summary statistics or `None` if `values` is empty.
+///
+/// # Expected Output
+/// - Returns `None` on empty input; no side effects.
 fn compute_stats(values: &[f64]) -> Option<StatSummary> {
     if values.is_empty() {
         return None;
@@ -548,6 +497,17 @@ fn compute_stats(values: &[f64]) -> Option<StatSummary> {
     })
 }
 
+/// Writes a histogram image for overlap percentages.
+///
+/// # Parameters
+/// - `overlaps_pct`: Overlap values in percentage form.
+/// - `label`: Label used in the chart caption and filename.
+///
+/// # Returns
+/// - `Result<(), Box<dyn Error>>`: `Ok(())` on success or an I/O/plotting error.
+///
+/// # Expected Output
+/// - Writes a PNG into `./images` and prints the output path.
 fn plot_overlap_histogram(overlaps_pct: &[f64], label: &str) -> Result<(), Box<dyn Error>> {
     if overlaps_pct.is_empty() {
         return Ok(());
@@ -610,6 +570,448 @@ fn plot_overlap_histogram(overlaps_pct: &[f64], label: &str) -> Result<(), Box<d
     Ok(())
 }
 
+#[derive(Default, Debug, Clone, Copy)]
+struct RampSummary {
+    frames_with_ramp: usize,
+    total_ramps: usize,
+    total_strength: usize,
+}
+
+/// Computes the mean of a slice of `f64` values.
+///
+/// # Parameters
+/// - `values`: Input values.
+///
+/// # Returns
+/// - `f64`: Arithmetic mean (0.0 for empty input).
+///
+/// # Expected Output
+/// - Returns a floating-point mean; no side effects.
+fn mean_f64(values: &[f64]) -> f64 {
+    if values.is_empty() {
+        return 0.0;
+    }
+    let sum: f64 = values.iter().sum();
+    sum / values.len() as f64
+}
+
+struct ExportSample {
+    ciphertext: BigUint,
+    message_bytes_le: Vec<u8>,
+    decryption_bytes_le: Vec<u8>,
+}
+
+/// Reads a single bit from a little-endian byte slice.
+///
+/// # Parameters
+/// - `bytes`: Little-endian byte slice.
+/// - `idx`: Bit index (LSB = 0).
+///
+/// # Returns
+/// - `bool`: The bit value at the requested index.
+///
+/// # Expected Output
+/// - Returns `false` for out-of-range indices; no side effects.
+fn bit_from_bytes_le(bytes: &[u8], idx: usize) -> bool {
+    let byte_idx = idx / 8;
+    if byte_idx >= bytes.len() {
+        return false;
+    }
+    let bit_idx = idx % 8;
+    ((bytes[byte_idx] >> bit_idx) & 1) == 1
+}
+
+/// Converts a `BigUint` to a fixed-width little-endian bit vector.
+///
+/// # Parameters
+/// - `value`: Integer to convert.
+/// - `width`: Number of bits to emit.
+///
+/// # Returns
+/// - `Vec<bool>`: Little-endian bit vector of length `width`.
+///
+/// # Expected Output
+/// - Returns a vector padded with `false` bits if needed; no side effects.
+fn biguint_to_bits_le(value: &BigUint, width: usize) -> Vec<bool> {
+    let bytes = value.to_bytes_le();
+    (0..width)
+        .map(|idx| bit_from_bytes_le(&bytes, idx))
+        .collect()
+}
+
+/// Builds speculative oracle bit vectors using `r` candidates and HBC transforms.
+///
+/// # Parameters
+/// - `ctx`: RSA context containing key material.
+/// - `engine`: Engine configuration controlling HBC and candidate settings.
+/// - `message`: Plaintext message used to derive oracle bits.
+/// - `k_oracles`: Maximum number of oracle samples to collect.
+/// - `rng`: Random number generator used for candidate sampling.
+///
+/// # Returns
+/// - `Result<Vec<Vec<bool>>, Box<dyn Error>>`: Oracle bit vectors or an error if none.
+///
+/// # Expected Output
+/// - Returns a non-empty list of bit vectors on success; no direct stdout output.
+fn collect_speculative_oracle_bits(
+    ctx: &RSAContext,
+    engine: &EngineConfig,
+    message: &BigUint,
+    k_oracles: usize,
+    rng: &mut StdRng,
+) -> Result<Vec<Vec<bool>>, Box<dyn Error>> {
+    if k_oracles == 0 {
+        return Err("combiner_k_oracles must be >= 1".into());
+    }
+
+    let bit_width = message.bits().max(1) as usize;
+    let settings = build_r_candidate_settings(engine);
+    let batch_size = engine.process_count.max(engine.process_min_count).max(1) as usize;
+    let candidates = generate_r_candidates_batch(&ctx.n, &settings, rng, batch_size);
+    if candidates.is_empty() {
+        return Err("no r candidates generated for combiner".into());
+    }
+
+    let y = engine.rabin_exponent as u32;
+    let n_pow_y = ctx.n.pow(y);
+    let ciphertext = message.modpow(&ctx.e, &ctx.n);
+    let result_default = get_larger_number(&ciphertext, &ctx.n, y, true, false);
+
+    let mut oracles = Vec::with_capacity(k_oracles.min(candidates.len()));
+    for (r, factors) in candidates {
+        if oracles.len() >= k_oracles {
+            break;
+        }
+
+        let phi_new = compute_totient(&factors);
+        let Some(d_new) = mod_inverse(&ctx.e, &phi_new) else {
+            continue;
+        };
+
+        let r_pow_y = r.pow(y);
+        let dm = derive_candidate_message_from_result(
+            ctx,
+            engine,
+            &result_default,
+            &r,
+            &d_new,
+            &n_pow_y,
+            &r_pow_y,
+            y,
+            false,
+        );
+
+        oracles.push(biguint_to_bits_le(&dm, bit_width));
+    }
+
+    if oracles.is_empty() {
+        return Err("no valid r candidates for combiner".into());
+    }
+
+    Ok(oracles)
+}
+
+/// Runs the enciphered export pipeline and writes per-bit match statistics.
+///
+/// # Parameters
+/// - `ctx`: RSA context containing key material.
+/// - `engine`: Engine configuration controlling export behavior.
+/// - `rng`: Random number generator used for sampling messages.
+///
+/// # Returns
+/// - `Result<(), Box<dyn Error>>`: `Ok(())` on success or an error on failure.
+///
+/// # Expected Output
+/// - Writes CSV outputs (and optional ramp CSV), prints progress and summary lines.
+fn run_enciphered_export(
+    ctx: &RSAContext,
+    engine: &EngineConfig,
+    rng: &mut StdRng,
+) -> Result<(), Box<dyn Error>> {
+    let iterations = engine.enciphered_export_iterations.max(1) as usize;
+    let fixed_message = if engine.message.is_random {
+        None
+    } else {
+        let msg = BigUint::from_bytes_be(engine.message.fixed_message.as_bytes());
+        if msg.is_zero() {
+            return Err("enciphered export fixed_message cannot be empty".into());
+        }
+        if msg >= ctx.n {
+            return Err("enciphered export fixed_message must be smaller than modulus n".into());
+        }
+        Some(msg)
+    };
+    let fixed_message_bits = fixed_message
+        .as_ref()
+        .map(|msg| msg.bits().max(1) as usize)
+        .unwrap_or(0);
+    let bit_width = engine
+        .message
+        .bits
+        .max(1)
+        .max(fixed_message_bits as u32) as usize;
+
+    let y = engine.rabin_exponent as u32;
+    let n_pow_y = ctx.n.pow(y);
+    let settings = build_r_candidate_settings(engine);
+    let batch_size = engine.process_count.max(engine.process_min_count).max(1) as usize;
+    let mut candidates = generate_r_candidates_batch(&ctx.n, &settings, rng, batch_size);
+    if candidates.is_empty() {
+        return Err("no r candidates generated for enciphered export".into());
+    }
+    let (r, factors) = candidates
+        .drain(..1)
+        .next()
+        .ok_or("missing r candidate for enciphered export")?;
+    let phi_new = compute_totient(&factors);
+    let d_new = mod_inverse(&ctx.e, &phi_new)
+        .ok_or("public exponent is not invertible for export r candidate")?;
+
+    println!(
+        "Enciphered export using r candidate {} with factors {:?}",
+        r, factors
+    );
+
+    let r_pow_y = r.pow(y);
+    let mut seeds = Vec::with_capacity(iterations);
+    for _ in 0..iterations {
+        seeds.push(rng.next_u64());
+    }
+
+    let done = Arc::new(AtomicU64::new(0));
+    let next_pct = Arc::new(AtomicU64::new(10));
+    let iterations_u64 = iterations as u64;
+    let mut samples: Vec<ExportSample> = seeds
+        .into_par_iter()
+        .map(|seed| {
+            let msg = if let Some(ref fixed) = fixed_message {
+                fixed.clone()
+            } else {
+                let mut local_rng = StdRng::seed_from_u64(seed);
+                random_message_under_n(engine, &ctx.n, &mut local_rng)
+            };
+            let ciphertext = msg.modpow(&ctx.e, &ctx.n);
+            let dm = derive_candidate_message(
+                ctx,
+                engine,
+                &ciphertext,
+                &r,
+                &d_new,
+                &n_pow_y,
+                &r_pow_y,
+                y,
+                false,
+            );
+
+            let finished = done.fetch_add(1, Ordering::Relaxed) + 1;
+            let pct = finished.saturating_mul(100) / iterations_u64;
+            let mut current_next = next_pct.load(Ordering::Relaxed);
+            while pct >= current_next && current_next <= 100 {
+                let new_next = current_next.saturating_add(10);
+                match next_pct.compare_exchange(
+                    current_next,
+                    new_next,
+                    Ordering::Relaxed,
+                    Ordering::Relaxed,
+                ) {
+                    Ok(_) => {
+                        let display_pct = current_next.min(100);
+                        println!(
+                            "Enciphered export iterations progress: {}% ({}/{})",
+                            display_pct, finished, iterations_u64
+                        );
+                        break;
+                    }
+                    Err(actual) => current_next = actual,
+                }
+            }
+
+            ExportSample {
+                ciphertext,
+                message_bytes_le: msg.to_bytes_le(),
+                decryption_bytes_le: dm.to_bytes_le(),
+            }
+        })
+        .collect();
+
+    if samples.is_empty() {
+        return Err("no speculative decryptions generated for enciphered export".into());
+    }
+
+    samples.sort_by(|a, b| a.ciphertext.cmp(&b.ciphertext));
+    let min_ct = samples
+        .first()
+        .map(|s| s.ciphertext.clone())
+        .ok_or("missing min ciphertext")?;
+    let max_ct = samples
+        .last()
+        .map(|s| s.ciphertext.clone())
+        .ok_or("missing max ciphertext")?;
+
+    let bins = bit_width.max(1);
+    let window_size = engine
+        .enciphered_export_window
+        .max(1)
+        .min(samples.len());
+    let stride = engine.enciphered_export_stride.max(1);
+    let frame_count = if samples.len() <= window_size {
+        1
+    } else {
+        ((samples.len() - window_size) / stride) + 1
+    };
+
+    let output_path = engine.enciphered_export_output_csv.as_str();
+    let mut csv = OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(true)
+        .open(output_path)?;
+
+    writeln!(csv, "# enciphered_bins_export")?;
+    writeln!(csv, "# iterations={}", iterations)?;
+    writeln!(csv, "# bins={}", bins)?;
+    writeln!(csv, "# window_size={}", window_size)?;
+    writeln!(csv, "# stride={}", stride)?;
+    writeln!(csv, "# min_ciphertext={}", min_ct)?;
+    writeln!(csv, "# max_ciphertext={}", max_ct)?;
+    writeln!(csv, "# bit_width={}", bit_width)?;
+    writeln!(
+        csv,
+        "frame_index,frame_start,frame_end,bit_index,match_count,match_pct"
+    )?;
+
+    let ramp_tolerances = engine.enciphered_export_ramp_tolerances.clone();
+    let mut ramp_csv: Option<fs::File> = None;
+    if !ramp_tolerances.is_empty() {
+        let ramp_path = engine.enciphered_export_ramp_csv.as_str();
+        let mut file = OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(true)
+            .open(ramp_path)?;
+        writeln!(file, "# enciphered_ramps_export")?;
+        writeln!(file, "# ramp_length={}", engine.enciphered_export_ramp_length)?;
+        writeln!(
+            file,
+            "# ramp_step_pct={}",
+            engine.enciphered_export_ramp_step_pct
+        )?;
+        writeln!(file, "# tolerances={:?}", ramp_tolerances)?;
+        writeln!(
+            file,
+            "frame_index,tolerance,ramp_start,ramp_length,ramp_values,mean_count_pct"
+        )?;
+        ramp_csv = Some(file);
+    }
+
+    let mut summaries = vec![RampSummary::default(); ramp_tolerances.len()];
+
+    for frame_idx in 0..frame_count {
+        let start = frame_idx * stride;
+        let end = (start + window_size).min(samples.len());
+        let window = &samples[start..end];
+        let mut match_counts = vec![0u32; bins];
+        let window_len_f = window.len().max(1) as f64;
+
+        for sample in window {
+            for bit_idx in 0..bins {
+                let dm_bit = bit_from_bytes_le(&sample.decryption_bytes_le, bit_idx);
+                let msg_bit = bit_from_bytes_le(&sample.message_bytes_le, bit_idx);
+                if dm_bit == msg_bit {
+                    match_counts[bit_idx] = match_counts[bit_idx].saturating_add(1);
+                }
+            }
+        }
+
+        let mut counts_pct = vec![0.0_f64; bins];
+        for (bin_idx, count) in match_counts.iter().enumerate() {
+            let match_pct = (*count as f64 / window_len_f) * 100.0;
+            counts_pct[bin_idx] = match_pct;
+            writeln!(
+                csv,
+                "{},{},{},{},{},{:.8}",
+                frame_idx,
+                start,
+                end,
+                bin_idx,
+                count,
+                match_pct
+            )?;
+        }
+
+        if !ramp_tolerances.is_empty() {
+            let mean = mean_f64(&counts_pct);
+
+            for (idx, tol) in ramp_tolerances.iter().enumerate() {
+                let ramps = find_ramp_signals_f64(
+                    &counts_pct,
+                    engine.enciphered_export_ramp_length,
+                    engine.enciphered_export_ramp_step_pct,
+                    *tol,
+                );
+                let strength = ramp_signal_strength_f64(&ramps);
+                let entry = &mut summaries[idx];
+                if !ramps.is_empty() {
+                    entry.frames_with_ramp += 1;
+                }
+                entry.total_ramps = entry.total_ramps.saturating_add(ramps.len());
+                entry.total_strength = entry.total_strength.saturating_add(strength);
+
+                if let Some(file) = ramp_csv.as_mut() {
+                    for (ramp_start, ramp_len, ramp_vals) in ramps {
+                        let values_str = ramp_vals
+                            .iter()
+                            .map(|v| format!("{:.4}", v))
+                            .collect::<Vec<_>>()
+                            .join("|");
+                        writeln!(
+                            file,
+                            "{},{},{},{},{},{:.4}",
+                            frame_idx,
+                            tol,
+                            ramp_start,
+                            ramp_len,
+                            values_str,
+                            mean
+                        )?;
+                    }
+                }
+            }
+        }
+    }
+
+    println!(
+        "Enciphered export wrote {} frames to {}",
+        frame_count, output_path
+    );
+    if !summaries.is_empty() {
+        println!(
+            "Ramp summary (centered around mean, step {:.4}%):",
+            engine.enciphered_export_ramp_step_pct
+        );
+        for (tol, summary) in ramp_tolerances.iter().zip(summaries.iter()) {
+            println!(
+                "  tolerance {} -> frames with ramp {}, total ramps {}, total strength {}",
+                tol, summary.frames_with_ramp, summary.total_ramps, summary.total_strength
+            );
+        }
+    }
+
+    Ok(())
+}
+
+/// Selects the plaintext message according to CLI args and configuration.
+///
+/// # Parameters
+/// - `args_message`: Optional CLI-provided message override.
+/// - `engine`: Engine configuration with message settings.
+/// - `rng`: Random number generator for random message selection.
+///
+/// # Returns
+/// - `BigUint`: Selected message as a big integer.
+///
+/// # Expected Output
+/// - Returns the selected message; no side effects.
 fn select_message(args_message: Option<String>, engine: &EngineConfig, rng: &mut StdRng) -> BigUint {
     if let Some(explicit) = args_message {
         return BigUint::from_bytes_be(explicit.as_bytes());
@@ -620,6 +1022,18 @@ fn select_message(args_message: Option<String>, engine: &EngineConfig, rng: &mut
     BigUint::from_bytes_be(engine.message.fixed_message.as_bytes())
 }
 
+/// Samples a random message that is non-zero and less than `n` (when provided).
+///
+/// # Parameters
+/// - `engine`: Engine configuration with message bit-length settings.
+/// - `n`: Optional modulus bound; use zero to skip the bound.
+/// - `rng`: Random number generator for sampling.
+///
+/// # Returns
+/// - `BigUint`: Random message value.
+///
+/// # Expected Output
+/// - Returns a non-zero value under `n` when `n` is non-zero; no side effects.
 fn random_message_under_n(engine: &EngineConfig, n: &BigUint, rng: &mut StdRng) -> BigUint {
     let mut target_bits = engine.message.bits.max(1);
     if !n.is_zero() {
@@ -637,253 +1051,43 @@ fn random_message_under_n(engine: &EngineConfig, n: &BigUint, rng: &mut StdRng) 
     }
 }
 
-fn default_generate() -> bool {
-    true
-}
-
-fn default_e() -> u64 {
-    65_537
-}
-
-fn default_fixed_message() -> String {
-    "afterstate".to_string()
-}
-
-fn default_message_random() -> bool {
-    false
-}
-
-fn default_message_bits() -> u32 {
-    56
-}
-
-fn default_base_convert() -> bool {
-    true
-}
-
-fn default_invert_bits() -> bool {
-    false
-}
-
-fn default_rabin_exponent() -> u64 {
-    2
-}
-
-fn default_min_message_trials() -> u64 {
-    1
-}
-
-fn default_overlap_report_threshold() -> f64 {
-    51.0
-}
-
-fn default_process_min_count() -> u64 {
-    1
-}
-
-fn default_process_count() -> u64 {
-    8
-}
-
-fn default_process_scale() -> u32 {
-    8
-}
-
-fn default_process_max_best_attempts() -> u64 {
-    4
-}
-
-fn default_process_min_factor() -> u64 {
-    3
-}
-
-fn default_use_rs_decrypt() -> bool {
-    true
-}
-
-fn default_test_iterations() -> u64 {
-    1
-}
-
-fn default_alt_iterations() -> u64 {
-    0
-}
-
-fn default_r_use_list_enable() -> bool {
-    false
-}
-
-fn default_r_stress_test_enable() -> bool {
-    false
-}
-
-fn default_reuse_r_candidates() -> bool {
-    false
-}
-
-fn default_reuse_r_candidates_path() -> String {
-    "r_candidates.csv".to_string()
-}
-
-fn default_reuse_r_candidates_append_only() -> bool {
-    false
-}
-
-fn deserialize_biguint_option<'de, D>(deserializer: D) -> Result<Option<BigUint>, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    use serde::de::Error as DeError;
-
-    let maybe_value = Option::<serde_json::Value>::deserialize(deserializer)?;
-    match maybe_value {
-        Some(serde_json::Value::String(s)) => s.parse::<BigUint>().map(Some).map_err(DeError::custom),
-        Some(serde_json::Value::Number(num)) => num
-            .to_string()
-            .parse::<BigUint>()
-            .map(Some)
-            .map_err(DeError::custom),
-        Some(other) => Err(DeError::custom(format!(
-            "expected string or number for big integer, got {other}"
-        ))),
-        None => Ok(None),
-    }
-}
-
-const DETERMINISTIC_BASES: [u64; 7] = [2, 3, 5, 7, 11, 13, 17];
-
-fn random_prime_with_bits(bits: u32, rng: &mut StdRng) -> u64 {
-    let lower = 1u64 << (bits - 1);
-    let upper = (1u64 << bits) - 1;
-
-    loop {
-        let mut candidate = rng.gen_range(lower..=upper);
-        candidate |= 1; // force odd
-        if is_probable_prime(candidate) {
-            return candidate;
+/// Builds `RCandidateSettings` from the engine configuration.
+///
+/// # Parameters
+/// - `engine`: Engine configuration containing candidate fields.
+///
+/// # Returns
+/// - `RCandidateSettings`: Fully populated candidate settings.
+///
+/// # Expected Output
+/// - Returns a settings struct; no side effects.
+fn build_r_candidate_settings(engine: &EngineConfig) -> RCandidateSettings {
+    let override_best_r = engine.override_best_r.as_ref().and_then(|raw| {
+        let trimmed = raw.trim();
+        if trimmed.is_empty() {
+            None
+        } else {
+            trimmed.parse::<BigUint>().ok()
         }
+    });
+
+    RCandidateSettings {
+        mode: engine.r_candidate_mode,
+        override_best_r,
+        process_min_factor: BigUint::from(engine.process_min_factor),
+        process_count: engine.process_count,
+        process_min_count: engine.process_min_count,
+        process_scale: engine.process_scale,
+        reuse_r_candidates_path: engine.reuse_r_candidates_path.clone(),
+        reuse_r_candidates: engine.reuse_r_candidates,
+        reuse_r_candidates_append_only: engine.reuse_r_candidates_append_only,
+        small_primes: engine
+            .r_candidate_small_primes
+            .iter()
+            .map(|p| BigUint::from(*p))
+            .collect(),
+        small_prime_factors_per_candidate: engine.r_candidate_small_prime_factors,
     }
-}
-
-fn random_biguint_bits(bits: u32, rng: &mut StdRng) -> BigUint {
-    if bits == 0 {
-        return BigUint::zero();
-    }
-    let byte_len = ((bits as usize) + 7) / 8;
-    let mut bytes = vec![0u8; byte_len];
-    rng.fill_bytes(&mut bytes);
-    let leading_bits = (bits % 8) as u8;
-    if leading_bits != 0 {
-        let mask = (1u8 << leading_bits) - 1;
-        bytes[0] &= mask;
-    }
-    // Ensure the top bit is set so the value uses the requested width when possible.
-    let top_byte_index = 0;
-    let top_bit = if leading_bits == 0 { 0x80 } else { 1u8 << (leading_bits - 1) };
-    bytes[top_byte_index] |= top_bit;
-    BigUint::from_bytes_be(&bytes)
-}
-
-fn is_probable_prime(n: u64) -> bool {
-    if n < 4 {
-        return n == 2 || n == 3;
-    }
-    if n % 2 == 0 {
-        return false;
-    }
-
-    let (d, s) = decompose(n - 1);
-    for &a in &DETERMINISTIC_BASES {
-        if a % n == 0 {
-            continue;
-        }
-        let mut x = mod_pow_u64(a % n, d, n);
-        if x == 1 || x == n - 1 {
-            continue;
-        }
-        let mut composite = true;
-        for _ in 1..s {
-            x = mod_pow_u64(x, 2, n);
-            if x == n - 1 {
-                composite = false;
-                break;
-            }
-        }
-        if composite {
-            return false;
-        }
-    }
-    true
-}
-
-fn decompose(mut value: u64) -> (u64, u32) {
-    let mut s = 0;
-    while value % 2 == 0 {
-        value >>= 1;
-        s += 1;
-    }
-    (value, s)
-}
-
-fn mod_pow_u64(base: u64, exponent: u64, modulus: u64) -> u64 {
-    let mut result = 1u128;
-    let mut base = base as u128 % modulus as u128;
-    let mut exp = exponent;
-    let m = modulus as u128;
-
-    while exp > 0 {
-        if exp & 1 == 1 {
-            result = (result * base) % m;
-        }
-        base = (base * base) % m;
-        exp >>= 1;
-    }
-
-    result as u64
-}
-
-fn choose_exponent(start: u64, phi: &BigUint) -> BigUint {
-    let mut candidate = BigUint::from(if start % 2 == 0 { start + 1 } else { start });
-    let step = BigUint::from(2u8);
-
-    while candidate.gcd(phi) != BigUint::one() {
-        candidate += &step;
-    }
-
-    candidate
-}
-
-fn mod_inverse(a: &BigUint, modulus: &BigUint) -> Option<BigUint> {
-    let a_int = BigInt::from(a.clone());
-    let m_int = BigInt::from(modulus.clone());
-
-    let egcd = a_int.extended_gcd(&m_int);
-    if egcd.gcd != BigInt::one() {
-        return None;
-    }
-
-    let mut x = egcd.x % &m_int;
-    if x.is_negative() {
-        x += m_int;
-    }
-
-    x.to_biguint()
-}
-
-fn to_hex(value: &BigUint) -> String {
-    let bytes = value.to_bytes_be();
-    if bytes.is_empty() {
-        return "0".to_string();
-    }
-    let mut hex = String::with_capacity(bytes.len() * 2);
-    for byte in bytes {
-        let _ = std::fmt::Write::write_fmt(&mut hex, format_args!("{:02x}", byte));
-    }
-    hex
-}
-
-fn bit_length(value: &BigUint) -> u64 {
-    value.bits()
 }
 
 #[allow(dead_code)]
@@ -913,6 +1117,16 @@ struct MatchHistogram {
 }
 
 impl MatchHistogram {
+    /// Creates an empty match histogram.
+    ///
+    /// # Parameters
+    /// - None.
+    ///
+    /// # Returns
+    /// - `MatchHistogram`: A histogram with empty counters.
+    ///
+    /// # Expected Output
+    /// - Returns a new histogram; no side effects.
     fn new() -> Self {
         Self {
             matches: Vec::new(),
@@ -920,6 +1134,17 @@ impl MatchHistogram {
         }
     }
 
+    /// Updates match counts for corresponding bits between two values.
+    ///
+    /// # Parameters
+    /// - `a`: First value to compare.
+    /// - `b`: Second value to compare.
+    ///
+    /// # Returns
+    /// - `()`: This method returns nothing.
+    ///
+    /// # Expected Output
+    /// - Updates internal counts; no stdout/stderr output.
     fn update(&mut self, a: &BigUint, b: &BigUint) {
         let a_bits = a.to_str_radix(2);
         let b_bits = b.to_str_radix(2);
@@ -943,6 +1168,16 @@ impl MatchHistogram {
         }
     }
 
+    /// Writes a PNG histogram showing per-bit match frequency.
+    ///
+    /// # Parameters
+    /// - `label`: Label used in the chart caption and output filename.
+    ///
+    /// # Returns
+    /// - `Result<(), Box<dyn Error>>`: `Ok(())` on success or an I/O/plotting error.
+    ///
+    /// # Expected Output
+    /// - Writes a PNG into `./images` and prints the output path.
     fn write_histogram(&self, label: &str) -> Result<(), Box<dyn Error>> {
         if self.samples.is_empty() {
             return Ok(());
@@ -1006,6 +1241,22 @@ impl MatchHistogram {
     }
 }
 
+/// Runs message trials against generated r candidates and returns the best match report.
+///
+/// # Parameters
+/// - `ctx`: RSA context containing key material.
+/// - `_config`: Full config (currently unused).
+/// - `engine`: Engine configuration controlling trial behavior.
+/// - `message`: Base message to test (used on first trial).
+/// - `min_message_trials`: Minimum number of trial messages to run.
+/// - `rng`: Random number generator for sampling messages/candidates.
+/// - `histogram`: Histogram updated with match frequencies.
+///
+/// # Returns
+/// - `Result<TestReport, Box<dyn Error>>`: Best matching report or an error.
+///
+/// # Expected Output
+/// - Prints candidate generation info; updates `histogram` in-place.
 fn run_message_trial(
     ctx: &RSAContext,
     _config: &Config,
@@ -1022,7 +1273,9 @@ fn run_message_trial(
     let y = engine.rabin_exponent as u32;
     let n_pow_y = ctx.n.pow(y);
 
-    let candidates = generate_r_candidates(&ctx.n, engine, rng);
+    let settings = build_r_candidate_settings(engine);
+    let batch_size = engine.process_count.max(engine.process_min_count).max(1) as usize;
+    let candidates = generate_r_candidates_batch(&ctx.n, &settings, rng, batch_size);
     if candidates.is_empty() {
         return Err("no r candidates generated".into());
     } else {
@@ -1050,21 +1303,18 @@ fn run_message_trial(
                 continue;
             };
 
-            let hbc_result = hbc(&result_default, r, &n_pow_y, engine);
-            let recovered_new = if engine.use_rs_decrypt {
-                hbc_result.modpow(&d_new, r)
-            } else {
-                hbc_result
-            };
-
             let r_pow_y = r.pow(y);
-            let result2_default = get_larger_number(&recovered_new, r, y, true, false);
-            let hbc_default = hbc(&result2_default, &ctx.n, &r_pow_y, engine);
-            let dm_raw = &hbc_default % &ctx.n;
-            let width = dm_raw.bits().max(1);
-            let mask = (BigUint::one() << width) - BigUint::one();
-            let inverted_dm = &mask ^ &dm_raw; // Invert within current width
-            let dm = if engine.invert_bits { inverted_dm } else { dm_raw };
+            let dm = derive_candidate_message_from_result(
+                ctx,
+                engine,
+                &result_default,
+                r,
+                &d_new,
+                &n_pow_y,
+                &r_pow_y,
+                y,
+                false,
+            );
             histogram.update(&dm, &msg);
 
             let (matching_lsb, matching_total) = count_matching_bits(&dm, &msg);
@@ -1098,6 +1348,21 @@ fn run_message_trial(
     best.ok_or_else(|| "no valid r candidates after filtering".into())
 }
 
+/// Runs multiple trials for a fixed r candidate and summarizes statistics.
+///
+/// # Parameters
+/// - `ctx`: RSA context containing key material.
+/// - `config`: Full config with engine settings.
+/// - `r_report`: Report describing the fixed r candidate to test.
+/// - `label`: Label used for logging and output filenames.
+/// - `iterations`: Number of iterations to run.
+/// - `rng`: Random number generator for sampling messages.
+///
+/// # Returns
+/// - `Option<(f64, f64, usize)>`: `(avg_bits, avg_overlap_pct, max_bits)` or `None` if skipped.
+///
+/// # Expected Output
+/// - Prints progress and statistics; may write histogram and overlap plots.
 fn run_fixed_r_trials(
     ctx: &RSAContext,
     config: &Config,
@@ -1138,22 +1403,17 @@ fn run_fixed_r_trials(
             
             let msg = random_message_under_n(engine, &ctx.n, &mut local_rng);
             let ciphertext = msg.modpow(&ctx.e, &ctx.n);
-            let result_default = get_larger_number(&ciphertext, &ctx.n, y, true, true);
-
-            let hbc_result = hbc(&result_default, r, &n_pow_y, engine);
-            let recovered_new = if engine.use_rs_decrypt {
-                hbc_result.modpow(&d_new, r)
-            } else {
-                hbc_result
-            };
-
-            let result2_default = get_larger_number(&recovered_new, r, y, true, true);
-            let hbc_default = hbc(&result2_default, &ctx.n, &r_pow_y, engine);
-            let dm_raw = &hbc_default % &ctx.n;
-            let width = dm_raw.bits().max(1);
-            let mask = (BigUint::one() << width) - BigUint::one();
-            let inverted_dm = &mask ^ &dm_raw; // Invert within current width
-            let dm = if engine.invert_bits { inverted_dm } else { dm_raw };
+            let dm = derive_candidate_message(
+                ctx,
+                engine,
+                &ciphertext,
+                r,
+                &d_new,
+                &n_pow_y,
+                &r_pow_y,
+                y,
+                true,
+            );
 
             let (matching_lsb, matching_total) = count_matching_bits(&dm, &msg);
             if let Ok(mut hist) = bit_hist.lock() {
@@ -1235,6 +1495,21 @@ fn run_fixed_r_trials(
     Some((bits_stats.mean, overlap_stats.mean, max_bits))
 }
 
+/// Runs a stress test for a single r value and prints summary stats.
+///
+/// # Parameters
+/// - `label`: Label identifying the stress-test source.
+/// - `r`: Candidate r value to test.
+/// - `ctx`: RSA context containing key material.
+/// - `config`: Full configuration.
+/// - `engine`: Engine configuration controlling trial behavior.
+/// - `rng`: Random number generator for factorization/trials.
+///
+/// # Returns
+/// - `()`: This function returns nothing.
+///
+/// # Expected Output
+/// - Prints summary stats when factorization and trials succeed.
 fn run_r_stress_entry(
     label: &str,
     r: &BigUint,
@@ -1272,6 +1547,17 @@ fn run_r_stress_entry(
     }
 }
 
+/// Counts matching bits between two values (total and LSB run).
+///
+/// # Parameters
+/// - `a`: First value to compare.
+/// - `b`: Second value to compare.
+///
+/// # Returns
+/// - `(usize, usize)`: `(matching_lsb_run, matching_total)` counts.
+///
+/// # Expected Output
+/// - Returns counts based on binary string comparisons; no side effects.
 fn count_matching_bits(a: &BigUint, b: &BigUint) -> (usize, usize) {
     let a_bits = a.to_str_radix(2);
     let b_bits = b.to_str_radix(2);
@@ -1296,272 +1582,20 @@ fn count_matching_bits(a: &BigUint, b: &BigUint) -> (usize, usize) {
     (matching_lsb, matching_total)
 }
 
-fn compute_totient(factors: &[(BigUint, u64)]) -> BigUint {
-    let mut phi = BigUint::one();
-    for (p, e) in factors {
-        if *e == 0 {
-            continue;
-        }
-        let term = (p - BigUint::one()) * p.pow((*e as u32).saturating_sub(1));
-        phi *= term;
-    }
-    phi
-}
-
-fn generate_r_candidates(
-    n: &BigUint,
-    engine: &EngineConfig,
-    rng: &mut StdRng,
-) -> Vec<(BigUint, Vec<(BigUint, u64)>)> {
-    if let Some(ref override_r) = engine.override_best_r {
-        if !override_r.is_empty() {
-            if let Ok(r) = override_r.parse::<BigUint>() {
-                if is_probable_prime_big(&r) {
-                    return Vec::new();
-                }
-                let deadline = Instant::now() + Duration::from_secs(10);
-                if let Some(factors) = factor_composite_with_timeout(&r, rng, deadline) {
-                    if factors.len() >= 3
-                        && factors.iter().all(|(p, _)| p >= &BigUint::from(engine.process_min_factor))
-                    {
-                        return vec![(r, factors)];
-                    }
-                }
-            }
-        }
-    }
-
-    let min_factor = BigUint::from(engine.process_min_factor);
-    let scale = BigUint::one() << engine.process_scale;
-    let count = engine.process_count.max(engine.process_min_count).max(1);
-    let target_count = count as usize;
-
-    let mut collected: Vec<(BigUint, Vec<(BigUint, u64)>)> = Vec::new();
-    let mut seen: HashSet<String> = HashSet::new();
-
-    let load_reuse = engine.reuse_r_candidates && !engine.reuse_r_candidates_append_only;
-    let append_reuse = engine.reuse_r_candidates || engine.reuse_r_candidates_append_only;
-
-    if load_reuse {
-        let reuse_path = engine.reuse_r_candidates_path.as_str();
-        println!("Reuse enabled; loading r candidates from {}", reuse_path);
-        let mut loaded = load_reuse_candidates(reuse_path);
-        loaded.shuffle(rng);
-        for (r, factors) in loaded {
-            if seen.insert(r.to_string()) {
-                collected.push((r, factors));
-                if collected.len() >= target_count {
-                    println!(
-                        "Loaded {} r candidates from reuse file {}",
-                        collected.len(), reuse_path
-                    );
-                    return collected.into_iter().take(target_count).collect();
-                }
-            }
-        }
-        if !collected.is_empty() {
-            println!(
-                "Loaded {} r candidates from reuse file {}",
-                collected.len(), reuse_path
-            );
-        }
-    } else if engine.reuse_r_candidates_append_only {
-        println!(
-            "Reuse append-only enabled; will append new r candidates to {} but will not load from it",
-            engine.reuse_r_candidates_path
-        );
-    }
-
-    let found = Arc::new(AtomicUsize::new(collected.len()));
-
-    let max_attempts = count.saturating_mul(1000);
-    let mut seeds = Vec::with_capacity(max_attempts as usize);
-    for _ in 0..max_attempts {
-        seeds.push(rng.next_u64());
-    }
-
-    println!("Generating r candidates... {} attempts", seeds.len());
-
-    let generated = seeds
-        .into_par_iter()
-        .enumerate()
-        .filter_map(|(idx, seed)| {
-            if found.load(Ordering::Relaxed) >= target_count {
-                return None;
-            }
-
-            let mut local_rng = StdRng::seed_from_u64(seed);
-            let upper = n + &scale + BigUint::from((idx as u64) + 1);
-            let candidate = random_biguint_below(&upper, &mut local_rng) + BigUint::one();
-            if is_probable_prime_big(&candidate) {
-                println!("Skipping prime r candidate: {}", candidate);
-                return None;
-            }
-            let deadline = Instant::now() + Duration::from_millis(5000);
-            let Some(factors) = factor_composite_with_timeout(&candidate, &mut local_rng, deadline) else {
-                return None;
-            };
-            if factors.len() < 3 {
-                return None;
-            }
-            if factors.iter().any(|(p, _)| p < &min_factor) {
-                return None;
-            }
-
-            let prev = found.fetch_add(1, Ordering::Relaxed);
-            if prev >= target_count {
-                return None;
-            }
-
-            println!("Generated r candidate: {}, factors {:?}", candidate, factors);
-            Some((candidate, factors))
-        })
-        .collect::<Vec<_>>();
-
-    let mut new_candidates = Vec::new();
-    for (r, factors) in generated {
-        if seen.insert(r.to_string()) {
-            new_candidates.push((r, factors));
-        }
-    }
-
-    collected.extend(new_candidates.iter().cloned());
-    collected.truncate(target_count);
-
-    if append_reuse && !new_candidates.is_empty() {
-        append_reuse_candidates(&engine.reuse_r_candidates_path, &new_candidates);
-    }
-
-    collected
-}
-
-fn load_reuse_candidates(path: &str) -> Vec<(BigUint, Vec<(BigUint, u64)>)> {
-    let file = match fs::File::open(path) {
-        Ok(f) => f,
-        Err(err) => {
-            if err.kind() != std::io::ErrorKind::NotFound {
-                println!("Failed to open reuse file {}: {}", path, err);
-            }
-            return Vec::new();
-        }
-    };
-
-    let reader = BufReader::new(file);
-    let mut entries = Vec::new();
-
-    for (idx, line) in reader.lines().enumerate() {
-        let line = match line {
-            Ok(l) => l,
-            Err(err) => {
-                println!("Skipping line {} in reuse file due to read error: {}", idx + 1, err);
-                continue;
-            }
-        };
-
-        let line = line.trim();
-        if line.is_empty() || line.starts_with('#') {
-            continue;
-        }
-
-        let mut parts = line.splitn(2, ',');
-        let r_str = parts.next().unwrap_or("").trim();
-        let factors_str = parts.next().unwrap_or("").trim();
-
-        if r_str.is_empty() || factors_str.is_empty() {
-            println!(
-                "Skipping line {} in reuse file: missing r or factors entry",
-                idx + 1
-            );
-            continue;
-        }
-
-        let r = match r_str.parse::<BigUint>() {
-            Ok(val) => val,
-            Err(err) => {
-                println!("Skipping line {} in reuse file: invalid r '{}': {}", idx + 1, r_str, err);
-                continue;
-            }
-        };
-
-        let Some(factors) = parse_factors_csv(factors_str) else {
-            println!(
-                "Skipping line {} in reuse file: invalid factors '{}': expected p^e;...",
-                idx + 1,
-                factors_str
-            );
-            continue;
-        };
-
-        entries.push((r, factors));
-    }
-
-    entries
-}
-
-fn append_reuse_candidates(path: &str, entries: &[(BigUint, Vec<(BigUint, u64)>)]) {
-    if entries.is_empty() {
-        return;
-    }
-
-    let mut file = match OpenOptions::new().create(true).append(true).open(path) {
-        Ok(f) => f,
-        Err(err) => {
-            println!("Failed to append reuse file {}: {}", path, err);
-            return;
-        }
-    };
-
-    for (r, factors) in entries {
-        let factors_str = format_factors_csv(factors);
-        if let Err(err) = writeln!(file, "{},{}", r, factors_str) {
-            println!("Failed to write r candidate {} to {}: {}", r, path, err);
-            break;
-        }
-    }
-}
-
-fn parse_factors_csv(raw: &str) -> Option<Vec<(BigUint, u64)>> {
-    let mut factors = Vec::new();
-
-    for entry in raw.split(';').map(str::trim).filter(|s| !s.is_empty()) {
-        let mut parts = entry.split('^');
-        let p_str = parts.next()?;
-        let e_str = parts.next().unwrap_or("1");
-
-        let p = p_str.parse::<BigUint>().ok()?;
-        let e = e_str.parse::<u64>().ok()?;
-        factors.push((p, e));
-    }
-
-    if factors.is_empty() {
-        None
-    } else {
-        Some(factors)
-    }
-}
-
-fn format_factors_csv(factors: &[(BigUint, u64)]) -> String {
-    factors
-        .iter()
-        .map(|(p, e)| format!("{}^{}", p, e))
-        .collect::<Vec<_>>()
-        .join(";")
-}
-
-#[allow(dead_code)]
-fn random_biguint_below(upper: &BigUint, rng: &mut StdRng) -> BigUint {
-    if upper.is_zero() {
-        return BigUint::zero();
-    }
-    let bits = upper.bits();
-    loop {
-        let candidate = random_biguint_bits(bits as u32, rng);
-        if &candidate < upper {
-            return candidate;
-        }
-    }
-}
-
+/// Computes a derived value used in homomorphic base conversion flows.
+///
+/// # Parameters
+/// - `x`: Input value.
+/// - `p`: Modulus base.
+/// - `y`: Exponent parameter.
+/// - `apply_mod`: Whether to apply modulus at the end.
+/// - `use_other_root`: Whether to use the alternate square root branch.
+///
+/// # Returns
+/// - `BigUint`: Derived value based on modular square roots and exponentiation.
+///
+/// # Expected Output
+/// - Returns a computed `BigUint`; no side effects.
 fn get_larger_number(x: &BigUint, p: &BigUint, y: u32, apply_mod: bool, use_other_root: bool) -> BigUint {
     let p_y = p.pow(y);
     let p_y_minus_one = p.pow(y.saturating_sub(1));
@@ -1582,69 +1616,18 @@ fn get_larger_number(x: &BigUint, p: &BigUint, y: u32, apply_mod: bool, use_othe
     }
 }
 
-fn modular_sqrt(a: &BigUint, p: &BigUint) -> BigUint {
-    // Tonelli-Shanks for odd prime p; demo uses small-ish primes so this is fine.
-    if a.is_zero() {
-        return BigUint::zero();
-    }
-    if p == &BigUint::from(2u8) {
-        return BigUint::zero();
-    }
-    if legendre_symbol(a, p) != BigInt::one() {
-        return BigUint::one();
-    }
-
-    let mut q = p - BigUint::one();
-    let mut s = 0u32;
-    while (&q & BigUint::one()).is_zero() {
-        q >>= 1;
-        s += 1;
-    }
-
-    if s == 1 {
-        return a.modpow(&((p + BigUint::one()) >> 2), p);
-    }
-
-    let mut z = BigUint::from(2u8);
-    while legendre_symbol(&z, p) != BigInt::from(-1) {
-        z += BigUint::one();
-    }
-
-    let mut m = s;
-    let mut c = z.modpow(&q, p);
-    let mut t = a.modpow(&q, p);
-    let mut r = a.modpow(&((&q + BigUint::one()) >> 1), p);
-
-    while t != BigUint::one() {
-        let mut i = 1u32;
-        let mut t2i = t.modpow(&BigUint::from(2u32), p);
-        while t2i != BigUint::one() {
-            t2i = t2i.modpow(&BigUint::from(2u32), p);
-            i += 1;
-            if i == m {
-                break;
-            }
-        }
-        let b = c.modpow(&BigUint::from(1u64 << (m - i - 1)), p);
-        r = (&r * &b) % p;
-        c = (&b * &b) % p;
-        t = (&t * &c) % p;
-        m = i;
-    }
-    r
-}
-
-fn legendre_symbol(a: &BigUint, p: &BigUint) -> BigInt {
-    let ls = a.modpow(&((p - BigUint::one()) >> 1), p);
-    if ls.is_zero() {
-        BigInt::zero()
-    } else if ls == BigUint::one() {
-        BigInt::one()
-    } else {
-        BigInt::from(-1)
-    }
-}
-
+/// Applies the homomorphic base conversion formula.
+///
+/// # Parameters
+/// - `x`: Input value to convert.
+/// - `r`: Target modulus.
+/// - `p`: Source modulus.
+///
+/// # Returns
+/// - `BigUint`: Converted value reduced modulo `r`.
+///
+/// # Expected Output
+/// - Returns the base-converted value; no side effects.
 fn homomorphic_base_conversion(x: &BigUint, r: &BigUint, p: &BigUint) -> BigUint {
     let y = x % p;
     let z = p % r;
@@ -1653,6 +1636,19 @@ fn homomorphic_base_conversion(x: &BigUint, r: &BigUint, p: &BigUint) -> BigUint
     reduced % r
 }
 
+/// Dispatches between base conversion and division-based conversion.
+///
+/// # Parameters
+/// - `x`: Input value to convert.
+/// - `r`: Target modulus.
+/// - `p`: Source modulus.
+/// - `engine`: Engine configuration controlling conversion mode.
+///
+/// # Returns
+/// - `BigUint`: Converted value.
+///
+/// # Expected Output
+/// - Returns a converted value based on configuration; no side effects.
 fn hbc(x: &BigUint, r: &BigUint, p: &BigUint, engine: &EngineConfig) -> BigUint {
     if engine.base_convert {
         homomorphic_base_conversion(x, r, p)
@@ -1662,7 +1658,106 @@ fn hbc(x: &BigUint, r: &BigUint, p: &BigUint, engine: &EngineConfig) -> BigUint 
     }
 }
 
+/// Derives the candidate message for a given ciphertext and r candidate.
+///
+/// # Parameters
+/// - `ctx`: RSA context containing key material.
+/// - `engine`: Engine configuration controlling HBC behavior.
+/// - `ciphertext`: Ciphertext to transform through the HBC flow.
+/// - `r`: Candidate modulus for alternate decryption.
+/// - `d_new`: Private exponent corresponding to `r`.
+/// - `n_pow_y`: Precomputed `n^y` value.
+/// - `r_pow_y`: Precomputed `r^y` value.
+/// - `y`: Rabin exponent used for modular transforms.
+/// - `use_other_root`: Whether to use the alternate square root branch.
+///
+/// # Returns
+/// - `BigUint`: Derived candidate message modulo `n`.
+///
+/// # Expected Output
+/// - Returns the derived message; no side effects.
+fn derive_candidate_message(
+    ctx: &RSAContext,
+    engine: &EngineConfig,
+    ciphertext: &BigUint,
+    r: &BigUint,
+    d_new: &BigUint,
+    n_pow_y: &BigUint,
+    r_pow_y: &BigUint,
+    y: u32,
+    use_other_root: bool,
+) -> BigUint {
+    let result_default = get_larger_number(ciphertext, &ctx.n, y, true, use_other_root);
+    derive_candidate_message_from_result(
+        ctx,
+        engine,
+        &result_default,
+        r,
+        d_new,
+        n_pow_y,
+        r_pow_y,
+        y,
+        use_other_root,
+    )
+}
+
+/// Derives the candidate message given a precomputed first-stage result.
+///
+/// # Parameters
+/// - `ctx`: RSA context containing key material.
+/// - `engine`: Engine configuration controlling HBC behavior.
+/// - `result_default`: Output from the first `get_larger_number` stage.
+/// - `r`: Candidate modulus for alternate decryption.
+/// - `d_new`: Private exponent corresponding to `r`.
+/// - `n_pow_y`: Precomputed `n^y` value.
+/// - `r_pow_y`: Precomputed `r^y` value.
+/// - `y`: Rabin exponent used for modular transforms.
+/// - `use_other_root`: Whether to use the alternate square root branch.
+///
+/// # Returns
+/// - `BigUint`: Derived candidate message modulo `n`.
+///
+/// # Expected Output
+/// - Returns the derived message; no side effects.
+fn derive_candidate_message_from_result(
+    ctx: &RSAContext,
+    engine: &EngineConfig,
+    result_default: &BigUint,
+    r: &BigUint,
+    d_new: &BigUint,
+    n_pow_y: &BigUint,
+    r_pow_y: &BigUint,
+    y: u32,
+    use_other_root: bool,
+) -> BigUint {
+    let hbc_result = hbc(result_default, r, n_pow_y, engine);
+    let recovered_new = if engine.use_rs_decrypt {
+        hbc_result.modpow(d_new, r)
+    } else {
+        hbc_result
+    };
+
+    let result2_default = get_larger_number(&recovered_new, r, y, true, use_other_root);
+    let hbc_default = hbc(&result2_default, &ctx.n, r_pow_y, engine);
+    let dm_raw = &hbc_default % &ctx.n;
+    let width = dm_raw.bits().max(1);
+    let mask = (BigUint::one() << width) - BigUint::one();
+    let inverted_dm = &mask ^ &dm_raw;
+    if engine.invert_bits { inverted_dm } else { dm_raw }
+}
+
 #[allow(dead_code)]
+/// Picks a subset product of prime factors closest to a target value.
+///
+/// # Parameters
+/// - `target_n`: Target value to approximate.
+/// - `prime_factors`: Candidate prime factors.
+///
+/// # Returns
+/// - `BigUint`: Product of a subset of factors closest to `target_n`.
+///
+/// # Expected Output
+/// - Returns `1` if `prime_factors` is empty; no side effects.
 fn construct_from_factors_close_to_target_n(target_n: &BigUint, prime_factors: &[BigUint]) -> BigUint {
     if prime_factors.is_empty() {
         return BigUint::one();
@@ -1696,151 +1791,108 @@ fn construct_from_factors_close_to_target_n(target_n: &BigUint, prime_factors: &
     best
 }
 
-#[allow(dead_code)]
-fn factor_composite_with_timeout(
-    n: &BigUint,
-    rng: &mut StdRng,
-    deadline: Instant,
-) -> Option<Vec<(BigUint, u64)>> {
-    let mut factors = Vec::new();
-    if !factor_recursive(n.clone(), &mut factors, rng, deadline) {
-        return None;
-    }
-    factors.sort_by(|a, b| a.0.cmp(&b.0));
-    Some(coalesce_factors(factors))
-}
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rsademo::dsp::{find_ramp_signals, ramp_signal_strength};
+    use rsademo::r_candidates::RCandidateMode;
+    use rand::SeedableRng;
 
-#[allow(dead_code)]
-fn factor_recursive(
-    n: BigUint,
-    out: &mut Vec<(BigUint, u64)>,
-    rng: &mut StdRng,
-    deadline: Instant,
-) -> bool {
-    if Instant::now() >= deadline {
-        return false;
+    #[test]
+    fn test_ramp_detect () {
+        let mut hist = MatchHistogram::new();
+        let msg1 = BigUint::from(0b11110000u8);
+        let msg2 = BigUint::from(0b11100000u8);
+        hist.update(&msg1, &msg2);
     }
-    if n <= BigUint::one() {
-        return true;
-    }
-    if is_probable_prime_big(&n) {
-        out.push((n, 1));
-        return true;
-    }
-    let Some(divisor) = pollard_rho(&n, rng, deadline) else {
-        return false;
-    };
-    let other = &n / &divisor;
-    factor_recursive(divisor, out, rng, deadline) && factor_recursive(other, out, rng, deadline)
-}
 
-#[allow(dead_code)]
-fn coalesce_factors(mut factors: Vec<(BigUint, u64)>) -> Vec<(BigUint, u64)> {
-    if factors.is_empty() {
-        return factors;
+    #[test]
+    fn test_analysis_detect_ramp() {
+        // Sample dataset: mean is 10, ramp should be 11, 12, 13
+        let bins = vec![8, 9, 10, 11, 12, 13, 7, 8];
+        let ramps = find_ramp_signals(&bins, 3, 0);
+        println!("Detected ramps in analysis: {:?}", ramps);
+        let strength = ramp_signal_strength(&ramps);
+        println!("Signal strength in analysis: {}", strength);
+
+        // Check that at least one ramp is detected and signal strength is correct
+        assert!(!ramps.is_empty());
+        assert!(strength > 0);
     }
-    factors.sort_by(|a, b| a.0.cmp(&b.0));
-    let mut merged: Vec<(BigUint, u64)> = Vec::new();
-    let mut current = factors[0].clone();
-    for item in factors.into_iter().skip(1) {
-        if item.0 == current.0 {
-            current.1 += item.1;
-        } else {
-            merged.push(current);
-            current = item;
+
+    #[test]
+    fn test_r_candidates_small_primes_success() {
+        let p = BigUint::from(61u8);
+        let q = BigUint::from(53u8);
+        let n = &p * &q;
+        let phi = (&p - BigUint::one()) * (&q - BigUint::one());
+        let e = choose_exponent(3, &phi);
+        let d = mod_inverse(&e, &phi).expect("missing inverse");
+
+        let ctx = RSAContext {
+            p,
+            q,
+            n: n.clone(),
+            phi,
+            e,
+            d,
+        };
+
+        let mut config = Config::default();
+        config.engine.r_candidate_mode = RCandidateMode::SmallPrimes;
+        config.engine.r_candidate_small_primes = vec![3, 5, 7];
+        config.engine.r_candidate_small_prime_factors = 3;
+        config.engine.process_min_factor = 3;
+        config.engine.process_count = 1;
+        config.engine.process_min_count = 1;
+        config.engine.min_message_trials = 1;
+        config.engine.rabin_exponent = 3;
+
+        let msg = BigUint::from(42u8);
+        let mut rng = StdRng::seed_from_u64(101);
+        let mut hist = MatchHistogram::new();
+        let result = run_message_trial(&ctx, &config, &config.engine, &msg, 1, &mut rng, &mut hist);
+        if let Err(err) = &result {
+            println!("r candidates success test failed: {}", err);
         }
+        assert!(result.is_ok());
     }
-    merged.push(current);
-    merged
-}
 
-#[allow(dead_code)]
-fn pollard_rho(n: &BigUint, rng: &mut StdRng, deadline: Instant) -> Option<BigUint> {
-    if n.is_even() {
-        return Some(BigUint::from(2u8));
-    }
-    let one = BigUint::one();
-    let two = &one + &one;
+    #[test]
+    fn test_r_candidates_decrypt_may_fail() {
+        let p = BigUint::from(61u8);
+        let q = BigUint::from(53u8);
+        let n = &p * &q;
+        let phi = (&p - BigUint::one()) * (&q - BigUint::one());
+        let e = choose_exponent(3, &phi);
+        let d = mod_inverse(&e, &phi).expect("missing inverse");
 
-    let mut c = random_biguint_below(n, rng);
-    let mut x = random_biguint_below(n, rng);
-    let mut y = x.clone();
-    let f = |val: &BigUint, c: &BigUint, n: &BigUint| (val.modpow(&two, n) + c) % n;
-    let mut iter: u64 = 0;
+        let ctx = RSAContext {
+            p,
+            q,
+            n,
+            phi,
+            e,
+            d,
+        };
 
-    while Instant::now() < deadline {
-        iter += 1;
-        x = f(&x, &c, n);
-        y = f(&f(&y, &c, n), &c, n);
-        let diff = if &x >= &y { &x - &y } else { &y - &x };
-        let d = diff.gcd(n);
-        if d != one && d != *n {
-            return Some(d);
+        let mut config = Config::default();
+        config.engine.r_candidate_mode = RCandidateMode::SmallPrimes;
+        config.engine.r_candidate_small_primes = vec![3, 5]; // too few primes for 3-factor candidates
+        config.engine.r_candidate_small_prime_factors = 3;
+        config.engine.process_min_factor = 3;
+        config.engine.process_count = 1;
+        config.engine.process_min_count = 1;
+        config.engine.min_message_trials = 1;
+        config.engine.rabin_exponent = 3;
+
+        let msg = BigUint::from(42u8);
+        let mut rng = StdRng::seed_from_u64(102);
+        let mut hist = MatchHistogram::new();
+        let result = run_message_trial(&ctx, &config, &config.engine, &msg, 1, &mut rng, &mut hist);
+        if let Err(err) = &result {
+            println!("Expected r candidate failure: {}", err);
         }
-        if d == *n || iter > 10_000 {
-            c = random_biguint_below(n, rng);
-            x = random_biguint_below(n, rng);
-            y = x.clone();
-            iter = 0;
-        }
+        assert!(result.is_err());
     }
-    None
-}
-
-#[allow(dead_code)]
-fn is_probable_prime_big(n: &BigUint) -> bool {
-    // Tiny cases
-    if n <= &BigUint::from(3u8) {
-        return *n == BigUint::from(2u8) || *n == BigUint::from(3u8);
-    }
-    if n.is_even() {
-        return false;
-    }
-
-    // Quick small-prime sieve to reject obvious composites before MR rounds.
-    const SMALL_PRIMES: [u64; 16] = [3, 5, 7, 11, 13, 17, 19, 23, 29, 31, 37, 41, 43, 47, 53, 59];
-    for p in SMALL_PRIMES {
-        let p_big = BigUint::from(p);
-        if n == &p_big {
-            return true;
-        }
-        if (n % &p_big).is_zero() {
-            return false;
-        }
-    }
-
-    let one = BigUint::one();
-    let two = &one + &one;
-    let n_minus_one = n - &one;
-    let (d, s) = decompose_big(n_minus_one.clone());
-
-    // Deterministic bases sufficient for n < 2^256 (we're far below that).
-    // Using a small set keeps modpow calls down for the hot path.
-    const BASES: [u64; 7] = [2, 3, 5, 7, 11, 13, 17];
-    'outer: for a in BASES {
-        let a = BigUint::from(a);
-        let mut x = a.modpow(&d, n);
-        if x == one || x == n_minus_one {
-            continue;
-        }
-        for _ in 1..s {
-            x = x.modpow(&two, n);
-            if x == n_minus_one {
-                continue 'outer;
-            }
-        }
-        return false;
-    }
-    true
-}
-
-#[allow(dead_code)]
-fn decompose_big(mut value: BigUint) -> (BigUint, u32) {
-    let mut s = 0u32;
-    let one = BigUint::one();
-    while (&value & &one).is_zero() {
-        value >>= 1;
-        s += 1;
-    }
-    (value, s)
 }
