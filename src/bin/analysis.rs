@@ -1209,6 +1209,28 @@ impl MatchHistogram {
         }
     }
 
+    /// Merges another histogram into this one.
+    ///
+    /// # Parameters
+    /// - `other`: Histogram whose counts are added into `self`.
+    ///
+    /// # Returns
+    /// - `()`: This method returns nothing.
+    ///
+    /// # Expected Output
+    /// - Updates internal counts; no stdout/stderr output.
+    fn merge(&mut self, other: &MatchHistogram) {
+        if other.matches.len() > self.matches.len() {
+            self.matches.resize(other.matches.len(), 0);
+            self.samples.resize(other.samples.len(), 0);
+        }
+
+        for i in 0..other.matches.len() {
+            self.matches[i] = self.matches[i].saturating_add(other.matches[i]);
+            self.samples[i] = self.samples[i].saturating_add(other.samples[i]);
+        }
+    }
+
     /// Writes a PNG histogram showing per-bit match frequency.
     ///
     /// # Parameters
@@ -1338,47 +1360,131 @@ fn run_message_trial(
 
         let result_default = get_larger_number(&ciphertext, &ctx.n, y, true, false);
 
-        for (r, factors) in &candidates {
-            let phi_new = compute_totient(factors);
-            let Some(d_new) = mod_inverse(&ctx.e, &phi_new) else {
-                continue;
-            };
+        let (attempt_best, attempt_worst, attempt_hist) = candidates
+            .par_iter()
+            .fold(
+                || {
+                    (
+                        Option::<TestReport>::None,
+                        Option::<TestReport>::None,
+                        MatchHistogram::new(),
+                    )
+                },
+                |mut acc, (r, factors)| {
+                    let phi_new = compute_totient(factors);
+                    let Some(d_new) = mod_inverse(&ctx.e, &phi_new) else {
+                        return acc;
+                    };
 
-            let r_pow_y = r.pow(y);
-            let dm = derive_candidate_message_from_result(
-                ctx,
-                engine,
-                &result_default,
-                r,
-                &d_new,
-                &n_pow_y,
-                &r_pow_y,
-                y,
-                false,
+                    let r_pow_y = r.pow(y);
+                    let dm = derive_candidate_message_from_result(
+                        ctx,
+                        engine,
+                        &result_default,
+                        r,
+                        &d_new,
+                        &n_pow_y,
+                        &r_pow_y,
+                        y,
+                        false,
+                    );
+                    acc.2.update(&dm, &msg);
+
+                    let (matching_lsb, matching_total) = count_matching_bits(&dm, &msg);
+                    let report = TestReport {
+                        best_r: r.clone(),
+                        factors: factors.clone(),
+                        matching_lsb,
+                        matching_total,
+                        message_bits: msg.bits() as usize,
+                    };
+
+                    if acc
+                        .0
+                        .as_ref()
+                        .map(|b| {
+                            (matching_total, matching_lsb) > (b.matching_total, b.matching_lsb)
+                        })
+                        .unwrap_or(true)
+                    {
+                        acc.0 = Some(report.clone());
+                    }
+                    if acc
+                        .1
+                        .as_ref()
+                        .map(|b| {
+                            (matching_total, matching_lsb) < (b.matching_total, b.matching_lsb)
+                        })
+                        .unwrap_or(true)
+                    {
+                        acc.1 = Some(report);
+                    }
+
+                    acc
+                },
+            )
+            .reduce(
+                || {
+                    (
+                        Option::<TestReport>::None,
+                        Option::<TestReport>::None,
+                        MatchHistogram::new(),
+                    )
+                },
+                |mut left, right| {
+                    if let Some(candidate) = right.0.as_ref() {
+                        if left
+                            .0
+                            .as_ref()
+                            .map(|b| {
+                                (candidate.matching_total, candidate.matching_lsb)
+                                    > (b.matching_total, b.matching_lsb)
+                            })
+                            .unwrap_or(true)
+                        {
+                            left.0 = right.0;
+                        }
+                    }
+
+                    if let Some(candidate) = right.1.as_ref() {
+                        if left
+                            .1
+                            .as_ref()
+                            .map(|b| {
+                                (candidate.matching_total, candidate.matching_lsb)
+                                    < (b.matching_total, b.matching_lsb)
+                            })
+                            .unwrap_or(true)
+                        {
+                            left.1 = right.1;
+                        }
+                    }
+
+                    left.2.merge(&right.2);
+                    left
+                },
             );
-            histogram.update(&dm, &msg);
 
-            let (matching_lsb, matching_total) = count_matching_bits(&dm, &msg);
-            //println!("Trial {}, r candidate {}: matching bits LSB run {} / overlap {} of {} bits", attempt_idx + 1, r, matching_lsb, matching_total, msg.bits());
-            let report = TestReport {
-                best_r: r.clone(),
-                factors: factors.clone(),
-                matching_lsb,
-                matching_total,
-                message_bits: msg.bits() as usize,
-            };
-
+        histogram.merge(&attempt_hist);
+        if let Some(report) = attempt_best {
             if best
                 .as_ref()
-                .map(|b| (matching_total, matching_lsb) > (b.matching_total, b.matching_lsb))
+                .map(|b| {
+                    (report.matching_total, report.matching_lsb)
+                        > (b.matching_total, b.matching_lsb)
+                })
                 .unwrap_or(true)
             {
-                //println!("Best candidate updated: r = {}, factors = {:?}, matching bits LSB run {} / overlap {} of {} bits", r, factors, matching_lsb, matching_total, msg.bits());
-                best = Some(report.clone());
+                best = Some(report);
             }
+        }
+        if let Some(report) = attempt_worst {
             if worst
                 .as_ref()
-                .map(|b| (matching_total, matching_lsb) < (b.matching_total, b.matching_lsb))
+                .map(|b| {
+                    (report.matching_total, report.matching_lsb)
+                        < (b.matching_total, b.matching_lsb)
+                })
                 .unwrap_or(true)
             {
                 worst = Some(report);
