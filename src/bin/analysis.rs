@@ -601,6 +601,14 @@ struct ExportSample {
     decryption_bytes_le: Vec<u8>,
 }
 
+#[derive(Clone, Debug)]
+struct FrameExportOutput {
+    frame_idx: usize,
+    match_rows: String,
+    ramp_rows: String,
+    ramp_summary: Vec<RampSummary>,
+}
+
 /// Reads a single bit from a little-endian byte slice.
 ///
 /// # Parameters
@@ -904,68 +912,72 @@ fn run_enciphered_export(
         ramp_csv = Some(file);
     }
 
-    let mut summaries = vec![RampSummary::default(); ramp_tolerances.len()];
+    use std::fmt::Write as FmtWrite;
 
-    for frame_idx in 0..frame_count {
-        let start = frame_idx * stride;
-        let end = (start + window_size).min(samples.len());
-        let window = &samples[start..end];
-        let mut match_counts = vec![0u32; bins];
-        let window_len_f = window.len().max(1) as f64;
+    let frame_outputs: Vec<FrameExportOutput> = (0..frame_count)
+        .into_par_iter()
+        .map(|frame_idx| {
+            let start = frame_idx * stride;
+            let end = (start + window_size).min(samples.len());
+            let window = &samples[start..end];
+            let mut match_counts = vec![0u32; bins];
+            let window_len_f = window.len().max(1) as f64;
 
-        for sample in window {
-            for bit_idx in 0..bins {
-                let dm_bit = bit_from_bytes_le(&sample.decryption_bytes_le, bit_idx);
-                let msg_bit = bit_from_bytes_le(&sample.message_bytes_le, bit_idx);
-                if dm_bit == msg_bit {
-                    match_counts[bit_idx] = match_counts[bit_idx].saturating_add(1);
+            for sample in window {
+                for bit_idx in 0..bins {
+                    let dm_bit = bit_from_bytes_le(&sample.decryption_bytes_le, bit_idx);
+                    let msg_bit = bit_from_bytes_le(&sample.message_bytes_le, bit_idx);
+                    if dm_bit == msg_bit {
+                        match_counts[bit_idx] = match_counts[bit_idx].saturating_add(1);
+                    }
                 }
             }
-        }
 
-        let mut counts_pct = vec![0.0_f64; bins];
-        for (bin_idx, count) in match_counts.iter().enumerate() {
-            let match_pct = (*count as f64 / window_len_f) * 100.0;
-            counts_pct[bin_idx] = match_pct;
-            writeln!(
-                csv,
-                "{},{},{},{},{},{:.8}",
-                frame_idx,
-                start,
-                end,
-                bin_idx,
-                count,
-                match_pct
-            )?;
-        }
-
-        if !ramp_tolerances.is_empty() {
-            let mean = mean_f64(&counts_pct);
-
-            for (idx, tol) in ramp_tolerances.iter().enumerate() {
-                let ramps = find_ramp_signals_f64(
-                    &counts_pct,
-                    engine.enciphered_export_ramp_length,
-                    engine.enciphered_export_ramp_step_pct,
-                    *tol,
+            let mut counts_pct = vec![0.0_f64; bins];
+            let mut match_rows = String::with_capacity(bins * 64);
+            for (bin_idx, count) in match_counts.iter().enumerate() {
+                let match_pct = (*count as f64 / window_len_f) * 100.0;
+                counts_pct[bin_idx] = match_pct;
+                let _ = writeln!(
+                    match_rows,
+                    "{},{},{},{},{},{:.8}",
+                    frame_idx,
+                    start,
+                    end,
+                    bin_idx,
+                    count,
+                    match_pct
                 );
-                let strength = ramp_signal_strength_f64(&ramps);
-                let entry = &mut summaries[idx];
-                if !ramps.is_empty() {
-                    entry.frames_with_ramp += 1;
-                }
-                entry.total_ramps = entry.total_ramps.saturating_add(ramps.len());
-                entry.total_strength = entry.total_strength.saturating_add(strength);
+            }
 
-                if let Some(file) = ramp_csv.as_mut() {
+            let mut ramp_rows = String::new();
+            let mut ramp_summary = vec![RampSummary::default(); ramp_tolerances.len()];
+            if !ramp_tolerances.is_empty() {
+                let mean = mean_f64(&counts_pct);
+
+                for (idx, tol) in ramp_tolerances.iter().enumerate() {
+                    let ramps = find_ramp_signals_f64(
+                        &counts_pct,
+                        engine.enciphered_export_ramp_length,
+                        engine.enciphered_export_ramp_step_pct,
+                        *tol,
+                    );
+                    let strength = ramp_signal_strength_f64(&ramps);
+                    let entry = &mut ramp_summary[idx];
+                    if !ramps.is_empty() {
+                        entry.frames_with_ramp += 1;
+                    }
+                    entry.total_ramps = entry.total_ramps.saturating_add(ramps.len());
+                    entry.total_strength = entry.total_strength.saturating_add(strength);
+
                     for (ramp_start, ramp_len, ramp_vals) in ramps {
                         let values_str = ramp_vals
                             .iter()
                             .map(|v| format!("{:.4}", v))
                             .collect::<Vec<_>>()
                             .join("|");
-                        writeln!(
-                            file,
+                        let _ = writeln!(
+                            ramp_rows,
                             "{},{},{},{},{},{:.4}",
                             frame_idx,
                             tol,
@@ -973,10 +985,39 @@ fn run_enciphered_export(
                             ramp_len,
                             values_str,
                             mean
-                        )?;
+                        );
                     }
                 }
             }
+
+            FrameExportOutput {
+                frame_idx,
+                match_rows,
+                ramp_rows,
+                ramp_summary,
+            }
+        })
+        .collect();
+
+    let mut frame_outputs = frame_outputs;
+    frame_outputs.sort_by_key(|entry| entry.frame_idx);
+
+    let mut summaries = vec![RampSummary::default(); ramp_tolerances.len()];
+    for output in &frame_outputs {
+        if let Some(file) = ramp_csv.as_mut() {
+            if !output.ramp_rows.is_empty() {
+                file.write_all(output.ramp_rows.as_bytes())?;
+            }
+        }
+        csv.write_all(output.match_rows.as_bytes())?;
+
+        for (idx, entry) in output.ramp_summary.iter().enumerate() {
+            summaries[idx].frames_with_ramp =
+                summaries[idx].frames_with_ramp.saturating_add(entry.frames_with_ramp);
+            summaries[idx].total_ramps =
+                summaries[idx].total_ramps.saturating_add(entry.total_ramps);
+            summaries[idx].total_strength =
+                summaries[idx].total_strength.saturating_add(entry.total_strength);
         }
     }
 
