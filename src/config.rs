@@ -103,6 +103,10 @@ pub struct EngineConfig {
     pub r_candidate_small_primes: Vec<u64>,
     #[serde(default = "default_r_candidate_small_prime_factors")]
     pub r_candidate_small_prime_factors: usize,
+    #[serde(default = "default_r_candidate_max_factors")]
+    pub r_candidate_max_factors: usize,
+    #[serde(default)]
+    pub r_candidate_bit_length: Option<u64>,
     #[serde(default = "default_combiner_enable")]
     pub combiner_enable: bool,
     #[serde(default = "default_combiner_k_oracles")]
@@ -183,6 +187,8 @@ impl Default for EngineConfig {
             r_candidate_mode: default_r_candidate_mode(),
             r_candidate_small_primes: default_r_candidate_small_primes(),
             r_candidate_small_prime_factors: default_r_candidate_small_prime_factors(),
+            r_candidate_max_factors: default_r_candidate_max_factors(),
+            r_candidate_bit_length: None,
             combiner_enable: default_combiner_enable(),
             combiner_k_oracles: default_combiner_k_oracles(),
             combiner_match_probability: default_combiner_match_probability(),
@@ -629,6 +635,20 @@ fn default_r_candidate_small_primes() -> Vec<u64> {
 /// - Returns a constant default value; no side effects.
 fn default_r_candidate_small_prime_factors() -> usize {
     3
+}
+
+/// Default maximum number of factors per r candidate.
+///
+/// # Parameters
+/// - None.
+///
+/// # Returns
+/// - `usize`: Default maximum factor count.
+///
+/// # Expected Output
+/// - Returns a constant default value; no side effects.
+fn default_r_candidate_max_factors() -> usize {
+    6
 }
 
 /// Default flag for enabling the combiner experiment.

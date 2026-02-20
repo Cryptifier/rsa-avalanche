@@ -57,6 +57,10 @@ struct Args {
     #[arg(long, value_parser = clap::value_parser!(u32).range(16..=63))]
     bits: Option<u32>,
 
+    /// Target bit length for r candidates (small-primes mode)
+    #[arg(long, alias = "bit-length", value_name = "BITS")]
+    r_bits: Option<u64>,
+
     /// Number of r candidates to generate (overrides config counts)
     #[arg(long)]
     count: Option<u64>,
@@ -84,6 +88,10 @@ struct Args {
     /// Small prime factor count per candidate
     #[arg(long, value_name = "COUNT")]
     small_prime_factors: Option<usize>,
+
+    /// Maximum total factors per candidate (small-primes mode)
+    #[arg(long, value_name = "COUNT")]
+    max_factors: Option<usize>,
 
     /// Override candidate r to factor directly
     #[arg(long, value_name = "R")]
@@ -327,6 +335,10 @@ fn build_r_candidate_settings(
         small_prime_factors_per_candidate: args
             .small_prime_factors
             .unwrap_or(engine.r_candidate_small_prime_factors),
+        max_factors_per_candidate: args
+            .max_factors
+            .unwrap_or(engine.r_candidate_max_factors),
+        target_bit_length: args.r_bits.or(engine.r_candidate_bit_length),
     })
 }
 
@@ -525,6 +537,13 @@ fn build_header_lines(
             "# small_prime_factors={}",
             settings.small_prime_factors_per_candidate
         ));
+        lines.push(format!(
+            "# max_factors={}",
+            settings.max_factors_per_candidate
+        ));
+        if let Some(bits) = settings.target_bit_length {
+            lines.push(format!("# target_bits={}", bits));
+        }
     }
 
     lines
@@ -590,5 +609,166 @@ fn mode_label(mode: RCandidateMode) -> &'static str {
     match mode {
         RCandidateMode::Factoring => "factoring",
         RCandidateMode::SmallPrimes => "small_primes",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    fn temp_path(name: &str) -> PathBuf {
+        let mut path = std::env::temp_dir();
+        path.push(format!(
+            "rgen_{}_{}_{}.csv",
+            name,
+            std::process::id(),
+            rand::random::<u64>()
+        ));
+        path
+    }
+
+    fn base_args() -> Args {
+        Args {
+            config: "rsa_config.json".to_string(),
+            output: None,
+            append: false,
+            seed: None,
+            n: None,
+            p: None,
+            q: None,
+            bits: None,
+            count: None,
+            min_count: None,
+            min_factor: None,
+            scale: None,
+            mode: None,
+            small_primes: Vec::new(),
+            small_prime_factors: None,
+            max_factors: None,
+            override_r: None,
+            r_bits: None,
+        }
+    }
+
+    #[test]
+    fn test_parse_biguint_arg_decimal_and_hex() {
+        let val = parse_biguint_arg("12345").expect("decimal parse failed");
+        assert_eq!(val, BigUint::from(12345u64));
+
+        let hex = parse_biguint_arg("0xFF").expect("hex parse failed");
+        assert_eq!(hex, BigUint::from(255u64));
+    }
+
+    #[test]
+    fn test_build_r_candidate_settings_uses_overrides() {
+        let mut engine = EngineConfig::default();
+        engine.process_count = 5;
+        engine.process_min_count = 4;
+        engine.process_min_factor = 7;
+        engine.process_scale = 11;
+        engine.r_candidate_small_primes = vec![3, 5, 7, 11];
+        engine.r_candidate_small_prime_factors = 3;
+        engine.r_candidate_max_factors = 9;
+        engine.r_candidate_bit_length = Some(64);
+
+        let mut args = base_args();
+        args.count = Some(10);
+        args.min_count = Some(8);
+        args.min_factor = Some(13);
+        args.scale = Some(7);
+        args.mode = Some(ModeArg::SmallPrimes);
+        args.small_primes = vec![3, 5, 7, 11, 13];
+        args.small_prime_factors = Some(4);
+        args.max_factors = Some(12);
+        args.r_bits = Some(80);
+
+        let settings = build_r_candidate_settings(&engine, &args, "r_candidates.csv")
+            .expect("settings failed");
+        assert_eq!(settings.process_count, 10);
+        assert_eq!(settings.process_min_count, 8);
+        assert_eq!(settings.process_min_factor, BigUint::from(13u64));
+        assert_eq!(settings.process_scale, 7);
+        assert_eq!(settings.mode, RCandidateMode::SmallPrimes);
+        assert_eq!(settings.small_primes.len(), 5);
+        assert_eq!(settings.small_prime_factors_per_candidate, 4);
+        assert_eq!(settings.max_factors_per_candidate, 12);
+        assert_eq!(settings.target_bit_length, Some(80));
+    }
+
+    #[test]
+    fn test_build_header_lines_small_primes_metadata() {
+        let settings = RCandidateSettings {
+            mode: RCandidateMode::SmallPrimes,
+            override_best_r: None,
+            process_min_factor: BigUint::from(3u8),
+            process_count: 2,
+            process_min_count: 1,
+            process_scale: 8,
+            reuse_r_candidates_path: "r_candidates.csv".to_string(),
+            reuse_r_candidates: false,
+            reuse_r_candidates_append_only: false,
+            small_primes: vec![3u8, 5u8, 7u8].into_iter().map(BigUint::from).collect(),
+            small_prime_factors_per_candidate: 3,
+            max_factors_per_candidate: 6,
+            target_bit_length: Some(64),
+        };
+
+        let lines = build_header_lines(None, &settings, 2);
+        let joined = lines.join("\n");
+        assert!(joined.contains("mode=small_primes"));
+        assert!(joined.contains("small_primes=3,5,7"));
+        assert!(joined.contains("small_prime_factors=3"));
+        assert!(joined.contains("max_factors=6"));
+        assert!(joined.contains("target_bits=64"));
+    }
+
+    #[test]
+    fn test_dedup_candidates_filters_existing() {
+        let path = temp_path("dedup");
+        let existing = "105,3^1;5^1;7^1\n";
+        fs::write(&path, existing).expect("write failed");
+
+        let entries = vec![
+            (
+                BigUint::from(105u64),
+                vec![
+                    (BigUint::from(3u8), 1),
+                    (BigUint::from(5u8), 1),
+                    (BigUint::from(7u8), 1),
+                ],
+            ),
+            (
+                BigUint::from(1155u64),
+                vec![
+                    (BigUint::from(3u8), 1),
+                    (BigUint::from(5u8), 1),
+                    (BigUint::from(7u8), 1),
+                    (BigUint::from(11u8), 1),
+                ],
+            ),
+        ];
+
+        let (filtered, skipped, existing_count) =
+            dedup_candidates(path.to_str().unwrap(), entries, true).expect("dedup failed");
+        assert_eq!(existing_count, 1);
+        assert_eq!(skipped, 1);
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0].0, BigUint::from(1155u64));
+
+        let _ = fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_resolve_modulus_from_pq() {
+        let mut args = base_args();
+        args.p = Some("61".to_string());
+        args.q = Some("53".to_string());
+        let config = Config::default();
+        let mut rng = StdRng::seed_from_u64(123);
+        let modulus = resolve_modulus(&args, &config, &mut rng)
+            .expect("resolve failed")
+            .expect("missing modulus");
+        assert_eq!(modulus, BigUint::from(61u64) * BigUint::from(53u64));
     }
 }

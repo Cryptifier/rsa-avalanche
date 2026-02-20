@@ -1128,6 +1128,8 @@ fn build_r_candidate_settings(engine: &EngineConfig) -> RCandidateSettings {
             .map(|p| BigUint::from(*p))
             .collect(),
         small_prime_factors_per_candidate: engine.r_candidate_small_prime_factors,
+        max_factors_per_candidate: engine.r_candidate_max_factors,
+        target_bit_length: engine.r_candidate_bit_length,
     }
 }
 
@@ -1990,8 +1992,8 @@ mod tests {
         config.engine.r_candidate_small_primes = vec![3, 5, 7];
         config.engine.r_candidate_small_prime_factors = 3;
         config.engine.process_min_factor = 3;
-        config.engine.process_count = 1;
-        config.engine.process_min_count = 1;
+        config.engine.process_count = 6;
+        config.engine.process_min_count = 6;
         config.engine.min_message_trials = 1;
         config.engine.rabin_exponent = 3;
 
