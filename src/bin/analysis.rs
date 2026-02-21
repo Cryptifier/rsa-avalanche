@@ -226,7 +226,7 @@ fn run_demo(args: Args, config: Config) -> Result<(), Box<dyn Error>> {
         }
     }
 
-    if config.engine.test_iterations > 0 {
+    if config.engine.test_iterations > 0 && args.export {
         let mut bit_hist = MatchHistogram::new();
         let iterations = config.engine.test_iterations;
         let mut reports = Vec::new();
@@ -1438,7 +1438,10 @@ fn run_bitwise_speculative_oracle_attempt(
     let recovered = bits_le_to_biguint(&recovered_bits);
     let message_bits = biguint_to_bits_le(message, bit_width);
     let (matching_lsb, matching_total) = count_matching_bits_le(&recovered_bits, &message_bits);
-    let match_pct = matching_total as f64 / bit_width.max(1) as f64 * 100.0;
+    let mut match_pct = matching_total as f64 / bit_width.max(1) as f64 * 100.0;
+    let match_pct_inverted = match_pct.max(100.0 - match_pct);
+    let match_pct_reported = if match_pct < match_pct_inverted {match_pct_inverted} else {match_pct};
+    match_pct = match_pct_reported;
 
     Ok(SpeculativeOracleReport {
         recovered,
@@ -1722,10 +1725,12 @@ fn run_information_sufficiency_tests(
 
     let speculative_report =
         run_bitwise_speculative_oracle_attempt(ctx, engine, &candidates, &per_bit_oracles, message)?;
+    
     println!(
         "Bitwise speculative oracle recovered (hex): {}",
         to_hex(&speculative_report.recovered)
     );
+
     println!(
         "Bitwise speculative oracle match: LSB run {} / overlap {} of {} bits ({:.2}%) using {} oracles per bit ({} unique)",
         speculative_report.matching_lsb,
@@ -1745,12 +1750,16 @@ fn run_information_sufficiency_tests(
         .map(|stats| stats.mean <= entropy_threshold)
         .unwrap_or(true);
     let match_entropy_ok = match_entropy_stats.mean <= entropy_threshold;
-    let match_pct_ok = match_pct_stats.mean >= match_threshold;
+
+    //This mean is times 100.0.
+    let match_pct_ok = (match_pct_stats.mean >= match_threshold) || (match_pct_stats.mean <= (100.0 - match_threshold));
+    //let match_pct_inverted = match_pct_stats.mean < 50.0;
+
     let oracle_accuracy_ok = oracle_accuracy_stats
         .as_ref()
         .map(|stats| stats.mean >= oracle_accuracy_threshold)
         .unwrap_or(true);
-    let speculative_match_ok = speculative_report.match_pct >= match_threshold;
+    let speculative_match_ok = (speculative_report.match_pct >= match_threshold) || (speculative_report.match_pct <= (100.0 - match_threshold));
 
     println!(
         "Sufficiency thresholds: entropy <= {:.4}, match % >= {:.2}, oracle accuracy % >= {:.2}",

@@ -4,7 +4,7 @@ set -euo pipefail
 RUNS=${RUNS:-100}
 SEED_START=${SEED_START:-1}
 CONFIG=${CONFIG:-"rsa_config_base_medium.json"}
-ANALYSIS_LOG=${ANALYSIS_LOG:-"logs_current.logs"}
+ANALYSIS_LOG=${ANALYSIS_LOG:-"logs_current.log"}
 SCRIPT_LOG=${SCRIPT_LOG:-"logs_current_script.log"}
 RESUME=${RESUME:-0}
 ANALYSIS_EXTRA_ARGS=${ANALYSIS_EXTRA_ARGS:-}
@@ -57,7 +57,7 @@ for i in $(seq 1 "${RUNS}"); do
   echo ""
   echo "===== RUN ${i} (seed ${seed}) ====="
   set +e
-  cargo run --bin analysis -- --seed "${seed}" -c "${CONFIG}" --tests "${EXTRA_ARGS[@]}" \
+  cargo run --bin analysis -- --seed "${seed}" -c "${CONFIG}" --tests --crypto-rng "${EXTRA_ARGS[@]}" \
     2>&1 | tee -a "${ANALYSIS_LOG}" | tee "${run_output}" > /dev/null
   status=$?
   set -e
@@ -68,7 +68,7 @@ for i in $(seq 1 "${RUNS}"); do
   duration_s=$(awk -v ns="${duration_ns}" 'BEGIN { printf "%.3f", ns / 1000000000 }')
 
   match_line=$(grep -m1 "Bitwise speculative oracle match" "${run_output}" || true)
-  match_pct=$(echo "${match_line}" | sed -n 's/.*(\([0-9.]*\)%).*/\1/p')
+  match_pct=$(echo "${match_line}" | sed -n 's/.*(\([0-9.]*\)%).*/\1/p') 
   verdict=$(grep -m1 "Sufficiency verdict" "${run_output}" | sed -n 's/.*: //p' || true)
 
   if [[ -n "${match_pct}" ]]; then
@@ -91,7 +91,7 @@ for i in $(seq 1 "${RUNS}"); do
 
   if [[ -n "${match_pct}" ]]; then
     if awk -v v="${match_pct}" 'BEGIN { exit (v >= 50.0) ? 0 : 1 }'; then
-      match_color="${GREEN}"
+      match_color="${GREEN}"    
     else
       match_color="${RED}"
     fi
