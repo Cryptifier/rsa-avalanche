@@ -3,7 +3,7 @@ set -euo pipefail
 
 RUNS=${RUNS:-100}
 SEED_START=${SEED_START:-1}
-CONFIG=${CONFIG:-"rsa_config_base_medium.json"}
+CONFIG=${CONFIG:-"rsa_config_base_256.json"}
 ANALYSIS_LOG=${ANALYSIS_LOG:-"logs_current.log"}
 SCRIPT_LOG=${SCRIPT_LOG:-"logs_current_script.log"}
 RESUME=${RESUME:-0}
@@ -57,7 +57,7 @@ for i in $(seq 1 "${RUNS}"); do
   echo ""
   echo "===== RUN ${i} (seed ${seed}) ====="
   set +e
-  cargo run --bin analysis -- --seed "${seed}" -c "${CONFIG}" --tests --crypto-rng "${EXTRA_ARGS[@]}" \
+  cargo run --bin analysis -- --bits 256 --seed "${seed}" -c "${CONFIG}" --tests --crypto-rng "${EXTRA_ARGS[@]}" \
     2>&1 | tee -a "${ANALYSIS_LOG}" | tee "${run_output}" > /dev/null
   status=$?
   set -e

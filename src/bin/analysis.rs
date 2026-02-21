@@ -36,7 +36,7 @@ use rsademo::r_candidates::{generate_r_candidates_batch, RCandidateSettings};
 #[command(name = "analysis", about = "Lightweight RSA round-trip demo", author, version)]
 struct Args {
     /// Bit-length of the primes to generate (kept small for a quick demo)
-    #[arg(short, long, default_value_t = 56, value_parser = clap::value_parser!(u32).range(16..=63))]
+    #[arg(short, long, default_value_t = 56, value_parser = clap::value_parser!(u32).range(16..=8192))]
     bits: u32,
 
     /// Plaintext message to encrypt and decrypt (overrides config if set)
