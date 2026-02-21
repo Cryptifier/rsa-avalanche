@@ -50,8 +50,11 @@ for i in $(seq 1 "${RUNS}"); do
 
   echo ""
   echo "===== RUN ${i} (seed ${seed}) ====="
+  set +e
   cargo run --bin analysis -- --seed "${seed}" -c "${CONFIG}" --tests \
     2>&1 | tee -a "${ANALYSIS_LOG}" | tee "${run_output}" > /dev/null
+  status=$?
+  set -e
 
   end_ns=$(date +%s%N)
   duration_ns=$((end_ns - start_ns))
@@ -60,7 +63,7 @@ for i in $(seq 1 "${RUNS}"); do
 
   match_line=$(grep -m1 "Bitwise speculative oracle match" "${run_output}" || true)
   match_pct=$(echo "${match_line}" | sed -n 's/.*(\([0-9.]*\)%).*/\1/p')
-  verdict=$(grep -m1 "Sufficiency verdict" "${run_output}" | sed -n 's/.*: //p')
+  verdict=$(grep -m1 "Sufficiency verdict" "${run_output}" | sed -n 's/.*: //p' || true)
 
   if [[ -n "${match_pct}" ]]; then
     count=$((count + 1))
@@ -95,7 +98,11 @@ for i in $(seq 1 "${RUNS}"); do
     verdict_color="${RED}"
   fi
 
-  echo "Run ${i} summary: match ${match_color}${match_pct:-N/A}%${RESET}, verdict ${verdict_color}${verdict:-UNKNOWN}${RESET}, duration ${duration_s}s"
+  if [[ ${status} -eq 0 ]]; then
+    echo "Run ${i} summary: match ${match_color}${match_pct:-N/A}%${RESET}, verdict ${verdict_color}${verdict:-UNKNOWN}${RESET}, duration ${duration_s}s"
+  else
+    echo "Run ${i} summary: ${RED}FAILED (exit ${status})${RESET}, match ${match_color}${match_pct:-N/A}%${RESET}, verdict ${verdict_color}${verdict:-UNKNOWN}${RESET}, duration ${duration_s}s"
+  fi
   progress_bar "${i}" "${RUNS}"
   rm -f "${run_output}"
 done
