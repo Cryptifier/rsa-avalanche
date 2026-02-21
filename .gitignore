@@ -1,4 +1,5 @@
 *.log
+*.logs
 *.lock
 target/
 images/
