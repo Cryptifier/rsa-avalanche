@@ -11,10 +11,9 @@ use std::{
 
 use clap::{Parser, ValueEnum};
 use num_bigint::BigUint;
-use rand::rngs::StdRng;
-use rand::SeedableRng;
 use rsademo::config::{load_config, Config, EngineConfig};
 use rsademo::math::random_prime_with_bits;
+use rsademo::rng::{RngChoice, RngMode};
 use rsademo::r_candidates::{generate_r_candidates, RCandidateMode, RCandidateSettings};
 
 #[derive(Parser, Debug)]
@@ -40,6 +39,10 @@ struct Args {
     /// Deterministic RNG seed for reproducible candidate generation
     #[arg(long)]
     seed: Option<u64>,
+
+    /// Use cryptographic RNGs for candidate generation
+    #[arg(long)]
+    crypto_rng: bool,
 
     /// RSA modulus n to target (decimal or 0x-prefixed hex)
     #[arg(long)]
@@ -141,9 +144,14 @@ fn main() -> Result<(), Box<dyn Error>> {
 /// # Expected Output
 /// - Prints generation details and writes or appends to the output CSV.
 fn run_rgen(args: Args, config: Config) -> Result<(), Box<dyn Error>> {
-    let mut rng: StdRng = match args.seed {
-        Some(seed) => StdRng::seed_from_u64(seed),
-        None => StdRng::from_rng(rand::thread_rng())?,
+    let rng_mode = if args.crypto_rng {
+        RngMode::Crypto
+    } else {
+        RngMode::Standard
+    };
+    let mut rng: RngChoice = match args.seed {
+        Some(seed) => RngChoice::from_seed(rng_mode, seed),
+        None => RngChoice::from_entropy(rng_mode)?,
     };
 
     let output_path = args
@@ -213,7 +221,7 @@ fn run_rgen(args: Args, config: Config) -> Result<(), Box<dyn Error>> {
 fn resolve_modulus(
     args: &Args,
     config: &Config,
-    rng: &mut StdRng,
+    rng: &mut RngChoice,
 ) -> Result<Option<BigUint>, Box<dyn Error>> {
     let mut sources = 0u8;
     if args.n.is_some() {
@@ -615,15 +623,18 @@ fn mode_label(mode: RCandidateMode) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rand::RngCore;
+    use rsademo::rng::{RngChoice, RngMode};
     use std::path::PathBuf;
 
     fn temp_path(name: &str) -> PathBuf {
+        let mut rng = RngChoice::from_entropy(RngMode::Crypto).expect("rng entropy");
         let mut path = std::env::temp_dir();
         path.push(format!(
             "rgen_{}_{}_{}.csv",
             name,
             std::process::id(),
-            rand::random::<u64>()
+            rng.next_u64()
         ));
         path
     }
@@ -634,6 +645,7 @@ mod tests {
             output: None,
             append: false,
             seed: None,
+            crypto_rng: false,
             n: None,
             p: None,
             q: None,
@@ -765,7 +777,7 @@ mod tests {
         args.p = Some("61".to_string());
         args.q = Some("53".to_string());
         let config = Config::default();
-        let mut rng = StdRng::seed_from_u64(123);
+        let mut rng = RngChoice::from_seed(RngMode::Standard, 123);
         let modulus = resolve_modulus(&args, &config, &mut rng)
             .expect("resolve failed")
             .expect("missing modulus");

@@ -1,7 +1,7 @@
-use rand::Rng;
-use rand::rngs::StdRng;
-use rand::SeedableRng;
+use rand::{Rng, RngCore};
 use rayon::prelude::*;
+
+use crate::rng::RngChoice;
 
 #[derive(Debug, Clone)]
 pub struct CombinerConfig {
@@ -205,7 +205,7 @@ pub fn majority_vote_with_distribution(
 pub fn optimal_combiner_test(
     majority_bits: &[bool],
     config: &CombinerConfig,
-    rng: &mut impl Rng,
+    rng: &mut RngChoice,
 ) -> Result<CombinerResult, CombinerError> {
     if config.k_oracles == 0 {
         return Err(CombinerError::InvalidOracleCount);
@@ -225,7 +225,7 @@ pub fn optimal_combiner_test(
     let oracles = seeds
         .into_par_iter()
         .map(|seed| {
-            let mut local_rng = StdRng::seed_from_u64(seed);
+            let mut local_rng = RngChoice::from_seed(rng.mode(), seed);
             generate_oracle_samples(majority_bits, config.match_probability, &mut local_rng)
         })
         .collect::<Vec<_>>();
@@ -251,13 +251,12 @@ pub fn optimal_combiner_test(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rand::SeedableRng;
-    use rand::rngs::StdRng;
+    use crate::rng::RngMode;
 
     #[test]
     fn test_generate_oracle_samples_all_match() {
         let bits = vec![true, false, true, true];
-        let mut rng = StdRng::seed_from_u64(1);
+        let mut rng = RngChoice::from_seed(RngMode::Standard, 1);
         let sample = generate_oracle_samples(&bits, 1.0, &mut rng);
         assert_eq!(sample, bits);
     }
@@ -265,7 +264,7 @@ mod tests {
     #[test]
     fn test_generate_oracle_samples_all_flip() {
         let bits = vec![true, false, true, true];
-        let mut rng = StdRng::seed_from_u64(2);
+        let mut rng = RngChoice::from_seed(RngMode::Standard, 2);
         let sample = generate_oracle_samples(&bits, 0.0, &mut rng);
         assert_eq!(sample, vec![false, true, false, false]);
     }
@@ -306,7 +305,7 @@ mod tests {
     #[test]
     fn test_optimal_combiner_high_accuracy() {
         let bits = vec![true, false, true, false, true, true, false, false, true, false, true, false, true, true, false, true];
-        let mut rng = StdRng::seed_from_u64(3);
+        let mut rng = RngChoice::from_seed(RngMode::Standard, 3);
         let config = CombinerConfig {
             k_oracles: 5,
             match_probability: 0.9,
@@ -319,7 +318,7 @@ mod tests {
     #[test]
     fn test_optimal_combiner_invalid_oracles() {
         let bits = vec![true, false];
-        let mut rng = StdRng::seed_from_u64(4);
+        let mut rng = RngChoice::from_seed(RngMode::Standard, 4);
         let config = CombinerConfig {
             k_oracles: 0,
             match_probability: 0.9,

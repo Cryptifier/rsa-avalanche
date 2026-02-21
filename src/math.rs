@@ -1,9 +1,10 @@
 use num_bigint::{BigInt, BigUint};
 use num_integer::Integer;
 use num_traits::{One, Signed, Zero};
-use rand::rngs::StdRng;
 use rand::RngCore;
 use std::time::Instant;
+
+use crate::rng::RngChoice;
 
 /// Selects the first odd public exponent `e >= start` that is coprime with `phi`.
 ///
@@ -121,7 +122,7 @@ pub fn shannon_entropy_bit(p: f64) -> f64 {
 ///
 /// # Expected Output
 /// - Returns a probable prime; no stdout/stderr output.
-pub fn random_prime_with_bits(bits: u32, rng: &mut StdRng) -> BigUint {
+pub fn random_prime_with_bits(bits: u32, rng: &mut RngChoice) -> BigUint {
     let min_prime = BigUint::from(3u8);
     loop {
         let mut candidate = random_biguint_bits(bits, rng);
@@ -148,7 +149,7 @@ pub fn random_prime_with_bits(bits: u32, rng: &mut StdRng) -> BigUint {
 ///
 /// # Expected Output
 /// - Returns a random integer with the requested width; no side effects.
-pub fn random_biguint_bits(bits: u32, rng: &mut StdRng) -> BigUint {
+pub fn random_biguint_bits(bits: u32, rng: &mut RngChoice) -> BigUint {
     if bits == 0 {
         return BigUint::zero();
     }
@@ -210,7 +211,7 @@ pub fn compute_totient(factors: &[(BigUint, u64)]) -> BigUint {
 ///
 /// # Expected Output
 /// - Returns a random value below `upper`; no side effects.
-pub fn random_biguint_below(upper: &BigUint, rng: &mut StdRng) -> BigUint {
+pub fn random_biguint_below(upper: &BigUint, rng: &mut RngChoice) -> BigUint {
     if upper.is_zero() {
         return BigUint::zero();
     }
@@ -322,7 +323,7 @@ pub fn legendre_symbol(a: &BigUint, p: &BigUint) -> BigInt {
 /// - Returns a sorted, coalesced factor list when successful; no stdout/stderr output.
 pub fn factor_composite_with_timeout(
     n: &BigUint,
-    rng: &mut StdRng,
+    rng: &mut RngChoice,
     deadline: Instant,
 ) -> Option<Vec<(BigUint, u64)>> {
     let mut factors = Vec::new();
@@ -346,7 +347,7 @@ pub fn factor_composite_with_timeout(
 ///
 /// # Expected Output
 /// - On success, `out` is extended with factors; no stdout/stderr output.
-pub fn factor_recursive(n: BigUint, out: &mut Vec<(BigUint, u64)>, rng: &mut StdRng, deadline: Instant) -> bool {
+pub fn factor_recursive(n: BigUint, out: &mut Vec<(BigUint, u64)>, rng: &mut RngChoice, deadline: Instant) -> bool {
     if Instant::now() >= deadline {
         return false;
     }
@@ -405,7 +406,7 @@ pub fn coalesce_factors(mut factors: Vec<(BigUint, u64)>) -> Vec<(BigUint, u64)>
 ///
 /// # Expected Output
 /// - Returns `2` immediately when `n` is even; no stdout/stderr output.
-pub fn pollard_rho(n: &BigUint, rng: &mut StdRng, deadline: Instant) -> Option<BigUint> {
+pub fn pollard_rho(n: &BigUint, rng: &mut RngChoice, deadline: Instant) -> Option<BigUint> {
     if n.is_even() {
         return Some(BigUint::from(2u8));
     }
@@ -512,7 +513,7 @@ pub fn decompose_big(mut value: BigUint) -> (BigUint, u32) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rand::SeedableRng;
+    use crate::rng::{RngChoice, RngMode};
     use std::time::{Duration, Instant};
 
     #[test]
@@ -570,7 +571,7 @@ mod tests {
 
     #[test]
     fn test_random_prime_with_bits_basic() {
-        let mut rng = StdRng::seed_from_u64(7);
+        let mut rng = RngChoice::from_seed(RngMode::Standard, 7);
         let p = random_prime_with_bits(16, &mut rng);
         assert!(is_probable_prime_big(&p));
         assert!(p.bits() >= 16u64);
@@ -578,21 +579,21 @@ mod tests {
 
     #[test]
     fn test_random_prime_with_bits_odd() {
-        let mut rng = StdRng::seed_from_u64(9);
+        let mut rng = RngChoice::from_seed(RngMode::Standard, 9);
         let p = random_prime_with_bits(20, &mut rng);
         assert!(p.is_odd());
     }
 
     #[test]
     fn test_random_biguint_bits_zero() {
-        let mut rng = StdRng::seed_from_u64(1);
+        let mut rng = RngChoice::from_seed(RngMode::Standard, 1);
         let v = random_biguint_bits(0, &mut rng);
         assert!(v.is_zero());
     }
 
     #[test]
     fn test_random_biguint_bits_range() {
-        let mut rng = StdRng::seed_from_u64(2);
+        let mut rng = RngChoice::from_seed(RngMode::Standard, 2);
         let v = random_biguint_bits(8, &mut rng);
         assert!(v.bits() <= 8);
     }
@@ -613,7 +614,7 @@ mod tests {
 
     #[test]
     fn test_random_biguint_below() {
-        let mut rng = StdRng::seed_from_u64(3);
+        let mut rng = RngChoice::from_seed(RngMode::Standard, 3);
         let upper = BigUint::from(10u8);
         for _ in 0..5 {
             let v = random_biguint_below(&upper, &mut rng);
@@ -623,7 +624,7 @@ mod tests {
 
     #[test]
     fn test_random_biguint_below_zero() {
-        let mut rng = StdRng::seed_from_u64(4);
+        let mut rng = RngChoice::from_seed(RngMode::Standard, 4);
         let upper = BigUint::zero();
         let v = random_biguint_below(&upper, &mut rng);
         assert!(v.is_zero());
@@ -689,7 +690,7 @@ mod tests {
 
     #[test]
     fn test_pollard_rho_even() {
-        let mut rng = StdRng::seed_from_u64(11);
+        let mut rng = RngChoice::from_seed(RngMode::Standard, 11);
         let n = BigUint::from(100u8);
         let deadline = Instant::now() + Duration::from_millis(50);
         let factor = pollard_rho(&n, &mut rng, deadline).expect("missing factor");
@@ -698,7 +699,7 @@ mod tests {
 
     #[test]
     fn test_pollard_rho_composite() {
-        let mut rng = StdRng::seed_from_u64(12);
+        let mut rng = RngChoice::from_seed(RngMode::Standard, 12);
         let n = BigUint::from(8051u64); // 83 * 97
         let deadline = Instant::now() + Duration::from_secs(1);
         let factor = pollard_rho(&n, &mut rng, deadline).expect("missing factor");
@@ -708,7 +709,7 @@ mod tests {
 
     #[test]
     fn test_factor_recursive_composite() {
-        let mut rng = StdRng::seed_from_u64(13);
+        let mut rng = RngChoice::from_seed(RngMode::Standard, 13);
         let mut factors = Vec::new();
         let deadline = Instant::now() + Duration::from_secs(1);
         assert!(factor_recursive(BigUint::from(12u8), &mut factors, &mut rng, deadline));
@@ -720,7 +721,7 @@ mod tests {
 
     #[test]
     fn test_factor_recursive_one() {
-        let mut rng = StdRng::seed_from_u64(14);
+        let mut rng = RngChoice::from_seed(RngMode::Standard, 14);
         let mut factors = Vec::new();
         let deadline = Instant::now() + Duration::from_secs(1);
         assert!(factor_recursive(BigUint::one(), &mut factors, &mut rng, deadline));
@@ -729,7 +730,7 @@ mod tests {
 
     #[test]
     fn test_factor_composite_with_timeout() {
-        let mut rng = StdRng::seed_from_u64(15);
+        let mut rng = RngChoice::from_seed(RngMode::Standard, 15);
         let n = BigUint::from(84u8);
         let deadline = Instant::now() + Duration::from_secs(1);
         let factors = factor_composite_with_timeout(&n, &mut rng, deadline).expect("missing factors");
@@ -741,7 +742,7 @@ mod tests {
 
     #[test]
     fn test_factor_composite_with_timeout_prime() {
-        let mut rng = StdRng::seed_from_u64(16);
+        let mut rng = RngChoice::from_seed(RngMode::Standard, 16);
         let n = BigUint::from(13u8);
         let deadline = Instant::now() + Duration::from_secs(1);
         let factors = factor_composite_with_timeout(&n, &mut rng, deadline).expect("missing factors");

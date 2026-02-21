@@ -4,9 +4,8 @@ use crate::math::{
 };
 use num_bigint::BigUint;
 use num_traits::{One, Zero};
-use rand::rngs::StdRng;
 use rand::seq::SliceRandom;
-use rand::{RngCore, SeedableRng};
+use rand::RngCore;
 use rayon::prelude::*;
 use serde::Deserialize;
 use std::collections::HashSet;
@@ -17,6 +16,8 @@ use std::sync::{
     Arc,
 };
 use std::time::{Duration, Instant};
+
+use crate::rng::RngChoice;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -63,7 +64,7 @@ pub struct RCandidateSettings {
 pub fn generate_r_candidates(
     n: &BigUint,
     settings: &RCandidateSettings,
-    rng: &mut StdRng,
+    rng: &mut RngChoice,
 ) -> Vec<(BigUint, Vec<(BigUint, u64)>)> {
     match settings.mode {
         RCandidateMode::Factoring => generate_r_candidates_via_factoring(n, settings, rng),
@@ -93,7 +94,7 @@ pub fn generate_r_candidates(
 pub fn generate_r_candidates_batch(
     n: &BigUint,
     settings: &RCandidateSettings,
-    rng: &mut StdRng,
+    rng: &mut RngChoice,
     batch_size: usize,
 ) -> Vec<(BigUint, Vec<(BigUint, u64)>)> {
     let target = batch_size.max(1) as u64;
@@ -116,7 +117,7 @@ pub fn generate_r_candidates_batch(
 /// - Returns an empty list if not enough primes are available; may read/write reuse files.
 pub fn generate_r_candidates_from_small_primes(
     settings: &RCandidateSettings,
-    rng: &mut StdRng,
+    rng: &mut RngChoice,
 ) -> Vec<(BigUint, Vec<(BigUint, u64)>)> {
     let count = settings.process_count.max(settings.process_min_count).max(1) as usize;
     let target_count = count.max(1);
@@ -212,7 +213,7 @@ pub fn generate_r_candidates_from_small_primes(
             if found.load(Ordering::Relaxed) >= remaining {
                 return None;
             }
-            let mut local_rng = StdRng::seed_from_u64(seed);
+            let mut local_rng = RngChoice::from_seed(rng.mode(), seed);
             let candidate = build_small_primes_candidate(
                 target_bits,
                 min_large_bits,
@@ -275,7 +276,7 @@ fn build_small_primes_candidate(
     small_primes: &[BigUint],
     small_factor_count: usize,
     max_factors: usize,
-    rng: &mut StdRng,
+    rng: &mut RngChoice,
 ) -> Option<(BigUint, Vec<(BigUint, u64)>)> {
     if small_factor_count == 0 || max_factors <= small_factor_count {
         return None;
@@ -370,7 +371,7 @@ fn sample_large_prime_with_pollard(
     bits: u64,
     min_value: &BigUint,
     used_factors: &[(BigUint, u64)],
-    rng: &mut StdRng,
+    rng: &mut RngChoice,
 ) -> Option<BigUint> {
     if bits < 2 {
         return None;
@@ -416,7 +417,7 @@ fn sample_large_prime_with_pollard(
 pub fn generate_r_candidates_via_factoring(
     n: &BigUint,
     settings: &RCandidateSettings,
-    rng: &mut StdRng,
+    rng: &mut RngChoice,
 ) -> Vec<(BigUint, Vec<(BigUint, u64)>)> {
     if let Some(ref override_r) = settings.override_best_r {
         if !override_r.is_zero() {
@@ -495,7 +496,7 @@ pub fn generate_r_candidates_via_factoring(
                 return None;
             }
 
-            let mut local_rng = StdRng::seed_from_u64(seed);
+            let mut local_rng = RngChoice::from_seed(rng.mode(), seed);
             let upper = n + &scale + BigUint::from((idx as u64) + 1);
             let candidate = random_biguint_below(&upper, &mut local_rng) + BigUint::one();
             if is_probable_prime_big(&candidate) {
@@ -697,12 +698,19 @@ fn format_factors_csv(factors: &[(BigUint, u64)]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rand::SeedableRng;
+    use rand::RngCore;
+    use crate::rng::{RngChoice, RngMode};
     use std::path::PathBuf;
 
     fn temp_path(name: &str) -> PathBuf {
+        let mut rng = RngChoice::from_entropy(RngMode::Crypto).expect("rng entropy");
         let mut path = std::env::temp_dir();
-        path.push(format!("rsademo_{}_{}_{}.csv", name, std::process::id(), rand::random::<u64>()));
+        path.push(format!(
+            "rsademo_{}_{}_{}.csv",
+            name,
+            std::process::id(),
+            rng.next_u64()
+        ));
         path
     }
 
@@ -796,7 +804,7 @@ mod tests {
             max_factors_per_candidate: 5,
             target_bit_length: Some(16),
         };
-        let mut rng = StdRng::seed_from_u64(42);
+        let mut rng = RngChoice::from_seed(RngMode::Standard, 42);
         let candidates = generate_r_candidates_from_small_primes(&settings, &mut rng);
         assert!(!candidates.is_empty());
         let (r, factors) = &candidates[0];
@@ -831,7 +839,7 @@ mod tests {
             max_factors_per_candidate: 4,
             target_bit_length: Some(12),
         };
-        let mut rng = StdRng::seed_from_u64(43);
+        let mut rng = RngChoice::from_seed(RngMode::Standard, 43);
         let candidates = generate_r_candidates_from_small_primes(&settings, &mut rng);
         assert!(candidates.is_empty());
     }
@@ -853,7 +861,7 @@ mod tests {
             max_factors_per_candidate: 4,
             target_bit_length: Some(14),
         };
-        let mut rng = StdRng::seed_from_u64(44);
+        let mut rng = RngChoice::from_seed(RngMode::Standard, 44);
         let candidates = generate_r_candidates(&BigUint::from(100u8), &settings, &mut rng);
         assert!(!candidates.is_empty());
     }
@@ -875,7 +883,7 @@ mod tests {
             max_factors_per_candidate: 6,
             target_bit_length: None,
         };
-        let mut rng = StdRng::seed_from_u64(46);
+        let mut rng = RngChoice::from_seed(RngMode::Standard, 46);
         let candidates = generate_r_candidates(&BigUint::from(100u8), &settings, &mut rng);
         assert_eq!(candidates.len(), 1);
         assert_eq!(candidates[0].0, BigUint::from(105u8));
@@ -898,7 +906,7 @@ mod tests {
             max_factors_per_candidate: 6,
             target_bit_length: None,
         };
-        let mut rng = StdRng::seed_from_u64(45);
+        let mut rng = RngChoice::from_seed(RngMode::Standard, 45);
         let candidates = generate_r_candidates_via_factoring(&BigUint::from(100u8), &settings, &mut rng);
         assert_eq!(candidates.len(), 1);
         assert_eq!(candidates[0].0, BigUint::from(105u8));
@@ -922,7 +930,7 @@ mod tests {
             max_factors_per_candidate: 6,
             target_bit_length: None,
         };
-        let mut rng = StdRng::seed_from_u64(47);
+        let mut rng = RngChoice::from_seed(RngMode::Standard, 47);
         let candidates = generate_r_candidates_via_factoring(&BigUint::from(100u8), &settings, &mut rng);
         assert!(candidates.is_empty());
     }

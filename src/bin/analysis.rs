@@ -20,8 +20,7 @@ use plotters::prelude::*;
 use clap::Parser;
 use num_bigint::BigUint;
 use num_traits::{One, Zero};
-use rand::rngs::StdRng;
-use rand::{RngCore, SeedableRng};
+use rand::RngCore;
 use rsademo::config::{load_config, Config, EngineConfig};
 use rsademo::combiner::majority_vote_with_distribution;
 use rsademo::dsp::{find_ramp_signals_f64, ramp_signal_strength_f64};
@@ -30,6 +29,7 @@ use rsademo::math::{
     is_probable_prime_big, mod_inverse, modular_sqrt, random_biguint_bits,
     random_prime_with_bits, shannon_entropy_bit, to_hex,
 };
+use rsademo::rng::{RngChoice, RngMode};
 use rsademo::r_candidates::{generate_r_candidates_batch, RCandidateSettings};
 
 #[derive(Parser, Debug)]
@@ -50,6 +50,10 @@ struct Args {
     /// Optional deterministic seed for reproducible key generation
     #[arg(long)]
     seed: Option<u64>,
+
+    /// Use cryptographic RNGs for sampling and candidate generation
+    #[arg(long)]
+    crypto_rng: bool,
 
     /// Path to a JSON config matching the original rsa_demo.sage schema
     #[arg(short = 'c', long, default_value = "rsa_config.json")]
@@ -92,9 +96,14 @@ fn main() -> Result<(), Box<dyn Error>> {
 /// # Expected Output
 /// - Prints RSA parameters and analysis summaries; may emit CSV/PNG artifacts.
 fn run_demo(args: Args, config: Config) -> Result<(), Box<dyn Error>> {
-    let mut rng: StdRng = match args.seed {
-        Some(seed) => StdRng::seed_from_u64(seed),
-        None => StdRng::from_rng(rand::thread_rng())?,
+    let rng_mode = if args.crypto_rng {
+        RngMode::Crypto
+    } else {
+        RngMode::Standard
+    };
+    let mut rng: RngChoice = match args.seed {
+        Some(seed) => RngChoice::from_seed(rng_mode, seed),
+        None => RngChoice::from_entropy(rng_mode)?,
     };
 
     let (p, q): (BigUint, BigUint) = if config.rsa_keypair.generate {
@@ -800,7 +809,7 @@ fn collect_speculative_oracle_bits(
     engine: &EngineConfig,
     message: &BigUint,
     k_oracles: usize,
-    rng: &mut StdRng,
+    rng: &mut RngChoice,
 ) -> Result<Vec<Vec<bool>>, Box<dyn Error>> {
     if k_oracles == 0 {
         return Err("combiner_k_oracles must be >= 1".into());
@@ -898,7 +907,7 @@ fn sample_message_for_tests(
     engine: &EngineConfig,
     n: &BigUint,
     fixed_message: &Option<BigUint>,
-    rng: &mut StdRng,
+    rng: &mut RngChoice,
 ) -> BigUint {
     if let Some(msg) = fixed_message {
         return msg.clone();
@@ -921,7 +930,7 @@ fn sample_message_for_tests(
 fn build_oracle_candidates(
     ctx: &RSAContext,
     engine: &EngineConfig,
-    rng: &mut StdRng,
+    rng: &mut RngChoice,
 ) -> Result<Vec<OracleCandidate>, Box<dyn Error>> {
     let settings = build_r_candidate_settings(engine);
     let batch_size = engine.process_count.max(engine.process_min_count).max(1) as usize;
@@ -1025,7 +1034,7 @@ fn run_oracle_entropy_timeline(
     engine: &EngineConfig,
     candidates: &[OracleCandidate],
     iterations: usize,
-    rng: &mut StdRng,
+    rng: &mut RngChoice,
 ) -> Result<OracleEntropySeries, Box<dyn Error>> {
     if iterations == 0 {
         return Err("analysis tests iterations must be >= 1".into());
@@ -1138,7 +1147,7 @@ fn run_match_entropy_timeline(
     iterations: usize,
     window: usize,
     stride: usize,
-    rng: &mut StdRng,
+    rng: &mut RngChoice,
 ) -> Result<MatchTimelineSeries, Box<dyn Error>> {
     if iterations == 0 {
         return Err("analysis tests iterations must be >= 1".into());
@@ -1252,7 +1261,7 @@ fn screen_oracles_per_bit(
     candidates: &[OracleCandidate],
     iterations: usize,
     top_k: usize,
-    rng: &mut StdRng,
+    rng: &mut RngChoice,
 ) -> Result<(Vec<Vec<OracleBitSelection>>, Vec<f64>), Box<dyn Error>> {
     if iterations == 0 {
         return Err("oracle_screen_iterations must be >= 1".into());
@@ -1547,7 +1556,7 @@ fn run_information_sufficiency_tests(
     ctx: &RSAContext,
     config: &Config,
     message: &BigUint,
-    rng: &mut StdRng,
+    rng: &mut RngChoice,
     export: bool,
 ) -> Result<(), Box<dyn Error>> {
     let engine = &config.engine;
@@ -1784,7 +1793,7 @@ fn run_information_sufficiency_tests(
 fn run_enciphered_export(
     ctx: &RSAContext,
     engine: &EngineConfig,
-    rng: &mut StdRng,
+    rng: &mut RngChoice,
 ) -> Result<(), Box<dyn Error>> {
     let iterations = engine.enciphered_export_iterations.max(1) as usize;
     let fixed_message = if engine.message.is_random {
@@ -1845,7 +1854,7 @@ fn run_enciphered_export(
             let msg = if let Some(ref fixed) = fixed_message {
                 fixed.clone()
             } else {
-                let mut local_rng = StdRng::seed_from_u64(seed);
+                let mut local_rng = RngChoice::from_seed(rng.mode(), seed);
                 random_message_under_n(engine, &ctx.n, &mut local_rng)
             };
             let ciphertext = msg.modpow(&ctx.e, &ctx.n);
@@ -2103,7 +2112,7 @@ fn run_enciphered_export(
 ///
 /// # Expected Output
 /// - Returns the selected message; no side effects.
-fn select_message(args_message: Option<String>, engine: &EngineConfig, rng: &mut StdRng) -> BigUint {
+fn select_message(args_message: Option<String>, engine: &EngineConfig, rng: &mut RngChoice) -> BigUint {
     if let Some(explicit) = args_message {
         return BigUint::from_bytes_be(explicit.as_bytes());
     }
@@ -2125,7 +2134,7 @@ fn select_message(args_message: Option<String>, engine: &EngineConfig, rng: &mut
 ///
 /// # Expected Output
 /// - Returns a non-zero value under `n` when `n` is non-zero; no side effects.
-fn random_message_under_n(engine: &EngineConfig, n: &BigUint, rng: &mut StdRng) -> BigUint {
+fn random_message_under_n(engine: &EngineConfig, n: &BigUint, rng: &mut RngChoice) -> BigUint {
     let mut target_bits = engine.message.bits.max(1);
     if !n.is_zero() {
         target_bits = target_bits.min(n.bits().saturating_sub(1) as u32).max(1);
@@ -2405,7 +2414,7 @@ fn run_message_trial(
     engine: &EngineConfig,
     message: &BigUint,
     min_message_trials: u64,
-    rng: &mut StdRng,
+    rng: &mut RngChoice,
     histogram: &mut MatchHistogram,
 ) -> Result<TestReport, Box<dyn Error>> {
     let attempts = min_message_trials.max(1);
@@ -2595,7 +2604,7 @@ fn run_fixed_r_trials(
     r_report: &TestReport,
     label: &str,
     iterations: u64,
-    rng: &mut StdRng,
+    rng: &mut RngChoice,
 ) -> Option<(f64, f64, usize)> {
     if iterations == 0 {
         return None;
@@ -2625,7 +2634,7 @@ fn run_fixed_r_trials(
     let samples: Vec<(f64, f64, usize)> = seeds
         .into_par_iter()
         .map(|seed| {
-            let mut local_rng = StdRng::seed_from_u64(seed);
+            let mut local_rng = RngChoice::from_seed(rng.mode(), seed);
             
             let msg = random_message_under_n(engine, &ctx.n, &mut local_rng);
             let ciphertext = msg.modpow(&ctx.e, &ctx.n);
@@ -2742,7 +2751,7 @@ fn run_r_stress_entry(
     ctx: &RSAContext,
     config: &Config,
     engine: &EngineConfig,
-    rng: &mut StdRng,
+    rng: &mut RngChoice,
 ) {
     let deadline = Instant::now() + Duration::from_secs(10);
     let Some(factors) = factor_composite_with_timeout(r, rng, deadline) else {
@@ -3022,7 +3031,6 @@ mod tests {
     use super::*;
     use rsademo::dsp::{find_ramp_signals, ramp_signal_strength};
     use rsademo::r_candidates::RCandidateMode;
-    use rand::SeedableRng;
 
     #[test]
     fn test_ramp_detect () {
@@ -3075,7 +3083,7 @@ mod tests {
         config.engine.rabin_exponent = 3;
 
         let msg = BigUint::from(42u8);
-        let mut rng = StdRng::seed_from_u64(101);
+        let mut rng = RngChoice::from_seed(RngMode::Standard, 101);
         let mut hist = MatchHistogram::new();
         let result = run_message_trial(&ctx, &config, &config.engine, &msg, 1, &mut rng, &mut hist);
         if let Err(err) = &result {
@@ -3113,7 +3121,7 @@ mod tests {
         config.engine.rabin_exponent = 3;
 
         let msg = BigUint::from(42u8);
-        let mut rng = StdRng::seed_from_u64(102);
+        let mut rng = RngChoice::from_seed(RngMode::Standard, 102);
         let mut hist = MatchHistogram::new();
         let result = run_message_trial(&ctx, &config, &config.engine, &msg, 1, &mut rng, &mut hist);
         if let Err(err) = &result {
