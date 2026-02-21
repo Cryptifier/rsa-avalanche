@@ -63,6 +63,8 @@ pub struct EngineConfig {
     pub min_message_trials: u64,
     #[serde(default = "default_overlap_report_threshold")]
     pub overlap_report_threshold: f64,
+    #[serde(default = "default_entropy_report_threshold")]
+    pub entropy_report_threshold: f64,
     #[serde(default = "default_process_min_count")]
     pub process_min_count: u64,
     #[serde(default = "default_process_count")]
@@ -79,6 +81,16 @@ pub struct EngineConfig {
     pub test_iterations: u64,
     #[serde(default = "default_alt_iterations")]
     pub alt_iterations: u64,
+    #[serde(default = "default_analysis_tests_iterations")]
+    pub analysis_tests_iterations: u64,
+    #[serde(default = "default_oracle_screen_iterations")]
+    pub oracle_screen_iterations: u64,
+    #[serde(default = "default_analysis_tests_window")]
+    pub analysis_tests_window: usize,
+    #[serde(default = "default_analysis_tests_stride")]
+    pub analysis_tests_stride: usize,
+    #[serde(default = "default_oracle_accuracy_threshold")]
+    pub oracle_accuracy_threshold: f64,
     #[serde(default = "default_r_use_list_enable")]
     pub r_use_list_enable: bool,
     #[serde(default)]
@@ -103,6 +115,10 @@ pub struct EngineConfig {
     pub r_candidate_small_primes: Vec<u64>,
     #[serde(default = "default_r_candidate_small_prime_factors")]
     pub r_candidate_small_prime_factors: usize,
+    #[serde(default = "default_r_candidate_max_factors")]
+    pub r_candidate_max_factors: usize,
+    #[serde(default)]
+    pub r_candidate_bit_length: Option<u64>,
     #[serde(default = "default_combiner_enable")]
     pub combiner_enable: bool,
     #[serde(default = "default_combiner_k_oracles")]
@@ -163,6 +179,7 @@ impl Default for EngineConfig {
             rabin_exponent: default_rabin_exponent(),
             min_message_trials: default_min_message_trials(),
             overlap_report_threshold: default_overlap_report_threshold(),
+            entropy_report_threshold: default_entropy_report_threshold(),
             process_min_count: default_process_min_count(),
             process_count: default_process_count(),
             process_scale: default_process_scale(),
@@ -171,6 +188,11 @@ impl Default for EngineConfig {
             use_rs_decrypt: default_use_rs_decrypt(),
             test_iterations: default_test_iterations(),
             alt_iterations: default_alt_iterations(),
+            analysis_tests_iterations: default_analysis_tests_iterations(),
+            oracle_screen_iterations: default_oracle_screen_iterations(),
+            analysis_tests_window: default_analysis_tests_window(),
+            analysis_tests_stride: default_analysis_tests_stride(),
+            oracle_accuracy_threshold: default_oracle_accuracy_threshold(),
             r_use_list_enable: default_r_use_list_enable(),
             r_use_list: Vec::new(),
             r_stress_test_enable: default_r_stress_test_enable(),
@@ -183,6 +205,8 @@ impl Default for EngineConfig {
             r_candidate_mode: default_r_candidate_mode(),
             r_candidate_small_primes: default_r_candidate_small_primes(),
             r_candidate_small_prime_factors: default_r_candidate_small_prime_factors(),
+            r_candidate_max_factors: default_r_candidate_max_factors(),
+            r_candidate_bit_length: None,
             combiner_enable: default_combiner_enable(),
             combiner_k_oracles: default_combiner_k_oracles(),
             combiner_match_probability: default_combiner_match_probability(),
@@ -407,6 +431,20 @@ fn default_overlap_report_threshold() -> f64 {
     51.0
 }
 
+/// Default entropy threshold for analysis timelines.
+///
+/// # Parameters
+/// - None.
+///
+/// # Returns
+/// - `f64`: Default entropy threshold.
+///
+/// # Expected Output
+/// - Returns a constant default value; no side effects.
+fn default_entropy_report_threshold() -> f64 {
+    0.995
+}
+
 /// Default minimum number of r candidates to generate.
 ///
 /// # Parameters
@@ -519,6 +557,76 @@ fn default_alt_iterations() -> u64 {
     0
 }
 
+/// Default number of timeline iterations for analysis tests.
+///
+/// # Parameters
+/// - None.
+///
+/// # Returns
+/// - `u64`: Default timeline iteration count.
+///
+/// # Expected Output
+/// - Returns a constant default value; no side effects.
+fn default_analysis_tests_iterations() -> u64 {
+    64
+}
+
+/// Default number of iterations for oracle screening.
+///
+/// # Parameters
+/// - None.
+///
+/// # Returns
+/// - `u64`: Default screening iteration count.
+///
+/// # Expected Output
+/// - Returns a constant default value; no side effects.
+fn default_oracle_screen_iterations() -> u64 {
+    512
+}
+
+/// Default window size for analysis timeline frames.
+///
+/// # Parameters
+/// - None.
+///
+/// # Returns
+/// - `usize`: Default timeline window size.
+///
+/// # Expected Output
+/// - Returns a constant default value; no side effects.
+fn default_analysis_tests_window() -> usize {
+    16
+}
+
+/// Default stride between analysis timeline frames.
+///
+/// # Parameters
+/// - None.
+///
+/// # Returns
+/// - `usize`: Default timeline stride.
+///
+/// # Expected Output
+/// - Returns a constant default value; no side effects.
+fn default_analysis_tests_stride() -> usize {
+    4
+}
+
+/// Default oracle accuracy threshold for sufficiency tests.
+///
+/// # Parameters
+/// - None.
+///
+/// # Returns
+/// - `f64`: Default oracle accuracy threshold in percent.
+///
+/// # Expected Output
+/// - Returns a constant default value; no side effects.
+fn default_oracle_accuracy_threshold() -> f64 {
+    55.0
+}
+
 /// Default flag for r_use_list stress tests.
 ///
 /// # Parameters
@@ -629,6 +737,20 @@ fn default_r_candidate_small_primes() -> Vec<u64> {
 /// - Returns a constant default value; no side effects.
 fn default_r_candidate_small_prime_factors() -> usize {
     3
+}
+
+/// Default maximum number of factors per r candidate.
+///
+/// # Parameters
+/// - None.
+///
+/// # Returns
+/// - `usize`: Default maximum factor count.
+///
+/// # Expected Output
+/// - Returns a constant default value; no side effects.
+fn default_r_candidate_max_factors() -> usize {
+    6
 }
 
 /// Default flag for enabling the combiner experiment.

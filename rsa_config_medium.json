@@ -1,0 +1,48 @@
+{
+    "rsa_keypair" : {
+        "generate" : true,
+        "e" : 65537
+    },
+    "padding" : "PKCS1v15",
+    "engine" : {
+        "r_stress_test_enable" : false,
+        "r_use_list_enable" : false,
+        "r_use_list" : [],
+        "override_best_r" : "",
+        "test_iterations" : 6,
+        "alt_iterations" : 12,
+        "analysis_tests_iterations" : 256,
+        "analysis_tests_window" : 32,
+        "analysis_tests_stride" : 8,
+        "process_min_count" : 16,
+        "process_count" : 24,
+        "process_scale" : 6,
+        "process_max_best_attempts" : 30,
+        "process_min_factor" : 3,
+        "rabin_exponent" : 3,
+        "min_message_trials" : 2,
+        "overlap_report_threshold" : 49.0,
+        "entropy_report_threshold" : 0.99,
+        "oracle_accuracy_threshold" : 49.0,
+        "reuse_r_candidates" : true,
+        "reuse_r_candidates_path" : "rgen_output.csv",
+        "reuse_r_candidates_append_only" : false,
+        "r_candidate_mode" : "small_primes",
+        "r_candidate_small_primes" : [101, 103, 107, 109, 113, 127],
+        "r_candidate_small_prime_factors" : 3,
+        "r_candidate_max_factors" : 6,
+        "combiner_enable" : true,
+        "combiner_k_oracles" : 8,
+        "combiner_match_probability" : 0.75,
+        "combiner_tie_breaker" : true,
+        "base_convert" : true,
+        "invert_bits" : false,
+        "use_rs_decrypt" : true,
+        "enciphered_export_enable" : false,
+        "message" : {
+            "is_random" : true,
+            "bits" : 24,
+            "fixed_message" : "Hi"
+        }
+    }
+}

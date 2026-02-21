@@ -91,6 +91,25 @@ pub fn bit_length(value: &BigUint) -> u64 {
     value.bits()
 }
 
+/// Computes the Shannon entropy of a Bernoulli bit distribution.
+///
+/// # Parameters
+/// - `p`: Probability of observing a `1` (clamped to `[0.0, 1.0]`).
+///
+/// # Returns
+/// - `f64`: Entropy in bits within `[0.0, 1.0]`.
+///
+/// # Expected Output
+/// - Returns `0.0` when `p` is `0.0` or `1.0`; no side effects.
+pub fn shannon_entropy_bit(p: f64) -> f64 {
+    let p = p.clamp(0.0, 1.0);
+    if p == 0.0 || p == 1.0 {
+        return 0.0;
+    }
+    let q = 1.0 - p;
+    -(p * p.log2() + q * q.log2())
+}
+
 /// Samples a probable prime with the specified bit width.
 ///
 /// # Parameters

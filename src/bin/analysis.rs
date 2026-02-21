@@ -28,7 +28,7 @@ use rsademo::dsp::{find_ramp_signals_f64, ramp_signal_strength_f64};
 use rsademo::math::{
     bit_length, choose_exponent, compute_totient, factor_composite_with_timeout,
     is_probable_prime_big, mod_inverse, modular_sqrt, random_biguint_bits,
-    random_prime_with_bits, to_hex,
+    random_prime_with_bits, shannon_entropy_bit, to_hex,
 };
 use rsademo::r_candidates::{generate_r_candidates_batch, RCandidateSettings};
 
@@ -54,6 +54,14 @@ struct Args {
     /// Path to a JSON config matching the original rsa_demo.sage schema
     #[arg(short = 'c', long, default_value = "rsa_config.json")]
     config: String,
+
+    /// Run extended analysis tests and sufficiency checks
+    #[arg(long)]
+    tests: bool,
+
+    /// Export oracle entropy timeline charts
+    #[arg(long)]
+    export: bool,
 }
 
 /// Entry point for the RSA round-trip demo CLI.
@@ -402,6 +410,14 @@ fn run_demo(args: Args, config: Config) -> Result<(), Box<dyn Error>> {
         }
     }
 
+    if args.tests {
+        if let Err(err) =
+            run_information_sufficiency_tests(&ctx, &config, &message, &mut rng, args.export)
+        {
+            return Err(err);
+        }
+    }
+
     if config.engine.enciphered_export_enable {
         if let Err(err) = run_enciphered_export(&ctx, &config.engine, &mut rng) {
             println!("Enciphered export failed: {}", err);
@@ -595,6 +611,62 @@ fn mean_f64(values: &[f64]) -> f64 {
     sum / values.len() as f64
 }
 
+/// Precomputed r-candidate data for oracle and timeline tests.
+#[derive(Clone, Debug)]
+struct OracleCandidate {
+    r: BigUint,
+    d_new: BigUint,
+    r_pow_y: BigUint,
+}
+
+#[derive(Clone, Debug)]
+struct CandidateScore {
+    candidate: OracleCandidate,
+    matching_lsb: usize,
+    matching_total: usize,
+}
+
+#[derive(Clone, Debug)]
+struct OracleEntropySeries {
+    entropy_mean: Vec<f64>,
+    accuracy_pct: Vec<f64>,
+}
+
+#[derive(Clone, Debug)]
+struct OracleTrainingSample {
+    result_default: BigUint,
+    message_bits: Vec<bool>,
+}
+
+#[derive(Clone, Debug)]
+struct OracleBitSelection {
+    oracle_idx: usize,
+    invert: bool,
+}
+
+#[derive(Clone, Debug)]
+struct MatchSample {
+    message_bytes_le: Vec<u8>,
+    candidate_bytes_le: Vec<u8>,
+}
+
+#[derive(Clone, Debug)]
+struct MatchTimelineSeries {
+    entropy_mean: Vec<f64>,
+    match_pct_mean: Vec<f64>,
+}
+
+#[derive(Clone, Debug)]
+struct SpeculativeOracleReport {
+    recovered: BigUint,
+    matching_lsb: usize,
+    matching_total: usize,
+    bit_width: usize,
+    match_pct: f64,
+    oracles_per_bit: usize,
+    unique_oracles: usize,
+}
+
 struct ExportSample {
     ciphertext: BigUint,
     message_bytes_le: Vec<u8>,
@@ -645,6 +717,68 @@ fn biguint_to_bits_le(value: &BigUint, width: usize) -> Vec<bool> {
     (0..width)
         .map(|idx| bit_from_bytes_le(&bytes, idx))
         .collect()
+}
+
+/// Converts a little-endian bit vector into a `BigUint`.
+///
+/// # Parameters
+/// - `bits`: Bit slice with LSB at index 0.
+///
+/// # Returns
+/// - `BigUint`: Value represented by the bit slice.
+///
+/// # Expected Output
+/// - Returns the integer value; no side effects.
+fn bits_le_to_biguint(bits: &[bool]) -> BigUint {
+    if bits.is_empty() {
+        return BigUint::zero();
+    }
+    let byte_len = (bits.len() + 7) / 8;
+    let mut bytes = vec![0u8; byte_len];
+    for (idx, bit) in bits.iter().enumerate() {
+        if *bit {
+            let byte_idx = idx / 8;
+            let bit_idx = idx % 8;
+            bytes[byte_idx] |= 1u8 << bit_idx;
+        }
+    }
+    BigUint::from_bytes_le(&bytes)
+}
+
+/// Counts matching bits between two little-endian bit vectors.
+///
+/// # Parameters
+/// - `a`: First bit slice to compare.
+/// - `b`: Second bit slice to compare.
+///
+/// # Returns
+/// - `(usize, usize)`: `(matching_lsb_run, matching_total)` counts.
+///
+/// # Expected Output
+/// - Returns counts based on bitwise comparisons; no side effects.
+fn count_matching_bits_le(a: &[bool], b: &[bool]) -> (usize, usize) {
+    let min_len = a.len().min(b.len());
+    if min_len == 0 {
+        return (0, 0);
+    }
+
+    let mut matching_total = 0usize;
+    for i in 0..min_len {
+        if a[i] == b[i] {
+            matching_total += 1;
+        }
+    }
+
+    let mut matching_lsb = 0usize;
+    for i in 0..min_len {
+        if a[i] == b[i] {
+            matching_lsb += 1;
+        } else {
+            break;
+        }
+    }
+
+    (matching_lsb, matching_total)
 }
 
 /// Builds speculative oracle bit vectors using `r` candidates and HBC transforms.
@@ -717,6 +851,922 @@ fn collect_speculative_oracle_bits(
     }
 
     Ok(oracles)
+}
+
+/// Resolves the fixed message (if configured) for analysis timelines.
+///
+/// # Parameters
+/// - `engine`: Engine configuration containing message settings.
+/// - `n`: RSA modulus used to bound the fixed message.
+///
+/// # Returns
+/// - `Result<Option<BigUint>, Box<dyn Error>>`: `Some(message)` when fixed, `None` when random.
+///
+/// # Expected Output
+/// - Returns an error if the fixed message is empty or not less than `n`.
+fn resolve_fixed_message_for_tests(
+    engine: &EngineConfig,
+    n: &BigUint,
+) -> Result<Option<BigUint>, Box<dyn Error>> {
+    if engine.message.is_random {
+        return Ok(None);
+    }
+    let msg = BigUint::from_bytes_be(engine.message.fixed_message.as_bytes());
+    if msg.is_zero() {
+        return Err("analysis tests fixed_message cannot be empty".into());
+    }
+    if !n.is_zero() && msg >= *n {
+        return Err("analysis tests fixed_message must be smaller than modulus n".into());
+    }
+    Ok(Some(msg))
+}
+
+/// Samples a message for analysis timelines.
+///
+/// # Parameters
+/// - `engine`: Engine configuration controlling message selection.
+/// - `n`: RSA modulus used to bound random messages.
+/// - `fixed_message`: Optional fixed message override.
+/// - `rng`: Random number generator for random sampling.
+///
+/// # Returns
+/// - `BigUint`: Selected message value.
+///
+/// # Expected Output
+/// - Returns a message under `n` when random; no side effects.
+fn sample_message_for_tests(
+    engine: &EngineConfig,
+    n: &BigUint,
+    fixed_message: &Option<BigUint>,
+    rng: &mut StdRng,
+) -> BigUint {
+    if let Some(msg) = fixed_message {
+        return msg.clone();
+    }
+    random_message_under_n(engine, n, rng)
+}
+
+/// Builds precomputed r-candidate data for analysis timelines.
+///
+/// # Parameters
+/// - `ctx`: RSA context containing modulus and exponent.
+/// - `engine`: Engine configuration controlling candidate generation.
+/// - `rng`: Random number generator for candidate sampling.
+///
+/// # Returns
+/// - `Result<Vec<OracleCandidate>, Box<dyn Error>>`: Candidate list or an error if none.
+///
+/// # Expected Output
+/// - May print candidate generation logs; no file output.
+fn build_oracle_candidates(
+    ctx: &RSAContext,
+    engine: &EngineConfig,
+    rng: &mut StdRng,
+) -> Result<Vec<OracleCandidate>, Box<dyn Error>> {
+    let settings = build_r_candidate_settings(engine);
+    let batch_size = engine.process_count.max(engine.process_min_count).max(1) as usize;
+    let candidates = generate_r_candidates_batch(&ctx.n, &settings, rng, batch_size);
+    if candidates.is_empty() {
+        return Err("no r candidates generated for analysis tests".into());
+    }
+
+    let y = engine.rabin_exponent as u32;
+    let mut prepared = Vec::with_capacity(candidates.len());
+    for (r, factors) in candidates {
+        let phi_new = compute_totient(&factors);
+        if let Some(d_new) = mod_inverse(&ctx.e, &phi_new) {
+            let r_pow_y = r.pow(y);
+            prepared.push(OracleCandidate { r, d_new, r_pow_y });
+        }
+    }
+
+    if prepared.is_empty() {
+        return Err("no valid r candidates for analysis tests".into());
+    }
+
+    Ok(prepared)
+}
+
+/// Selects the best candidate based on matching bits against a reference message.
+///
+/// # Parameters
+/// - `ctx`: RSA context containing key material.
+/// - `engine`: Engine configuration controlling HBC behavior.
+/// - `candidates`: Prepared r candidates to evaluate.
+/// - `message`: Reference message used for scoring.
+///
+/// # Returns
+/// - `Option<CandidateScore>`: Best candidate score or `None` if no candidates are provided.
+///
+/// # Expected Output
+/// - Returns the top-scoring candidate; no stdout/stderr output.
+fn select_best_candidate(
+    ctx: &RSAContext,
+    engine: &EngineConfig,
+    candidates: &[OracleCandidate],
+    message: &BigUint,
+) -> Option<CandidateScore> {
+    if candidates.is_empty() {
+        return None;
+    }
+
+    let y = engine.rabin_exponent as u32;
+    let n_pow_y = ctx.n.pow(y);
+    let ciphertext = message.modpow(&ctx.e, &ctx.n);
+    let result_default = get_larger_number(&ciphertext, &ctx.n, y, true, false);
+
+    let mut best: Option<CandidateScore> = None;
+    for candidate in candidates {
+        let dm = derive_candidate_message_from_result(
+            ctx,
+            engine,
+            &result_default,
+            &candidate.r,
+            &candidate.d_new,
+            &n_pow_y,
+            &candidate.r_pow_y,
+            y,
+            false,
+        );
+        let (matching_lsb, matching_total) = count_matching_bits(&dm, message);
+        let score = CandidateScore {
+            candidate: candidate.clone(),
+            matching_lsb,
+            matching_total,
+        };
+        if best
+            .as_ref()
+            .map(|b| (matching_total, matching_lsb) > (b.matching_total, b.matching_lsb))
+            .unwrap_or(true)
+        {
+            best = Some(score);
+        }
+    }
+
+    best
+}
+
+/// Computes oracle entropy and accuracy timelines using prepared candidates.
+///
+/// # Parameters
+/// - `ctx`: RSA context containing key material.
+/// - `engine`: Engine configuration controlling oracle behavior.
+/// - `candidates`: Prepared r candidates to sample as oracles.
+/// - `iterations`: Number of message samples to evaluate.
+/// - `rng`: Random number generator for message sampling.
+///
+/// # Returns
+/// - `Result<OracleEntropySeries, Box<dyn Error>>`: Entropy/accuracy series or an error.
+///
+/// # Expected Output
+/// - Prints progress updates; no file output.
+fn run_oracle_entropy_timeline(
+    ctx: &RSAContext,
+    engine: &EngineConfig,
+    candidates: &[OracleCandidate],
+    iterations: usize,
+    rng: &mut StdRng,
+) -> Result<OracleEntropySeries, Box<dyn Error>> {
+    if iterations == 0 {
+        return Err("analysis tests iterations must be >= 1".into());
+    }
+    if engine.combiner_k_oracles == 0 {
+        return Err("combiner_k_oracles must be >= 1 for analysis tests".into());
+    }
+    let requested_oracles = engine.combiner_k_oracles;
+    let oracle_count = candidates.len().min(requested_oracles);
+    if oracle_count == 0 {
+        return Err("not enough r candidates for oracle entropy timeline".into());
+    }
+    if oracle_count < requested_oracles {
+        println!(
+            "Oracle entropy timeline using {} oracles (requested {})",
+            oracle_count, requested_oracles
+        );
+    }
+
+    let fixed_message = resolve_fixed_message_for_tests(engine, &ctx.n)?;
+    let bit_width = analysis_bit_width(engine, &ctx.n, &fixed_message);
+
+    let y = engine.rabin_exponent as u32;
+    let n_pow_y = ctx.n.pow(y);
+
+    let mut entropy_mean = Vec::with_capacity(iterations);
+    let mut accuracy_pct = Vec::with_capacity(iterations);
+    let mut next_pct = 10u64;
+    for idx in 0..iterations {
+        let msg = sample_message_for_tests(engine, &ctx.n, &fixed_message, rng);
+        let ciphertext = msg.modpow(&ctx.e, &ctx.n);
+        let result_default = get_larger_number(&ciphertext, &ctx.n, y, true, false);
+
+        let mut oracles: Vec<Vec<bool>> = Vec::with_capacity(oracle_count);
+        for candidate in candidates.iter().take(oracle_count) {
+            let dm = derive_candidate_message_from_result(
+                ctx,
+                engine,
+                &result_default,
+                &candidate.r,
+                &candidate.d_new,
+                &n_pow_y,
+                &candidate.r_pow_y,
+                y,
+                false,
+            );
+            oracles.push(biguint_to_bits_le(&dm, bit_width));
+        }
+
+        let distribution =
+            majority_vote_with_distribution(&oracles, engine.combiner_tie_breaker)?;
+
+        let mut entropy_sum = 0.0;
+        for p in &distribution.probability_one {
+            entropy_sum += shannon_entropy_bit(*p);
+        }
+        let entropy = if distribution.probability_one.is_empty() {
+            0.0
+        } else {
+            entropy_sum / distribution.probability_one.len() as f64
+        };
+
+        let message_bits = biguint_to_bits_le(&msg, distribution.majority_bits.len());
+        let mut correct = 0usize;
+        for (a, b) in distribution.majority_bits.iter().zip(message_bits.iter()) {
+            if a == b {
+                correct += 1;
+            }
+        }
+        let total = distribution.majority_bits.len().max(1);
+        let accuracy = correct as f64 / total as f64 * 100.0;
+
+        entropy_mean.push(entropy);
+        accuracy_pct.push(accuracy);
+
+        log_progress_every_ten_percent(
+            (idx + 1) as u64,
+            iterations as u64,
+            &mut next_pct,
+            "Oracle entropy timeline",
+        );
+    }
+
+    Ok(OracleEntropySeries {
+        entropy_mean,
+        accuracy_pct,
+    })
+}
+
+/// Computes match entropy and percentage timelines for a fixed r candidate.
+///
+/// # Parameters
+/// - `ctx`: RSA context containing key material.
+/// - `engine`: Engine configuration controlling HBC behavior.
+/// - `candidate`: Prepared r candidate to evaluate.
+/// - `iterations`: Number of message samples to evaluate.
+/// - `window`: Sliding window size for timeline frames.
+/// - `stride`: Step size between timeline frames.
+/// - `rng`: Random number generator for message sampling.
+///
+/// # Returns
+/// - `Result<MatchTimelineSeries, Box<dyn Error>>`: Timeline series or an error.
+///
+/// # Expected Output
+/// - Prints progress updates; no file output.
+fn run_match_entropy_timeline(
+    ctx: &RSAContext,
+    engine: &EngineConfig,
+    candidate: &OracleCandidate,
+    iterations: usize,
+    window: usize,
+    stride: usize,
+    rng: &mut StdRng,
+) -> Result<MatchTimelineSeries, Box<dyn Error>> {
+    if iterations == 0 {
+        return Err("analysis tests iterations must be >= 1".into());
+    }
+
+    let fixed_message = resolve_fixed_message_for_tests(engine, &ctx.n)?;
+    let bit_width = analysis_bit_width(engine, &ctx.n, &fixed_message);
+
+    let y = engine.rabin_exponent as u32;
+    let n_pow_y = ctx.n.pow(y);
+
+    let mut samples: Vec<MatchSample> = Vec::with_capacity(iterations);
+    let mut next_pct = 10u64;
+    for idx in 0..iterations {
+        let msg = sample_message_for_tests(engine, &ctx.n, &fixed_message, rng);
+        let ciphertext = msg.modpow(&ctx.e, &ctx.n);
+        let dm = derive_candidate_message(
+            ctx,
+            engine,
+            &ciphertext,
+            &candidate.r,
+            &candidate.d_new,
+            &n_pow_y,
+            &candidate.r_pow_y,
+            y,
+            false,
+        );
+
+        samples.push(MatchSample {
+            message_bytes_le: msg.to_bytes_le(),
+            candidate_bytes_le: dm.to_bytes_le(),
+        });
+
+        log_progress_every_ten_percent(
+            (idx + 1) as u64,
+            iterations as u64,
+            &mut next_pct,
+            "Match entropy timeline",
+        );
+    }
+
+    if samples.is_empty() {
+        return Err("no samples generated for match entropy timeline".into());
+    }
+
+    let window = window.max(1).min(samples.len());
+    let stride = stride.max(1);
+    let frame_count = if samples.len() <= window {
+        1
+    } else {
+        ((samples.len() - window) / stride) + 1
+    };
+
+    let mut entropy_mean = Vec::with_capacity(frame_count);
+    let mut match_pct_mean = Vec::with_capacity(frame_count);
+
+    for frame_idx in 0..frame_count {
+        let start = frame_idx * stride;
+        let end = (start + window).min(samples.len());
+        let frame_samples = &samples[start..end];
+        let mut match_counts = vec![0u32; bit_width];
+        let window_len_f = frame_samples.len().max(1) as f64;
+
+        for sample in frame_samples {
+            for bit_idx in 0..bit_width {
+                let a = bit_from_bytes_le(&sample.message_bytes_le, bit_idx);
+                let b = bit_from_bytes_le(&sample.candidate_bytes_le, bit_idx);
+                if a == b {
+                    match_counts[bit_idx] = match_counts[bit_idx].saturating_add(1);
+                }
+            }
+        }
+
+        let mut entropy_sum = 0.0;
+        let mut match_sum = 0.0;
+        for count in match_counts {
+            let p = count as f64 / window_len_f;
+            entropy_sum += shannon_entropy_bit(p);
+            match_sum += p * 100.0;
+        }
+
+        let denom = bit_width.max(1) as f64;
+        entropy_mean.push(entropy_sum / denom);
+        match_pct_mean.push(match_sum / denom);
+    }
+
+    Ok(MatchTimelineSeries {
+        entropy_mean,
+        match_pct_mean,
+    })
+}
+
+/// Screens r candidates to select top oracles per bit based on random-message matches.
+///
+/// # Parameters
+/// - `ctx`: RSA context containing key material.
+/// - `engine`: Engine configuration controlling oracle behavior.
+/// - `candidates`: Prepared r candidates to evaluate.
+/// - `iterations`: Number of random messages to use for screening.
+/// - `top_k`: Number of top oracles to select per bit.
+/// - `rng`: Random number generator for message sampling.
+///
+/// # Returns
+/// - `Result<(Vec<Vec<OracleBitSelection>>, Vec<f64>), Box<dyn Error>>`: Per-bit oracle selection and top match %.
+///
+/// # Expected Output
+/// - Prints screening progress; no file output.
+fn screen_oracles_per_bit(
+    ctx: &RSAContext,
+    engine: &EngineConfig,
+    candidates: &[OracleCandidate],
+    iterations: usize,
+    top_k: usize,
+    rng: &mut StdRng,
+) -> Result<(Vec<Vec<OracleBitSelection>>, Vec<f64>), Box<dyn Error>> {
+    if iterations == 0 {
+        return Err("oracle_screen_iterations must be >= 1".into());
+    }
+    if candidates.is_empty() {
+        return Err("no r candidates available for oracle screening".into());
+    }
+    let top_k = top_k.max(1).min(candidates.len());
+
+    let bit_width = analysis_bit_width(engine, &ctx.n, &None);
+    let y = engine.rabin_exponent as u32;
+    let n_pow_y = ctx.n.pow(y);
+
+    let mut samples: Vec<OracleTrainingSample> = Vec::with_capacity(iterations);
+    let mut next_pct = 10u64;
+    for idx in 0..iterations {
+        let msg = random_message_under_n(engine, &ctx.n, rng);
+        let ciphertext = msg.modpow(&ctx.e, &ctx.n);
+        let result_default = get_larger_number(&ciphertext, &ctx.n, y, true, false);
+        let message_bits = biguint_to_bits_le(&msg, bit_width);
+        samples.push(OracleTrainingSample {
+            result_default,
+            message_bits,
+        });
+
+        log_progress_every_ten_percent(
+            (idx + 1) as u64,
+            iterations as u64,
+            &mut next_pct,
+            "Oracle screening",
+        );
+    }
+
+    let samples = Arc::new(samples);
+    let counts: Vec<Vec<u32>> = candidates
+        .par_iter()
+        .map(|candidate| {
+            let mut match_counts = vec![0u32; bit_width];
+            for sample in samples.iter() {
+                let dm = derive_candidate_message_from_result(
+                    ctx,
+                    engine,
+                    &sample.result_default,
+                    &candidate.r,
+                    &candidate.d_new,
+                    &n_pow_y,
+                    &candidate.r_pow_y,
+                    y,
+                    false,
+                );
+                let dm_bits = biguint_to_bits_le(&dm, bit_width);
+                for (bit_idx, bit) in dm_bits.iter().enumerate() {
+                    if *bit == sample.message_bits[bit_idx] {
+                        match_counts[bit_idx] = match_counts[bit_idx].saturating_add(1);
+                    }
+                }
+            }
+            match_counts
+        })
+        .collect();
+
+    let mut per_bit_oracles = vec![Vec::with_capacity(top_k); bit_width];
+    let mut top_match_pct = vec![0.0; bit_width];
+    for bit_idx in 0..bit_width {
+        let mut ranked: Vec<(usize, f64, bool)> = counts
+            .iter()
+            .enumerate()
+            .map(|(oracle_idx, counts)| {
+                let match_pct = counts[bit_idx] as f64 / iterations as f64 * 100.0;
+                if match_pct < 50.0 {
+                    (oracle_idx, 100.0 - match_pct, true)
+                } else {
+                    (oracle_idx, match_pct, false)
+                }
+            })
+            .collect();
+        ranked.sort_by(|a, b| {
+            b.1.partial_cmp(&a.1)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| a.0.cmp(&b.0))
+        });
+
+        let best = ranked.first().map(|(_, pct, _)| *pct).unwrap_or(0.0);
+        top_match_pct[bit_idx] = best;
+
+        for (oracle_idx, _, invert) in ranked.into_iter().take(top_k) {
+            per_bit_oracles[bit_idx].push(OracleBitSelection { oracle_idx, invert });
+        }
+    }
+
+    Ok((per_bit_oracles, top_match_pct))
+}
+
+/// Runs a bitwise speculative oracle attempt using per-bit oracle batches.
+///
+/// # Parameters
+/// - `ctx`: RSA context containing key material.
+/// - `engine`: Engine configuration controlling HBC behavior.
+/// - `candidates`: Prepared r candidates to use as oracles.
+/// - `per_bit_oracles`: Per-bit oracle selection ranked by screening.
+/// - `message`: Reference message to compare against.
+///
+/// # Returns
+/// - `Result<SpeculativeOracleReport, Box<dyn Error>>`: Reconstruction report or an error.
+///
+/// # Expected Output
+/// - Returns reconstruction metrics; no side effects.
+fn run_bitwise_speculative_oracle_attempt(
+    ctx: &RSAContext,
+    engine: &EngineConfig,
+    candidates: &[OracleCandidate],
+    per_bit_oracles: &[Vec<OracleBitSelection>],
+    message: &BigUint,
+) -> Result<SpeculativeOracleReport, Box<dyn Error>> {
+    if per_bit_oracles.is_empty() {
+        return Err("per-bit oracle selection is empty".into());
+    }
+    let bit_width = message.bits().max(1) as usize;
+    let oracles_per_bit = per_bit_oracles[0].len().max(1);
+
+    let y = engine.rabin_exponent as u32;
+    let n_pow_y = ctx.n.pow(y);
+    let ciphertext = message.modpow(&ctx.e, &ctx.n);
+    let result_default = get_larger_number(&ciphertext, &ctx.n, y, true, false);
+
+    let mut unique_oracle_indices = std::collections::HashSet::new();
+    for selections in per_bit_oracles {
+        for selection in selections {
+            unique_oracle_indices.insert(selection.oracle_idx);
+        }
+    }
+
+    let mut oracle_bits: Vec<Option<Vec<bool>>> = vec![None; candidates.len()];
+    for oracle_idx in unique_oracle_indices.iter().copied() {
+        let candidate = &candidates[oracle_idx];
+        let dm = derive_candidate_message_from_result(
+            ctx,
+            engine,
+            &result_default,
+            &candidate.r,
+            &candidate.d_new,
+            &n_pow_y,
+            &candidate.r_pow_y,
+            y,
+            false,
+        );
+        oracle_bits[oracle_idx] = Some(biguint_to_bits_le(&dm, bit_width));
+    }
+
+    let mut recovered_bits = vec![false; bit_width];
+    for (bit_idx, selections) in per_bit_oracles.iter().enumerate().take(bit_width) {
+        let mut ones = 0usize;
+        let mut zeros = 0usize;
+        for selection in selections {
+            if let Some(bits) = oracle_bits
+                .get(selection.oracle_idx)
+                .and_then(|entry| entry.as_ref())
+            {
+                let bit = if selection.invert { !bits[bit_idx] } else { bits[bit_idx] };
+                if bit {
+                    ones += 1;
+                } else {
+                    zeros += 1;
+                }
+            }
+        }
+        recovered_bits[bit_idx] = if ones == zeros {
+            engine.combiner_tie_breaker
+        } else {
+            ones > zeros
+        };
+    }
+
+    let recovered = bits_le_to_biguint(&recovered_bits);
+    let message_bits = biguint_to_bits_le(message, bit_width);
+    let (matching_lsb, matching_total) = count_matching_bits_le(&recovered_bits, &message_bits);
+    let match_pct = matching_total as f64 / bit_width.max(1) as f64 * 100.0;
+
+    Ok(SpeculativeOracleReport {
+        recovered,
+        matching_lsb,
+        matching_total,
+        bit_width,
+        match_pct,
+        oracles_per_bit,
+        unique_oracles: unique_oracle_indices.len(),
+    })
+}
+
+/// Sanitizes a label for use in output filenames.
+///
+/// # Parameters
+/// - `label`: Raw label string.
+///
+/// # Returns
+/// - `String`: Sanitized label containing only alphanumeric, `-`, and `_`.
+///
+/// # Expected Output
+/// - Returns a sanitized string; no side effects.
+fn sanitize_label(label: &str) -> String {
+    label
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '_' })
+        .collect()
+}
+
+/// Writes a timeline line chart for a floating-point series.
+///
+/// # Parameters
+/// - `series`: Time-ordered values to plot.
+/// - `label`: Label used in the chart caption and filename.
+/// - `caption`: Chart caption prefix.
+/// - `y_desc`: Y-axis description.
+/// - `y_range`: Tuple of `(min, max)` for the Y-axis.
+/// - `file_prefix`: Prefix for the output filename.
+/// - `color`: Line color for the series.
+///
+/// # Returns
+/// - `Result<(), Box<dyn Error>>`: `Ok(())` on success or an I/O/plotting error.
+///
+/// # Expected Output
+/// - Writes a PNG into `./images` and prints the output path.
+fn plot_timeline_series(
+    series: &[f64],
+    label: &str,
+    caption: &str,
+    y_desc: &str,
+    y_range: (f64, f64),
+    file_prefix: &str,
+    color: RGBColor,
+) -> Result<(), Box<dyn Error>> {
+    if series.is_empty() {
+        return Ok(());
+    }
+
+    let images_dir = Path::new("./images");
+    fs::create_dir_all(images_dir)?;
+
+    static TIMELINE_SEQ: AtomicUsize = AtomicUsize::new(0);
+    let seq = TIMELINE_SEQ.fetch_add(1, Ordering::Relaxed);
+    let safe_label = sanitize_label(label);
+    let file_name = format!("{}_{}_{}.png", file_prefix, safe_label, seq);
+    let path = images_dir.join(file_name);
+
+    let x_end = series.len().max(2);
+    let (y_min, y_max) = y_range;
+    let adjusted_max = if y_max > y_min { y_max } else { y_min + 1.0 };
+
+    let root = BitMapBackend::new(&path, (1200, 800)).into_drawing_area();
+    root.fill(&WHITE)?;
+    let mut chart = ChartBuilder::on(&root)
+        .caption(
+            format!("{} ({})", caption, label),
+            ("sans-serif", 30).into_font(),
+        )
+        .margin(20)
+        .x_label_area_size(40)
+        .y_label_area_size(60)
+        .build_cartesian_2d(0usize..x_end, y_min..adjusted_max)?;
+
+    chart
+        .configure_mesh()
+        .x_desc("Frame")
+        .y_desc(y_desc)
+        .draw()?;
+
+    chart.draw_series(LineSeries::new(
+        series.iter().enumerate().map(|(idx, val)| (idx, *val)),
+        color,
+    ))?;
+
+    root.present()?;
+    println!("Saved timeline chart to {}", path.display());
+    Ok(())
+}
+
+/// Runs analysis tests and reports information sufficiency for speculative oracles.
+///
+/// # Parameters
+/// - `ctx`: RSA context containing key material.
+/// - `config`: Full configuration used for analysis settings.
+/// - `message`: Reference message used to select the best candidate.
+/// - `rng`: Random number generator for candidate/message sampling.
+/// - `export`: Whether to emit oracle entropy timeline charts.
+///
+/// # Returns
+/// - `Result<(), Box<dyn Error>>`: `Ok(())` if sufficient, otherwise an error.
+///
+/// # Expected Output
+/// - Prints summaries and writes timeline PNGs into `./images`.
+fn run_information_sufficiency_tests(
+    ctx: &RSAContext,
+    config: &Config,
+    message: &BigUint,
+    rng: &mut StdRng,
+    export: bool,
+) -> Result<(), Box<dyn Error>> {
+    let engine = &config.engine;
+    let iterations = engine.analysis_tests_iterations as usize;
+    if iterations == 0 {
+        return Err("analysis_tests_iterations must be >= 1".into());
+    }
+
+    let window = engine.analysis_tests_window.max(1);
+    let stride = engine.analysis_tests_stride.max(1);
+
+    println!("\nRunning analysis sufficiency tests...");
+    let candidates = build_oracle_candidates(ctx, engine, rng)?;
+    let Some(best) = select_best_candidate(ctx, engine, &candidates, message) else {
+        return Err("failed to select a best r candidate for tests".into());
+    };
+    println!(
+        "Selected analysis r candidate {} with matching bits LSB {} / total {}",
+        best.candidate.r, best.matching_lsb, best.matching_total
+    );
+
+    let (oracle_entropy_stats, oracle_accuracy_stats) = if export {
+        let oracle_series = run_oracle_entropy_timeline(ctx, engine, &candidates, iterations, rng)?;
+        if let Err(err) = plot_timeline_series(
+            &oracle_series.entropy_mean,
+            "analysis_tests",
+            "Oracle Entropy Timeline",
+            "Entropy (bits)",
+            (0.0, 1.0),
+            "oracle_entropy_timeline",
+            RED,
+        ) {
+            println!("Failed to write oracle entropy timeline: {}", err);
+        }
+        if let Err(err) = plot_timeline_series(
+            &oracle_series.accuracy_pct,
+            "analysis_tests",
+            "Oracle Accuracy Timeline",
+            "Accuracy %",
+            (0.0, 100.0),
+            "oracle_accuracy_timeline",
+            BLUE,
+        ) {
+            println!("Failed to write oracle accuracy timeline: {}", err);
+        }
+
+        let oracle_entropy_stats = compute_stats(&oracle_series.entropy_mean)
+            .ok_or("no oracle entropy samples")?;
+        let oracle_accuracy_stats = compute_stats(&oracle_series.accuracy_pct)
+            .ok_or("no oracle accuracy samples")?;
+
+        println!(
+            "Oracle entropy stats: mean {:.4}, std dev {:.4}, min {:.4}, max {:.4}, n {}",
+            oracle_entropy_stats.mean,
+            oracle_entropy_stats.stddev,
+            oracle_entropy_stats.min,
+            oracle_entropy_stats.max,
+            oracle_entropy_stats.count
+        );
+        println!(
+            "Oracle accuracy stats: mean {:.2}%, std dev {:.2}, min {:.2}%, max {:.2}%, n {}",
+            oracle_accuracy_stats.mean,
+            oracle_accuracy_stats.stddev,
+            oracle_accuracy_stats.min,
+            oracle_accuracy_stats.max,
+            oracle_accuracy_stats.count
+        );
+        (Some(oracle_entropy_stats), Some(oracle_accuracy_stats))
+    } else {
+        println!("Oracle entropy/accuracy timelines skipped (use --export to enable)");
+        (None, None)
+    };
+
+    let match_series = run_match_entropy_timeline(
+        ctx,
+        engine,
+        &best.candidate,
+        iterations,
+        window,
+        stride,
+        rng,
+    )?;
+    if let Err(err) = plot_timeline_series(
+        &match_series.entropy_mean,
+        "analysis_tests",
+        "Match Entropy Timeline",
+        "Entropy (bits)",
+        (0.0, 1.0),
+        "match_entropy_timeline",
+        GREEN,
+    ) {
+        println!("Failed to write match entropy timeline: {}", err);
+    }
+    if let Err(err) = plot_timeline_series(
+        &match_series.match_pct_mean,
+        "analysis_tests",
+        "Match Percentage Timeline",
+        "Match %",
+        (0.0, 100.0),
+        "match_pct_timeline",
+        BLACK,
+    ) {
+        println!("Failed to write match percentage timeline: {}", err);
+    }
+
+    let match_entropy_stats = compute_stats(&match_series.entropy_mean)
+        .ok_or("no match entropy samples")?;
+    let match_pct_stats = compute_stats(&match_series.match_pct_mean)
+        .ok_or("no match percentage samples")?;
+
+    println!(
+        "Match entropy stats: mean {:.4}, std dev {:.4}, min {:.4}, max {:.4}, n {}",
+        match_entropy_stats.mean,
+        match_entropy_stats.stddev,
+        match_entropy_stats.min,
+        match_entropy_stats.max,
+        match_entropy_stats.count
+    );
+    println!(
+        "Match percentage stats: mean {:.2}%, std dev {:.2}, min {:.2}%, max {:.2}%, n {}",
+        match_pct_stats.mean,
+        match_pct_stats.stddev,
+        match_pct_stats.min,
+        match_pct_stats.max,
+        match_pct_stats.count
+    );
+
+    let mut screen_iterations = engine.oracle_screen_iterations as usize;
+    if screen_iterations >= 1000 {
+        println!(
+            "Oracle screen iterations {} >= 1000; clamping to 999",
+            screen_iterations
+        );
+        screen_iterations = 999;
+    }
+    if screen_iterations == 0 {
+        screen_iterations = iterations.min(999).max(1);
+    }
+    let top_k = engine.combiner_k_oracles.max(1);
+    println!(
+        "Screening {} r candidates with {} random messages; selecting top {} oracles per bit",
+        candidates.len(),
+        screen_iterations,
+        top_k.min(candidates.len())
+    );
+    let (per_bit_oracles, top_match_pct) =
+        screen_oracles_per_bit(ctx, engine, &candidates, screen_iterations, top_k, rng)?;
+    let mut inverted_total = 0usize;
+    for selections in &per_bit_oracles {
+        inverted_total += selections.iter().filter(|sel| sel.invert).count();
+    }
+    if let Some(stats) = compute_stats(&top_match_pct) {
+        println!(
+            "Per-bit top oracle adjusted match % stats: mean {:.2}, std dev {:.2}, min {:.2}, max {:.2}, n {}; inverted selections {}",
+            stats.mean,
+            stats.stddev,
+            stats.min,
+            stats.max,
+            stats.count,
+            inverted_total
+        );
+    }
+
+    let speculative_report =
+        run_bitwise_speculative_oracle_attempt(ctx, engine, &candidates, &per_bit_oracles, message)?;
+    println!(
+        "Bitwise speculative oracle recovered (hex): {}",
+        to_hex(&speculative_report.recovered)
+    );
+    println!(
+        "Bitwise speculative oracle match: LSB run {} / overlap {} of {} bits ({:.2}%) using {} oracles per bit ({} unique)",
+        speculative_report.matching_lsb,
+        speculative_report.matching_total,
+        speculative_report.bit_width,
+        speculative_report.match_pct,
+        speculative_report.oracles_per_bit,
+        speculative_report.unique_oracles
+    );
+
+    let entropy_threshold = engine.entropy_report_threshold;
+    let match_threshold = engine.overlap_report_threshold;
+    let oracle_accuracy_threshold = engine.oracle_accuracy_threshold;
+
+    let oracle_entropy_ok = oracle_entropy_stats
+        .as_ref()
+        .map(|stats| stats.mean <= entropy_threshold)
+        .unwrap_or(true);
+    let match_entropy_ok = match_entropy_stats.mean <= entropy_threshold;
+    let match_pct_ok = match_pct_stats.mean >= match_threshold;
+    let oracle_accuracy_ok = oracle_accuracy_stats
+        .as_ref()
+        .map(|stats| stats.mean >= oracle_accuracy_threshold)
+        .unwrap_or(true);
+    let speculative_match_ok = speculative_report.match_pct >= match_threshold;
+
+    println!(
+        "Sufficiency thresholds: entropy <= {:.4}, match % >= {:.2}, oracle accuracy % >= {:.2}",
+        entropy_threshold, match_threshold, oracle_accuracy_threshold
+    );
+    println!(
+        "Sufficiency checks: oracle entropy {}, match entropy {}, match % {}, oracle accuracy {}, speculative match {}",
+        if oracle_entropy_ok { "OK" } else { "FAIL" },
+        if match_entropy_ok { "OK" } else { "FAIL" },
+        if match_pct_ok { "OK" } else { "FAIL" },
+        if oracle_accuracy_ok { "OK" } else { "FAIL" },
+        if speculative_match_ok { "OK" } else { "FAIL" }
+    );
+
+    if oracle_entropy_ok
+        && match_entropy_ok
+        && match_pct_ok
+        && oracle_accuracy_ok
+        && speculative_match_ok
+    {
+        println!("Sufficiency verdict: PASS (enough signal for speculative oracle attempts)");
+        Ok(())
+    } else {
+        Err("analysis tests indicate insufficient information for speculative oracle attempts".into())
+    }
 }
 
 /// Runs the enciphered export pipeline and writes per-bit match statistics.
@@ -1092,6 +2142,33 @@ fn random_message_under_n(engine: &EngineConfig, n: &BigUint, rng: &mut StdRng) 
     }
 }
 
+/// Computes the analysis bit width based on configuration and message bounds.
+///
+/// # Parameters
+/// - `engine`: Engine configuration containing message bit-length hints.
+/// - `n`: RSA modulus for upper bound sizing.
+/// - `fixed_message`: Optional fixed message to include in the width calculation.
+///
+/// # Returns
+/// - `usize`: Bit width used for analysis bit vectors.
+///
+/// # Expected Output
+/// - Returns a positive width; no side effects.
+fn analysis_bit_width(
+    engine: &EngineConfig,
+    n: &BigUint,
+    fixed_message: &Option<BigUint>,
+) -> usize {
+    let mut bit_width = engine.message.bits.max(1) as usize;
+    if let Some(msg) = fixed_message {
+        bit_width = bit_width.max(msg.bits().max(1) as usize);
+    }
+    if !n.is_zero() {
+        bit_width = bit_width.min(n.bits().max(1) as usize);
+    }
+    bit_width.max(1)
+}
+
 /// Builds `RCandidateSettings` from the engine configuration.
 ///
 /// # Parameters
@@ -1128,6 +2205,8 @@ fn build_r_candidate_settings(engine: &EngineConfig) -> RCandidateSettings {
             .map(|p| BigUint::from(*p))
             .collect(),
         small_prime_factors_per_candidate: engine.r_candidate_small_prime_factors,
+        max_factors_per_candidate: engine.r_candidate_max_factors,
+        target_bit_length: engine.r_candidate_bit_length,
     }
 }
 
@@ -1990,8 +3069,8 @@ mod tests {
         config.engine.r_candidate_small_primes = vec![3, 5, 7];
         config.engine.r_candidate_small_prime_factors = 3;
         config.engine.process_min_factor = 3;
-        config.engine.process_count = 1;
-        config.engine.process_min_count = 1;
+        config.engine.process_count = 6;
+        config.engine.process_min_count = 6;
         config.engine.min_message_trials = 1;
         config.engine.rabin_exponent = 3;
 

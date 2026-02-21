@@ -1,4 +1,7 @@
-use crate::math::{factor_composite_with_timeout, is_probable_prime_big, random_biguint_below};
+use crate::math::{
+    factor_composite_with_timeout, is_probable_prime_big, pollard_rho, random_biguint_below,
+    random_biguint_bits,
+};
 use num_bigint::BigUint;
 use num_traits::{One, Zero};
 use rand::rngs::StdRng;
@@ -41,6 +44,8 @@ pub struct RCandidateSettings {
     pub reuse_r_candidates_append_only: bool,
     pub small_primes: Vec<BigUint>,
     pub small_prime_factors_per_candidate: usize,
+    pub max_factors_per_candidate: usize,
+    pub target_bit_length: Option<u64>,
 }
 
 /// Generates `r` candidates using the configured strategy.
@@ -62,7 +67,13 @@ pub fn generate_r_candidates(
 ) -> Vec<(BigUint, Vec<(BigUint, u64)>)> {
     match settings.mode {
         RCandidateMode::Factoring => generate_r_candidates_via_factoring(n, settings, rng),
-        RCandidateMode::SmallPrimes => generate_r_candidates_from_small_primes(settings, rng),
+        RCandidateMode::SmallPrimes => {
+            let mut adjusted = settings.clone();
+            if adjusted.target_bit_length.is_none() {
+                adjusted.target_bit_length = n.bits().checked_add(1);
+            }
+            generate_r_candidates_from_small_primes(&adjusted, rng)
+        }
     }
 }
 
@@ -92,7 +103,7 @@ pub fn generate_r_candidates_batch(
     generate_r_candidates(n, &batch_settings, rng)
 }
 
-/// Builds `r` candidates by multiplying distinct small primes.
+/// Builds `r` candidates by combining small primes with generated larger primes.
 ///
 /// # Parameters
 /// - `settings`: Candidate generation configuration (uses `small_primes` list).
@@ -109,11 +120,43 @@ pub fn generate_r_candidates_from_small_primes(
 ) -> Vec<(BigUint, Vec<(BigUint, u64)>)> {
     let count = settings.process_count.max(settings.process_min_count).max(1) as usize;
     let target_count = count.max(1);
-    let min_factors = settings.small_prime_factors_per_candidate.max(3);
+    let target_bits = settings.target_bit_length;
+    let min_small_factors = settings.small_prime_factors_per_candidate.max(1);
+    let max_factors = settings
+        .max_factors_per_candidate
+        .max(min_small_factors + 1);
 
-    if settings.small_primes.len() < min_factors {
+    let Some(target_bits) = target_bits else {
+        return Vec::new();
+    };
+
+    if target_bits == 0 || max_factors <= min_small_factors {
         return Vec::new();
     }
+
+    let min_factor = settings.process_min_factor.clone();
+    let mut primes: Vec<BigUint> = settings
+        .small_primes
+        .iter()
+        .filter(|p| *p >= &min_factor)
+        .cloned()
+        .collect();
+    primes.sort();
+
+    if primes.len() < min_small_factors {
+        return Vec::new();
+    }
+
+    let max_small_prime = primes
+        .last()
+        .cloned()
+        .unwrap_or_else(|| BigUint::from(2u8));
+    let min_large_value = if max_small_prime >= min_factor {
+        &max_small_prime + BigUint::one()
+    } else {
+        min_factor.clone()
+    };
+    let min_large_bits = min_large_value.bits().max(2);
 
     let mut collected: Vec<(BigUint, Vec<(BigUint, u64)>)> = Vec::new();
     let mut seen: HashSet<String> = HashSet::new();
@@ -155,37 +198,35 @@ pub fn generate_r_candidates_from_small_primes(
     if remaining == 0 {
         return collected;
     }
-    let max_attempts = remaining.saturating_mul(50).max(10);
-    let min_factor = settings.process_min_factor.clone();
-    let primes = &settings.small_primes;
+
+    let max_attempts = remaining.saturating_mul(250).max(10);
     let mut seeds = Vec::with_capacity(max_attempts);
     for _ in 0..max_attempts {
         seeds.push(rng.next_u64());
     }
 
+    let found = Arc::new(AtomicUsize::new(0));
     let generated = seeds
         .into_par_iter()
         .filter_map(|seed| {
-            let mut local_rng = StdRng::seed_from_u64(seed);
-            let mut indices: Vec<usize> = (0..primes.len()).collect();
-            indices.shuffle(&mut local_rng);
-            let selected = indices.into_iter().take(min_factors).collect::<Vec<_>>();
-
-            let mut r = BigUint::one();
-            let mut factors = Vec::with_capacity(selected.len());
-            for idx in selected {
-                let p = &primes[idx];
-                if p < &min_factor {
-                    return None;
-                }
-                r *= p;
-                factors.push((p.clone(), 1));
-            }
-            factors.sort_by(|a, b| a.0.cmp(&b.0));
-            if factors.len() < 3 {
+            if found.load(Ordering::Relaxed) >= remaining {
                 return None;
             }
-            Some((r, factors))
+            let mut local_rng = StdRng::seed_from_u64(seed);
+            let candidate = build_small_primes_candidate(
+                target_bits,
+                min_large_bits,
+                &min_large_value,
+                &primes,
+                min_small_factors,
+                max_factors,
+                &mut local_rng,
+            )?;
+            let prev = found.fetch_add(1, Ordering::Relaxed);
+            if prev >= remaining {
+                return None;
+            }
+            Some(candidate)
         })
         .collect::<Vec<_>>();
 
@@ -206,6 +247,158 @@ pub fn generate_r_candidates_from_small_primes(
 
     collected.truncate(target_count);
     collected
+}
+
+const MAX_LARGE_PRIME_ATTEMPTS: usize = 128;
+const POLLARD_RHO_PRIMALITY_TIMEOUT_MS: u64 = 25;
+
+/// Builds a single r candidate from distinct small primes and generated larger primes.
+///
+/// # Parameters
+/// - `target_bits`: Target bit length derived from the RSA modulus.
+/// - `min_large_bits`: Minimum bit length required for large primes.
+/// - `min_large_value`: Minimum value for large primes to ensure they exceed small primes.
+/// - `small_primes`: Available small prime list (all >= min_factor).
+/// - `small_factor_count`: Number of small prime factors to include.
+/// - `max_factors`: Maximum total factor count per candidate.
+/// - `rng`: Random number generator for selecting primes.
+///
+/// # Returns
+/// - `Option<(BigUint, Vec<(BigUint, u64)>)>`: Candidate and factor list or `None` if invalid.
+///
+/// # Expected Output
+/// - Returns `None` when the constraints cannot be met; no side effects.
+fn build_small_primes_candidate(
+    target_bits: u64,
+    min_large_bits: u64,
+    min_large_value: &BigUint,
+    small_primes: &[BigUint],
+    small_factor_count: usize,
+    max_factors: usize,
+    rng: &mut StdRng,
+) -> Option<(BigUint, Vec<(BigUint, u64)>)> {
+    if small_factor_count == 0 || max_factors <= small_factor_count {
+        return None;
+    }
+
+    let mut indices: Vec<usize> = (0..small_primes.len()).collect();
+    indices.shuffle(rng);
+    let selected = indices
+        .into_iter()
+        .take(small_factor_count)
+        .collect::<Vec<_>>();
+
+    let mut r = BigUint::one();
+    let mut factors = Vec::with_capacity(max_factors);
+    for idx in selected {
+        let p = &small_primes[idx];
+        r *= p;
+        factors.push((p.clone(), 1));
+    }
+
+    let remaining_budget = max_factors - small_factor_count;
+    let remaining_bits = target_bits.saturating_sub(r.bits());
+    if remaining_bits < min_large_bits {
+        return None;
+    }
+
+    let max_large_count = remaining_budget
+        .min((remaining_bits / min_large_bits) as usize)
+        .max(1);
+    let large_count = if max_large_count == 1 {
+        1
+    } else {
+        (rng.next_u64() as usize % max_large_count) + 1
+    };
+
+    for idx in 0..large_count {
+        let remaining_primes = large_count - idx;
+        let bits_left = target_bits.saturating_sub(r.bits());
+        if bits_left == 0 {
+            return None;
+        }
+
+        let min_bits_required = min_large_bits * remaining_primes as u64;
+        if bits_left < min_bits_required {
+            return None;
+        }
+
+        let bits_for_prime = if remaining_primes == 1 {
+            bits_left
+        } else {
+            let max_bits_for_prime =
+                bits_left - min_large_bits * (remaining_primes as u64 - 1);
+            let span = max_bits_for_prime.saturating_sub(min_large_bits);
+            if span == 0 {
+                min_large_bits
+            } else {
+                min_large_bits + (rng.next_u64() % (span + 1))
+            }
+        };
+
+        let prime =
+            sample_large_prime_with_pollard(bits_for_prime, min_large_value, &factors, rng)?;
+        r *= &prime;
+        if r.bits() > target_bits {
+            return None;
+        }
+        factors.push((prime, 1));
+    }
+
+    if factors.len() <= small_factor_count {
+        return None;
+    }
+
+    factors.sort_by(|a, b| a.0.cmp(&b.0));
+    Some((r, factors))
+}
+
+/// Samples a prime candidate of the requested bit width and validates it with Pollard Rho.
+///
+/// # Parameters
+/// - `bits`: Bit width for the prime candidate.
+/// - `min_value`: Minimum acceptable prime value.
+/// - `used_factors`: Existing factors to avoid reuse.
+/// - `rng`: Random number generator for sampling.
+///
+/// # Returns
+/// - `Option<BigUint>`: A prime of the requested size or `None` on failure.
+///
+/// # Expected Output
+/// - Returns `None` when sampling fails within the attempt budget; no side effects.
+fn sample_large_prime_with_pollard(
+    bits: u64,
+    min_value: &BigUint,
+    used_factors: &[(BigUint, u64)],
+    rng: &mut StdRng,
+) -> Option<BigUint> {
+    if bits < 2 {
+        return None;
+    }
+    let bits_u32 = u32::try_from(bits).ok()?;
+    if min_value.bits() > bits {
+        return None;
+    }
+
+    for _ in 0..MAX_LARGE_PRIME_ATTEMPTS {
+        let mut candidate = random_biguint_bits(bits_u32, rng);
+        candidate |= BigUint::one();
+        if &candidate <= min_value {
+            continue;
+        }
+        if used_factors.iter().any(|(p, _)| p == &candidate) {
+            continue;
+        }
+        if !is_probable_prime_big(&candidate) {
+            continue;
+        }
+        let deadline = Instant::now() + Duration::from_millis(POLLARD_RHO_PRIMALITY_TIMEOUT_MS);
+        if pollard_rho(&candidate, rng, deadline).is_none() {
+            return Some(candidate);
+        }
+    }
+
+    None
 }
 
 /// Builds `r` candidates by sampling composites and factoring them.
@@ -600,6 +793,8 @@ mod tests {
             reuse_r_candidates_append_only: false,
             small_primes: vec![3u8, 5u8, 7u8, 11u8].into_iter().map(BigUint::from).collect(),
             small_prime_factors_per_candidate: 3,
+            max_factors_per_candidate: 5,
+            target_bit_length: Some(16),
         };
         let mut rng = StdRng::seed_from_u64(42);
         let candidates = generate_r_candidates_from_small_primes(&settings, &mut rng);
@@ -609,7 +804,14 @@ mod tests {
             .iter()
             .fold(BigUint::one(), |acc, (p, e)| acc * p.pow(*e as u32));
         assert_eq!(&product, r);
-        assert!(factors.len() >= 3);
+        assert!(factors.len() >= settings.small_prime_factors_per_candidate + 1);
+        let max_small = settings
+            .small_primes
+            .iter()
+            .max()
+            .cloned()
+            .unwrap_or_else(|| BigUint::from(2u8));
+        assert!(factors.iter().any(|(p, _)| p > &max_small));
     }
 
     #[test]
@@ -626,6 +828,8 @@ mod tests {
             reuse_r_candidates_append_only: false,
             small_primes: vec![3u8, 5u8].into_iter().map(BigUint::from).collect(),
             small_prime_factors_per_candidate: 3,
+            max_factors_per_candidate: 4,
+            target_bit_length: Some(12),
         };
         let mut rng = StdRng::seed_from_u64(43);
         let candidates = generate_r_candidates_from_small_primes(&settings, &mut rng);
@@ -646,6 +850,8 @@ mod tests {
             reuse_r_candidates_append_only: false,
             small_primes: vec![3u8, 5u8, 7u8].into_iter().map(BigUint::from).collect(),
             small_prime_factors_per_candidate: 3,
+            max_factors_per_candidate: 4,
+            target_bit_length: Some(14),
         };
         let mut rng = StdRng::seed_from_u64(44);
         let candidates = generate_r_candidates(&BigUint::from(100u8), &settings, &mut rng);
@@ -666,6 +872,8 @@ mod tests {
             reuse_r_candidates_append_only: false,
             small_primes: Vec::new(),
             small_prime_factors_per_candidate: 3,
+            max_factors_per_candidate: 6,
+            target_bit_length: None,
         };
         let mut rng = StdRng::seed_from_u64(46);
         let candidates = generate_r_candidates(&BigUint::from(100u8), &settings, &mut rng);
@@ -687,6 +895,8 @@ mod tests {
             reuse_r_candidates_append_only: false,
             small_primes: Vec::new(),
             small_prime_factors_per_candidate: 3,
+            max_factors_per_candidate: 6,
+            target_bit_length: None,
         };
         let mut rng = StdRng::seed_from_u64(45);
         let candidates = generate_r_candidates_via_factoring(&BigUint::from(100u8), &settings, &mut rng);
@@ -709,6 +919,8 @@ mod tests {
             reuse_r_candidates_append_only: false,
             small_primes: Vec::new(),
             small_prime_factors_per_candidate: 3,
+            max_factors_per_candidate: 6,
+            target_bit_length: None,
         };
         let mut rng = StdRng::seed_from_u64(47);
         let candidates = generate_r_candidates_via_factoring(&BigUint::from(100u8), &settings, &mut rng);
