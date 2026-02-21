@@ -1,7 +1,7 @@
 # RSA Analysis Demo
 This demo shows homomorphic key switching as a viable method to retrieve up to 52% of the bits of an RSA message on average given a public modulus with private factorization and several homomorphically related keys with easier factorizations.
 
-Proof of concept by Nicholas LaRoche <nlaroche@nicholas.louis.laroche@outlook.com>.
+Proof of concept by Nicholas LaRoche <nicholas.louis.laroche@outlook.com>.
 
 # Theory
 - Use regular RSA encryption using a large modulus N = pq where p and q are large private primes.
