@@ -1,0 +1,21 @@
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.04s
+     Running `target/debug/analysis --seed 1 -c rsa_config_base_medium.json --tests`
+Prime p (72 bits): 3030152311446024058741
+Prime q (72 bits): 4262327550688715209573
+Modulus n (144 bits): 12915501679859480667750241440843407877527593
+phi(n): 12915501679859480667742948960981273138259280
+Public exponent e: 65537
+Private exponent d: 1780347623111380569028026930031963952134433
+Plaintext (hex): e11830d3641a68f94a690dcc25d1f4b0
+Ciphertext (hex): 8b7495ede1169ab496ed1645f73bca28748e
+Recovered (hex): e11830d3641a68f94a690dcc25d1f4b0
+RNG seed: 1
+Reuse enabled; loading r candidates from rgen_output_base.csv
+Loaded 1000 r candidates from reuse file rgen_output_base.csv
+Speculative combiner majority vote: accuracy 50.00% (64 of 128 bits) using 1000 oracles (requested 1000)
+Speculative combiner bit probability P(1) stats: mean 0.4999, std dev 0.0156, min 0.4600, max 0.5370, n 128
+Reuse enabled; loading r candidates from rgen_output_base.csv
+Loaded 1000 r candidates from reuse file rgen_output_base.csv
+Generated 1000 r candidates for testing
+Test iterations progress: 20% (1/4)
+Reuse enabled; loading r candidates from rgen_output_base.csv

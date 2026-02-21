@@ -63,6 +63,8 @@ pub struct EngineConfig {
     pub min_message_trials: u64,
     #[serde(default = "default_overlap_report_threshold")]
     pub overlap_report_threshold: f64,
+    #[serde(default = "default_entropy_report_threshold")]
+    pub entropy_report_threshold: f64,
     #[serde(default = "default_process_min_count")]
     pub process_min_count: u64,
     #[serde(default = "default_process_count")]
@@ -79,6 +81,16 @@ pub struct EngineConfig {
     pub test_iterations: u64,
     #[serde(default = "default_alt_iterations")]
     pub alt_iterations: u64,
+    #[serde(default = "default_analysis_tests_iterations")]
+    pub analysis_tests_iterations: u64,
+    #[serde(default = "default_oracle_screen_iterations")]
+    pub oracle_screen_iterations: u64,
+    #[serde(default = "default_analysis_tests_window")]
+    pub analysis_tests_window: usize,
+    #[serde(default = "default_analysis_tests_stride")]
+    pub analysis_tests_stride: usize,
+    #[serde(default = "default_oracle_accuracy_threshold")]
+    pub oracle_accuracy_threshold: f64,
     #[serde(default = "default_r_use_list_enable")]
     pub r_use_list_enable: bool,
     #[serde(default)]
@@ -167,6 +179,7 @@ impl Default for EngineConfig {
             rabin_exponent: default_rabin_exponent(),
             min_message_trials: default_min_message_trials(),
             overlap_report_threshold: default_overlap_report_threshold(),
+            entropy_report_threshold: default_entropy_report_threshold(),
             process_min_count: default_process_min_count(),
             process_count: default_process_count(),
             process_scale: default_process_scale(),
@@ -175,6 +188,11 @@ impl Default for EngineConfig {
             use_rs_decrypt: default_use_rs_decrypt(),
             test_iterations: default_test_iterations(),
             alt_iterations: default_alt_iterations(),
+            analysis_tests_iterations: default_analysis_tests_iterations(),
+            oracle_screen_iterations: default_oracle_screen_iterations(),
+            analysis_tests_window: default_analysis_tests_window(),
+            analysis_tests_stride: default_analysis_tests_stride(),
+            oracle_accuracy_threshold: default_oracle_accuracy_threshold(),
             r_use_list_enable: default_r_use_list_enable(),
             r_use_list: Vec::new(),
             r_stress_test_enable: default_r_stress_test_enable(),
@@ -413,6 +431,20 @@ fn default_overlap_report_threshold() -> f64 {
     51.0
 }
 
+/// Default entropy threshold for analysis timelines.
+///
+/// # Parameters
+/// - None.
+///
+/// # Returns
+/// - `f64`: Default entropy threshold.
+///
+/// # Expected Output
+/// - Returns a constant default value; no side effects.
+fn default_entropy_report_threshold() -> f64 {
+    0.995
+}
+
 /// Default minimum number of r candidates to generate.
 ///
 /// # Parameters
@@ -523,6 +555,76 @@ fn default_test_iterations() -> u64 {
 /// - Returns a constant default value; no side effects.
 fn default_alt_iterations() -> u64 {
     0
+}
+
+/// Default number of timeline iterations for analysis tests.
+///
+/// # Parameters
+/// - None.
+///
+/// # Returns
+/// - `u64`: Default timeline iteration count.
+///
+/// # Expected Output
+/// - Returns a constant default value; no side effects.
+fn default_analysis_tests_iterations() -> u64 {
+    64
+}
+
+/// Default number of iterations for oracle screening.
+///
+/// # Parameters
+/// - None.
+///
+/// # Returns
+/// - `u64`: Default screening iteration count.
+///
+/// # Expected Output
+/// - Returns a constant default value; no side effects.
+fn default_oracle_screen_iterations() -> u64 {
+    512
+}
+
+/// Default window size for analysis timeline frames.
+///
+/// # Parameters
+/// - None.
+///
+/// # Returns
+/// - `usize`: Default timeline window size.
+///
+/// # Expected Output
+/// - Returns a constant default value; no side effects.
+fn default_analysis_tests_window() -> usize {
+    16
+}
+
+/// Default stride between analysis timeline frames.
+///
+/// # Parameters
+/// - None.
+///
+/// # Returns
+/// - `usize`: Default timeline stride.
+///
+/// # Expected Output
+/// - Returns a constant default value; no side effects.
+fn default_analysis_tests_stride() -> usize {
+    4
+}
+
+/// Default oracle accuracy threshold for sufficiency tests.
+///
+/// # Parameters
+/// - None.
+///
+/// # Returns
+/// - `f64`: Default oracle accuracy threshold in percent.
+///
+/// # Expected Output
+/// - Returns a constant default value; no side effects.
+fn default_oracle_accuracy_threshold() -> f64 {
+    55.0
 }
 
 /// Default flag for r_use_list stress tests.
