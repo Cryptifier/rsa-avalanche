@@ -1871,27 +1871,34 @@ fn run_information_sufficiency_tests(
         stride,
         rng,
     )?;
-    if let Err(err) = plot_timeline_series(
-        &match_series.entropy_mean,
-        "analysis_tests",
-        "Match Entropy Timeline",
-        "Entropy (bits)",
-        (0.0, 1.0),
-        "match_entropy_timeline",
-        GREEN,
-    ) {
-        println!("Failed to write match entropy timeline: {}", err);
-    }
-    if let Err(err) = plot_timeline_series(
-        &match_series.match_pct_mean,
-        "analysis_tests",
-        "Match Percentage Timeline",
-        "Match %",
-        (0.0, 100.0),
-        "match_pct_timeline",
-        BLACK,
-    ) {
-        println!("Failed to write match percentage timeline: {}", err);
+    if export {
+        if let Err(err) = plot_timeline_series(
+            &match_series.entropy_mean,
+            "analysis_tests",
+            "Match Entropy Timeline",
+            "Entropy (bits)",
+            (0.0, 1.0),
+            "match_entropy_timeline",
+            GREEN,
+        ) {
+            println!("Failed to write match entropy timeline: {}", err);
+        }
+        if let Err(err) = plot_timeline_series(
+            &match_series.match_pct_mean,
+            "analysis_tests",
+            "Match Percentage Timeline",
+            "Match %",
+            (0.0, 100.0),
+            "match_pct_timeline",
+            BLACK,
+        ) {
+            println!("Failed to write match percentage timeline: {}", err);
+        }
+    } else {
+        println!("Match timeline charts skipped (use --export to enable)");
+        with_analytics(analytics, |a| {
+            a.add_feature_note("information_sufficiency", "match timeline charts skipped");
+        });
     }
 
     let match_entropy_stats = compute_stats(&match_series.entropy_mean)
