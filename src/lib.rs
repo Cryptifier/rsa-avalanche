@@ -1,3 +1,4 @@
+pub mod analytics;
 pub mod combiner;
 pub mod config;
 pub mod dsp;
