@@ -6,6 +6,7 @@ CONFIG=${CONFIG:-"rsa_config_base_256.json"}
 SCRIPT_LOG=${SCRIPT_LOG:-"logs_demo_script.log"}
 RESUME=${RESUME:-0}
 PLAINTEXT_HEX=${PLAINTEXT_HEX:-""}
+DIFF_SCRIPT=${DIFF_SCRIPT:-"scripts/hex_bit_diff.py"}
 
 BLUE=$'\033[0;34m'
 RESET=$'\033[0m'
@@ -54,7 +55,35 @@ echo "Plaintext (hex): 0x${PLAINTEXT_HEX}"
 for i in $(seq 1 "${RUNS}"); do
   echo ""
   echo "===== RUN ${i} ====="
-  cargo run --bin demo -- --config "${CONFIG}" --encrypt --plaintext-hex "0x${PLAINTEXT_HEX}"
+  encrypt_output="$(mktemp)"
+  decrypt_output="$(mktemp)"
+
+  cargo run --bin demo -- --config "${CONFIG}" --encrypt --plaintext-hex "0x${PLAINTEXT_HEX}" | tee "${encrypt_output}"
+  ciphertext_hex=$(grep -m1 "Ciphertext (hex):" "${encrypt_output}" | awk '{print $3}')
+  if [[ -z "${ciphertext_hex}" ]]; then
+    echo "Failed to capture ciphertext from demo output." >&2
+    rm -f "${encrypt_output}" "${decrypt_output}"
+    exit 1
+  fi
+
+  cargo run --bin demo -- --config "${CONFIG}" --decrypt --ciphertext "${ciphertext_hex}" | tee "${decrypt_output}"
+  best_case_hex=$(grep -m1 "Recovered (best-case) hex:" "${decrypt_output}" | awk '{print $4}')
+  majority_hex=$(grep -m1 "Recovered (majority) hex:" "${decrypt_output}" | awk '{print $4}')
+
+  if [[ -x "${DIFF_SCRIPT}" ]]; then
+    if [[ -n "${best_case_hex}" ]]; then
+      echo "Best-case vs plaintext bit diff:"
+      "${DIFF_SCRIPT}" "0x${PLAINTEXT_HEX}" "${best_case_hex}"
+    fi
+    if [[ -n "${majority_hex}" ]]; then
+      echo "Majority vs plaintext bit diff:"
+      "${DIFF_SCRIPT}" "0x${PLAINTEXT_HEX}" "${majority_hex}"
+    fi
+  else
+    echo "Diff script not found or not executable: ${DIFF_SCRIPT}" >&2
+  fi
+
+  rm -f "${encrypt_output}" "${decrypt_output}"
   progress_bar "${i}" "${RUNS}"
 done
 
