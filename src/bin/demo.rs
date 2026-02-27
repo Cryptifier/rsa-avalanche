@@ -61,6 +61,7 @@ struct OracleCandidate {
 struct OracleBitSelection {
     oracle_idx: usize,
     invert: bool,
+    match_pct: f64,
 }
 
 /// Entry point for the demo CLI.
@@ -246,7 +247,6 @@ fn run_speculative_decrypt(
         engine,
         &prepared,
         &per_bit_oracles,
-        &top_match_pct,
         ciphertext,
         shift,
         bit_width,
@@ -718,7 +718,7 @@ fn screen_oracles_per_bit(
             .map(|(oracle_idx, counts)| {
                 let match_pct = counts[bit_idx] as f64 / iterations as f64 * 100.0;
                 if match_pct < 50.0 {
-                    (oracle_idx, 100.0 - match_pct, true)
+                    (oracle_idx, 100.0 - match_pct, true)                    
                 } else {
                     (oracle_idx, match_pct, false)
                 }
@@ -733,37 +733,39 @@ fn screen_oracles_per_bit(
         let best = ranked.first().map(|(_, pct, _)| *pct).unwrap_or(0.0);
         top_match_pct[bit_idx] = best;
 
-        for (oracle_idx, _, invert) in ranked.into_iter().take(top_k) {
-            per_bit_oracles[bit_idx].push(OracleBitSelection { oracle_idx, invert });
+        for (oracle_idx, pct, invert) in ranked.into_iter().take(top_k) {
+            per_bit_oracles[bit_idx].push(OracleBitSelection {
+                oracle_idx,
+                invert,
+                match_pct: pct,
+            });
         }
     }
 
     Ok((per_bit_oracles, top_match_pct))
 }
 
-/// Computes per-bit best-case match percentages and best-case bits for a ciphertext.
+/// Computes weighted best-case match percentages and best-case bits for a ciphertext.
 ///
 /// # Parameters
 /// - `ctx`: Demo context containing key material.
 /// - `engine`: Engine configuration controlling HBC behavior.
 /// - `candidates`: Prepared r candidates to use as oracles.
 /// - `per_bit_oracles`: Per-bit oracle selection ranked by screening.
-/// - `top_match_pct`: Per-bit match percentages from screening.
 /// - `ciphertext`: Ciphertext to decrypt.
 /// - `shift`: Whether to shift ciphertext by encrypted 2 before conversion.
 /// - `bit_width`: Bit width for output vectors.
 ///
 /// # Returns
-/// - `Result<(Vec<f64>, Vec<bool>), Box<dyn Error>>`: Per-bit match percentages and best-case bits.
+/// - `Result<(Vec<f64>, Vec<bool>), Box<dyn Error>>`: Weighted match percentages and best-case bits.
 ///
 /// # Expected Output
-/// - Returns per-bit match percentages and bits; no side effects.
+/// - Returns weighted match percentages and bits; no side effects.
 fn compute_per_bit_best_case_match(
     ctx: &DemoContext,
     engine: &EngineConfig,
     candidates: &[OracleCandidate],
     per_bit_oracles: &[Vec<OracleBitSelection>],
-    top_match_pct: &[f64],
     ciphertext: &BigUint,
     shift: bool,
     bit_width: usize,
@@ -801,20 +803,43 @@ fn compute_per_bit_best_case_match(
         oracle_bits[oracle_idx] = Some(biguint_to_bits_le(&dm, bit_width));
     }
 
+    let mut results = (0..bit_width)
+        .into_par_iter()
+        .map(|bit_idx| {
+            let selections: &[OracleBitSelection] =
+                per_bit_oracles.get(bit_idx).map_or(&[], |v| v.as_slice());
+            let mut score_one = 0.0;
+            let mut score_zero = 0.0;
+            for selection in selections {
+                if let Some(bits) = oracle_bits
+                    .get(selection.oracle_idx)
+                    .and_then(|entry| entry.as_ref())
+                {
+                    let bit = if selection.invert { !bits[bit_idx] } else { bits[bit_idx] };
+                    if bit {
+                        score_one += selection.match_pct;
+                    } else {
+                        score_zero += selection.match_pct;
+                    }
+                }
+            }
+            let total = (score_one + score_zero).max(1.0);
+            let best_score = score_one.max(score_zero);
+            let best_bit = if (score_one - score_zero).abs() < f64::EPSILON {
+                engine.combiner_tie_breaker
+            } else {
+                score_one > score_zero
+            };
+            (bit_idx, best_score / total * 100.0, best_bit)
+        })
+        .collect::<Vec<_>>();
+
+    results.sort_by_key(|(idx, _, _)| *idx);
     let mut per_bit_pct = Vec::with_capacity(bit_width);
     let mut best_case_bits = Vec::with_capacity(bit_width);
-    for (bit_idx, selections) in per_bit_oracles.iter().enumerate().take(bit_width) {
-        let mut selected_bit = false;
-        if let Some(selection) = selections.first() {
-            if let Some(bits) = oracle_bits
-                .get(selection.oracle_idx)
-                .and_then(|entry| entry.as_ref())
-            {
-                selected_bit = if selection.invert { !bits[bit_idx] } else { bits[bit_idx] };
-            }
-        }
-        per_bit_pct.push(*top_match_pct.get(bit_idx).unwrap_or(&0.0));
-        best_case_bits.push(selected_bit);
+    for (_, pct, bit) in results {
+        per_bit_pct.push(pct);
+        best_case_bits.push(bit);
     }
 
     Ok((per_bit_pct, best_case_bits))
@@ -878,28 +903,39 @@ fn recover_message_bits_majority(
         oracle_bits[oracle_idx] = Some(biguint_to_bits_le(&dm, bit_width));
     }
 
-    let mut recovered_bits = vec![false; bit_width];
-    for (bit_idx, selections) in per_bit_oracles.iter().enumerate().take(bit_width) {
-        let mut ones = 0usize;
-        let mut zeros = 0usize;
-        for selection in selections {
-            if let Some(bits) = oracle_bits
-                .get(selection.oracle_idx)
-                .and_then(|entry| entry.as_ref())
-            {
-                let bit = if selection.invert { !bits[bit_idx] } else { bits[bit_idx] };
-                if bit {
-                    ones += 1;
-                } else {
-                    zeros += 1;
+    let mut recovered = (0..bit_width)
+        .into_par_iter()
+        .map(|bit_idx| {
+            let selections: &[OracleBitSelection] =
+                per_bit_oracles.get(bit_idx).map_or(&[], |v| v.as_slice());
+            let mut ones = 0usize;
+            let mut zeros = 0usize;
+            for selection in selections {
+                if let Some(bits) = oracle_bits
+                    .get(selection.oracle_idx)
+                    .and_then(|entry| entry.as_ref())
+                {
+                    let bit = if selection.invert { !bits[bit_idx] } else { bits[bit_idx] };
+                    if bit {
+                        ones += 1;
+                    } else {
+                        zeros += 1;
+                    }
                 }
             }
-        }
-        recovered_bits[bit_idx] = if ones == zeros {
-            engine.combiner_tie_breaker
-        } else {
-            ones > zeros
-        };
+            let recovered_bit = if ones == zeros {
+                engine.combiner_tie_breaker
+            } else {
+                ones > zeros
+            };
+            (bit_idx, recovered_bit)
+        })
+        .collect::<Vec<_>>();
+
+    recovered.sort_by_key(|(idx, _)| *idx);
+    let mut recovered_bits = Vec::with_capacity(bit_width);
+    for (_, bit) in recovered {
+        recovered_bits.push(bit);
     }
 
     Ok(recovered_bits)
