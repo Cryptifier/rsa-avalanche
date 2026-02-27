@@ -2,8 +2,8 @@
     "rsa_keypair" : {
         "generate" : false,
         "e" : 65537,
-        "p" : "3030152311446024058741",
-        "q" : "4262327550688715209573"
+        "p" : "58628584552695041836585949440309667269439478958531434173586684659894660406667",
+        "q" : "64301897341371723258256695021518757714143539632887023240380348270756059529701"
     },
     "padding" : "PKCS1v15",
     "engine" : {
@@ -14,7 +14,7 @@
         "test_iterations" : 4,
         "alt_iterations" : 8,
         "analysis_tests_iterations" : 1000,
-        "oracle_screen_iterations" : 50,
+        "oracle_screen_iterations" : 500,
         "analysis_tests_window" : 32,
         "analysis_tests_stride" : 8,
         "process_min_count" : 1000,
@@ -28,7 +28,7 @@
         "entropy_report_threshold" : 0.99,
         "oracle_accuracy_threshold" : 51.0,
         "reuse_r_candidates" : true,
-        "reuse_r_candidates_path" : "rgen_output_base.csv",
+        "reuse_r_candidates_path" : "rgen_output_256.csv",
         "reuse_r_candidates_append_only" : false,
         "r_candidate_mode" : "small_primes",
         "r_candidate_small_primes" : [117, 1009, 1103, 1913],
@@ -44,7 +44,7 @@
         "enciphered_export_enable" : false,
         "message" : {
             "is_random" : true,
-            "bits" : 128,
+            "bits" : 256,
             "fixed_message" : "HeloWrld1234"
         }
     }

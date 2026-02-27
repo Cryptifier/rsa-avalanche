@@ -16,6 +16,9 @@ pub struct Config {
     /// Engine configuration for r candidate and analysis behavior.
     #[serde(default)]
     pub engine: EngineConfig,
+    /// Verification configuration for demo inputs.
+    #[serde(default)]
+    pub verify: VerifyConfig,
 }
 
 /// RSA keypair configuration values.
@@ -151,11 +154,23 @@ pub struct EngineConfig {
     pub enciphered_export_ramp_csv: String,
 }
 
+/// Verification inputs for demo workflows.
+#[derive(Debug, Deserialize, Clone, Default)]
+pub struct VerifyConfig {
+    /// Ciphertext to decrypt in demo mode (decimal string or number).
+    #[serde(default, deserialize_with = "deserialize_biguint_option")]
+    pub ciphertext: Option<BigUint>,
+    /// Optional ciphertext hex string (0x prefix optional).
+    #[serde(default)]
+    pub ciphertext_hex: Option<String>,
+}
+
 impl Default for Config {
     fn default() -> Self {
         Self {
             rsa_keypair: KeyConfig::default(),
             engine: EngineConfig::default(),
+            verify: VerifyConfig::default(),
         }
     }
 }
