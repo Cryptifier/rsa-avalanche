@@ -1389,36 +1389,63 @@ fn run_match_entropy_timeline(
     let y = engine.rabin_exponent as u32;
     let n_pow_y = ctx.n.pow(y);
 
-    let mut samples: Vec<MatchSample> = Vec::with_capacity(iterations);
-    let mut next_pct = 10u64;
-    for idx in 0..iterations {
-        let msg = sample_message_for_tests(engine, &ctx.n, &fixed_message, rng);
-        let ciphertext = msg.modpow(&ctx.e, &ctx.n);
-        let dm = derive_candidate_message(
-            ctx,
-            engine,
-            &ciphertext,
-            &candidate.r,
-            &candidate.d_new,
-            &n_pow_y,
-            &candidate.r_pow_y,
-            y,
-            false,
-            shift,
-        );
-
-        samples.push(MatchSample {
-            message_bytes_le: msg.to_bytes_le(),
-            candidate_bytes_le: dm.to_bytes_le(),
-        });
-
-        log_progress_every_ten_percent(
-            (idx + 1) as u64,
-            iterations as u64,
-            &mut next_pct,
-            "Match entropy timeline",
-        );
+    let mut seeds = Vec::with_capacity(iterations);
+    for _ in 0..iterations {
+        seeds.push(rng.next_u64());
     }
+
+    let done = Arc::new(AtomicU64::new(0));
+    let next_pct = Arc::new(AtomicU64::new(10));
+    let iterations_u64 = iterations as u64;
+
+    let samples: Vec<MatchSample> = seeds
+        .into_par_iter()
+        .map(|seed| {
+            let mut local_rng = RngChoice::from_seed(rng.mode(), seed);
+            let msg = sample_message_for_tests(engine, &ctx.n, &fixed_message, &mut local_rng);
+            let ciphertext = msg.modpow(&ctx.e, &ctx.n);
+            let dm = derive_candidate_message(
+                ctx,
+                engine,
+                &ciphertext,
+                &candidate.r,
+                &candidate.d_new,
+                &n_pow_y,
+                &candidate.r_pow_y,
+                y,
+                false,
+                shift,
+            );
+
+            let finished = done.fetch_add(1, Ordering::Relaxed) + 1;
+            let pct = finished.saturating_mul(100) / iterations_u64;
+            let mut current_next = next_pct.load(Ordering::Relaxed);
+            while pct >= current_next && current_next <= 100 {
+                let new_next = current_next.saturating_add(10);
+                match next_pct.compare_exchange(
+                    current_next,
+                    new_next,
+                    Ordering::Relaxed,
+                    Ordering::Relaxed,
+                ) {
+                    Ok(_) => {
+                        let display_pct = current_next.min(100);
+                        println!(
+                            "Match entropy timeline progress: {}% ({}/{})",
+                            display_pct, finished, iterations_u64
+                        );
+                        break;
+                    }
+                    Err(actual) => current_next = actual,
+                }
+            }
+
+            MatchSample {
+                message_bytes_le: msg.to_bytes_le(),
+                candidate_bytes_le: dm.to_bytes_le(),
+            }
+        })
+        .collect();
 
     if samples.is_empty() {
         return Err("no samples generated for match entropy timeline".into());
@@ -1432,37 +1459,45 @@ fn run_match_entropy_timeline(
         ((samples.len() - window) / stride) + 1
     };
 
-    let mut entropy_mean = Vec::with_capacity(frame_count);
-    let mut match_pct_mean = Vec::with_capacity(frame_count);
+    let samples = Arc::new(samples);
+    let mut frames = (0..frame_count)
+        .into_par_iter()
+        .map(|frame_idx| {
+            let start = frame_idx * stride;
+            let end = (start + window).min(samples.len());
+            let frame_samples = &samples[start..end];
+            let mut match_counts = vec![0u32; bit_width];
+            let window_len_f = frame_samples.len().max(1) as f64;
 
-    for frame_idx in 0..frame_count {
-        let start = frame_idx * stride;
-        let end = (start + window).min(samples.len());
-        let frame_samples = &samples[start..end];
-        let mut match_counts = vec![0u32; bit_width];
-        let window_len_f = frame_samples.len().max(1) as f64;
-
-        for sample in frame_samples {
-            for bit_idx in 0..bit_width {
-                let a = bit_from_bytes_le(&sample.message_bytes_le, bit_idx);
-                let b = bit_from_bytes_le(&sample.candidate_bytes_le, bit_idx);
-                if a == b {
-                    match_counts[bit_idx] = match_counts[bit_idx].saturating_add(1);
+            for sample in frame_samples {
+                for bit_idx in 0..bit_width {
+                    let a = bit_from_bytes_le(&sample.message_bytes_le, bit_idx);
+                    let b = bit_from_bytes_le(&sample.candidate_bytes_le, bit_idx);
+                    if a == b {
+                        match_counts[bit_idx] = match_counts[bit_idx].saturating_add(1);
+                    }
                 }
             }
-        }
 
-        let mut entropy_sum = 0.0;
-        let mut match_sum = 0.0;
-        for count in match_counts {
-            let p = count as f64 / window_len_f;
-            entropy_sum += shannon_entropy_bit(p);
-            match_sum += p * 100.0;
-        }
+            let mut entropy_sum = 0.0;
+            let mut match_sum = 0.0;
+            for count in match_counts {
+                let p = count as f64 / window_len_f;
+                entropy_sum += shannon_entropy_bit(p);
+                match_sum += p * 100.0;
+            }
 
-        let denom = bit_width.max(1) as f64;
-        entropy_mean.push(entropy_sum / denom);
-        match_pct_mean.push(match_sum / denom);
+            let denom = bit_width.max(1) as f64;
+            (frame_idx, entropy_sum / denom, match_sum / denom)
+        })
+        .collect::<Vec<_>>();
+
+    frames.sort_by_key(|(idx, _, _)| *idx);
+    let mut entropy_mean = Vec::with_capacity(frame_count);
+    let mut match_pct_mean = Vec::with_capacity(frame_count);
+    for (_, entropy, match_pct) in frames {
+        entropy_mean.push(entropy);
+        match_pct_mean.push(match_pct);
     }
 
     Ok(MatchTimelineSeries {
