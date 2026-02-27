@@ -74,6 +74,10 @@ struct Args {
     /// Output path for analytics session JSON
     #[arg(long, default_value = "session.json")]
     session_json: String,
+
+    /// Multiply ciphertext by encrypted 2 before base conversion
+    #[arg(long)]
+    shift: bool,
 }
 
 /// Entry point for the RSA round-trip demo CLI.
@@ -99,6 +103,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         tests: args.tests,
         export: args.export,
         session_json: args.session_json.clone(),
+        shift: args.shift,
     })));
 
     let analytics_for_handler = Arc::clone(&analytics);
@@ -170,6 +175,7 @@ fn run_demo(args: Args, config: Config, analytics: &Arc<Mutex<SessionAnalytics>>
             config.engine.r_use_list_enable && !config.engine.r_use_list.is_empty(),
         );
         a.mark_feature("r_stress", config.engine.r_stress_test_enable);
+        a.set_feature_stat("rsa_roundtrip", "shift_enabled", json!(args.shift));
     });
 
     let rng_start = Instant::now();
@@ -285,6 +291,7 @@ fn run_demo(args: Args, config: Config, analytics: &Arc<Mutex<SessionAnalytics>>
             requested_oracles,
             &mut rng,
             analytics,
+            args.shift,
         ) {
             Ok(oracles) => match majority_vote_with_distribution(&oracles, config.engine.combiner_tie_breaker) {
                 Ok(distribution) => {
@@ -367,6 +374,7 @@ fn run_demo(args: Args, config: Config, analytics: &Arc<Mutex<SessionAnalytics>>
                 &mut rng,
                 &mut bit_hist,
                 analytics,
+                args.shift,
             )?;
             reports.push(report);
             iteration_total += iteration_start.elapsed();
@@ -486,6 +494,7 @@ fn run_demo(args: Args, config: Config, analytics: &Arc<Mutex<SessionAnalytics>>
                     "best_r",
                     config.engine.alt_iterations,
                     &mut rng,
+                    args.shift,
                 ) {
                     println!("\nAlt iterations on best r ({} runs):", config.engine.alt_iterations);
                     println!("Average matching bits: {:.4}", avg_bits);
@@ -502,6 +511,7 @@ fn run_demo(args: Args, config: Config, analytics: &Arc<Mutex<SessionAnalytics>>
                     "worst_r",
                     config.engine.alt_iterations,
                     &mut rng,
+                    args.shift,
                 ) {
                     println!("\nAlt iterations on worst r ({} runs):", config.engine.alt_iterations);
                     println!("Average matching bits: {:.4}", avg_bits);
@@ -520,7 +530,15 @@ fn run_demo(args: Args, config: Config, analytics: &Arc<Mutex<SessionAnalytics>>
                     if is_probable_prime_big(&r) {
                         continue;
                     }
-                    run_r_stress_entry("r_use_list", &r, &ctx, &config, &config.engine, &mut rng);
+                    run_r_stress_entry(
+                        "r_use_list",
+                        &r,
+                        &ctx,
+                        &config,
+                        &config.engine,
+                        &mut rng,
+                        args.shift,
+                    );
                 }
             }
             with_analytics(analytics, |a| {
@@ -536,7 +554,15 @@ fn run_demo(args: Args, config: Config, analytics: &Arc<Mutex<SessionAnalytics>>
                 let mut current = start.clone();
                 while &current <= end {
                     if !is_probable_prime_big(&current) {
-                        run_r_stress_entry("r_stress", &current, &ctx, &config, &config.engine, &mut rng);
+                        run_r_stress_entry(
+                            "r_stress",
+                            &current,
+                            &ctx,
+                            &config,
+                            &config.engine,
+                            &mut rng,
+                            args.shift,
+                        );
                     }
                     current += BigUint::one();
                 }
@@ -565,6 +591,7 @@ fn run_demo(args: Args, config: Config, analytics: &Arc<Mutex<SessionAnalytics>>
             &mut rng,
             args.export,
             analytics,
+            args.shift,
         ) {
             Ok(()) => {
                 with_analytics(analytics, |a| {
@@ -591,7 +618,7 @@ fn run_demo(args: Args, config: Config, analytics: &Arc<Mutex<SessionAnalytics>>
 
     if config.engine.enciphered_export_enable {
         let export_start = Instant::now();
-        if let Err(err) = run_enciphered_export(&ctx, &config.engine, &mut rng, analytics) {
+        if let Err(err) = run_enciphered_export(&ctx, &config.engine, &mut rng, analytics, args.shift) {
             println!("Enciphered export failed: {}", err);
             with_analytics(analytics, |a| {
                 a.add_feature_note("enciphered_export", &format!("failed: {}", err));
@@ -973,6 +1000,7 @@ fn count_matching_bits_le(a: &[bool], b: &[bool]) -> (usize, usize) {
 /// - `k_oracles`: Maximum number of oracle samples to collect.
 /// - `rng`: Random number generator used for candidate sampling.
 /// - `analytics`: Session analytics accumulator for r candidate metadata.
+/// - `shift`: Whether to shift ciphertext by encrypted 2 before conversion.
 ///
 /// # Returns
 /// - `Result<Vec<Vec<bool>>, Box<dyn Error>>`: Oracle bit vectors or an error if none.
@@ -986,6 +1014,7 @@ fn collect_speculative_oracle_bits(
     k_oracles: usize,
     rng: &mut RngChoice,
     analytics: &Arc<Mutex<SessionAnalytics>>,
+    shift: bool,
 ) -> Result<Vec<Vec<bool>>, Box<dyn Error>> {
     if k_oracles == 0 {
         return Err("combiner_k_oracles must be >= 1".into());
@@ -1009,7 +1038,8 @@ fn collect_speculative_oracle_bits(
     let y = engine.rabin_exponent as u32;
     let n_pow_y = ctx.n.pow(y);
     let ciphertext = message.modpow(&ctx.e, &ctx.n);
-    let result_default = get_larger_number(&ciphertext, &ctx.n, y, true, false);
+    let shifted = maybe_shift_ciphertext(ctx, &ciphertext, shift);
+    let result_default = get_larger_number(&shifted, &ctx.n, y, true, false);
 
     let mut oracles = Vec::with_capacity(k_oracles.min(candidates.len()));
     for (r, factors) in candidates {
@@ -1155,6 +1185,7 @@ fn build_oracle_candidates(
 /// - `engine`: Engine configuration controlling HBC behavior.
 /// - `candidates`: Prepared r candidates to evaluate.
 /// - `message`: Reference message used for scoring.
+/// - `shift`: Whether to shift ciphertext by encrypted 2 before conversion.
 ///
 /// # Returns
 /// - `Option<CandidateScore>`: Best candidate score or `None` if no candidates are provided.
@@ -1166,6 +1197,7 @@ fn select_best_candidate(
     engine: &EngineConfig,
     candidates: &[OracleCandidate],
     message: &BigUint,
+    shift: bool,
 ) -> Option<CandidateScore> {
     if candidates.is_empty() {
         return None;
@@ -1174,7 +1206,8 @@ fn select_best_candidate(
     let y = engine.rabin_exponent as u32;
     let n_pow_y = ctx.n.pow(y);
     let ciphertext = message.modpow(&ctx.e, &ctx.n);
-    let result_default = get_larger_number(&ciphertext, &ctx.n, y, true, false);
+    let shifted = maybe_shift_ciphertext(ctx, &ciphertext, shift);
+    let result_default = get_larger_number(&shifted, &ctx.n, y, true, false);
 
     let mut best: Option<CandidateScore> = None;
     for candidate in candidates {
@@ -1215,6 +1248,7 @@ fn select_best_candidate(
 /// - `candidates`: Prepared r candidates to sample as oracles.
 /// - `iterations`: Number of message samples to evaluate.
 /// - `rng`: Random number generator for message sampling.
+/// - `shift`: Whether to shift ciphertext by encrypted 2 before conversion.
 ///
 /// # Returns
 /// - `Result<OracleEntropySeries, Box<dyn Error>>`: Entropy/accuracy series or an error.
@@ -1227,6 +1261,7 @@ fn run_oracle_entropy_timeline(
     candidates: &[OracleCandidate],
     iterations: usize,
     rng: &mut RngChoice,
+    shift: bool,
 ) -> Result<OracleEntropySeries, Box<dyn Error>> {
     if iterations == 0 {
         return Err("analysis tests iterations must be >= 1".into());
@@ -1258,7 +1293,8 @@ fn run_oracle_entropy_timeline(
     for idx in 0..iterations {
         let msg = sample_message_for_tests(engine, &ctx.n, &fixed_message, rng);
         let ciphertext = msg.modpow(&ctx.e, &ctx.n);
-        let result_default = get_larger_number(&ciphertext, &ctx.n, y, true, false);
+        let shifted = maybe_shift_ciphertext(ctx, &ciphertext, shift);
+        let result_default = get_larger_number(&shifted, &ctx.n, y, true, false);
 
         let mut oracles: Vec<Vec<bool>> = Vec::with_capacity(oracle_count);
         for candidate in candidates.iter().take(oracle_count) {
@@ -1326,6 +1362,7 @@ fn run_oracle_entropy_timeline(
 /// - `window`: Sliding window size for timeline frames.
 /// - `stride`: Step size between timeline frames.
 /// - `rng`: Random number generator for message sampling.
+/// - `shift`: Whether to shift ciphertext by encrypted 2 before conversion.
 ///
 /// # Returns
 /// - `Result<MatchTimelineSeries, Box<dyn Error>>`: Timeline series or an error.
@@ -1340,6 +1377,7 @@ fn run_match_entropy_timeline(
     window: usize,
     stride: usize,
     rng: &mut RngChoice,
+    shift: bool,
 ) -> Result<MatchTimelineSeries, Box<dyn Error>> {
     if iterations == 0 {
         return Err("analysis tests iterations must be >= 1".into());
@@ -1366,6 +1404,7 @@ fn run_match_entropy_timeline(
             &candidate.r_pow_y,
             y,
             false,
+            shift,
         );
 
         samples.push(MatchSample {
@@ -1441,6 +1480,7 @@ fn run_match_entropy_timeline(
 /// - `iterations`: Number of random messages to use for screening.
 /// - `top_k`: Number of top oracles to select per bit.
 /// - `rng`: Random number generator for message sampling.
+/// - `shift`: Whether to shift ciphertext by encrypted 2 before conversion.
 ///
 /// # Returns
 /// - `Result<(Vec<Vec<OracleBitSelection>>, Vec<f64>), Box<dyn Error>>`: Per-bit oracle selection and top match %.
@@ -1454,6 +1494,7 @@ fn screen_oracles_per_bit(
     iterations: usize,
     top_k: usize,
     rng: &mut RngChoice,
+    shift: bool,
 ) -> Result<(Vec<Vec<OracleBitSelection>>, Vec<f64>), Box<dyn Error>> {
     if iterations == 0 {
         return Err("oracle_screen_iterations must be >= 1".into());
@@ -1472,7 +1513,8 @@ fn screen_oracles_per_bit(
     for idx in 0..iterations {
         let msg = random_message_under_n(engine, &ctx.n, rng);
         let ciphertext = msg.modpow(&ctx.e, &ctx.n);
-        let result_default = get_larger_number(&ciphertext, &ctx.n, y, true, false);
+        let shifted = maybe_shift_ciphertext(ctx, &ciphertext, shift);
+        let result_default = get_larger_number(&shifted, &ctx.n, y, true, false);
         let message_bits = biguint_to_bits_le(&msg, bit_width);
         samples.push(OracleTrainingSample {
             result_default,
@@ -1555,6 +1597,7 @@ fn screen_oracles_per_bit(
 /// - `candidates`: Prepared r candidates to use as oracles.
 /// - `per_bit_oracles`: Per-bit oracle selection ranked by screening.
 /// - `message`: Reference message to compare against.
+/// - `shift`: Whether to shift ciphertext by encrypted 2 before conversion.
 ///
 /// # Returns
 /// - `Result<SpeculativeOracleReport, Box<dyn Error>>`: Reconstruction report or an error.
@@ -1567,6 +1610,7 @@ fn run_bitwise_speculative_oracle_attempt(
     candidates: &[OracleCandidate],
     per_bit_oracles: &[Vec<OracleBitSelection>],
     message: &BigUint,
+    shift: bool,
 ) -> Result<SpeculativeOracleReport, Box<dyn Error>> {
     if per_bit_oracles.is_empty() {
         return Err("per-bit oracle selection is empty".into());
@@ -1577,7 +1621,8 @@ fn run_bitwise_speculative_oracle_attempt(
     let y = engine.rabin_exponent as u32;
     let n_pow_y = ctx.n.pow(y);
     let ciphertext = message.modpow(&ctx.e, &ctx.n);
-    let result_default = get_larger_number(&ciphertext, &ctx.n, y, true, false);
+    let shifted = maybe_shift_ciphertext(ctx, &ciphertext, shift);
+    let result_default = get_larger_number(&shifted, &ctx.n, y, true, false);
 
     let mut unique_oracle_indices = std::collections::HashSet::new();
     for selections in per_bit_oracles {
@@ -1742,6 +1787,7 @@ fn plot_timeline_series(
 /// - `rng`: Random number generator for candidate/message sampling.
 /// - `export`: Whether to emit oracle entropy timeline charts.
 /// - `analytics`: Session analytics accumulator for timing and candidate metadata.
+/// - `shift`: Whether to shift ciphertext by encrypted 2 before conversion.
 ///
 /// # Returns
 /// - `Result<(), Box<dyn Error>>`: `Ok(())` if sufficient, otherwise an error.
@@ -1755,6 +1801,7 @@ fn run_information_sufficiency_tests(
     rng: &mut RngChoice,
     export: bool,
     analytics: &Arc<Mutex<SessionAnalytics>>,
+    shift: bool,
 ) -> Result<(), Box<dyn Error>> {
     let engine = &config.engine;
     let iterations = engine.analysis_tests_iterations as usize;
@@ -1767,7 +1814,7 @@ fn run_information_sufficiency_tests(
 
     println!("\nRunning analysis sufficiency tests...");
     let candidates = build_oracle_candidates(ctx, engine, rng, analytics)?;
-    let Some(best) = select_best_candidate(ctx, engine, &candidates, message) else {
+    let Some(best) = select_best_candidate(ctx, engine, &candidates, message, shift) else {
         return Err("failed to select a best r candidate for tests".into());
     };
     println!(
@@ -1793,7 +1840,8 @@ fn run_information_sufficiency_tests(
     });
 
     let (oracle_entropy_stats, oracle_accuracy_stats) = if export {
-        let oracle_series = run_oracle_entropy_timeline(ctx, engine, &candidates, iterations, rng)?;
+        let oracle_series =
+            run_oracle_entropy_timeline(ctx, engine, &candidates, iterations, rng, shift)?;
         if let Err(err) = plot_timeline_series(
             &oracle_series.entropy_mean,
             "analysis_tests",
@@ -1870,6 +1918,7 @@ fn run_information_sufficiency_tests(
         window,
         stride,
         rng,
+        shift,
     )?;
     if export {
         if let Err(err) = plot_timeline_series(
@@ -1953,8 +2002,15 @@ fn run_information_sufficiency_tests(
         screen_iterations,
         top_k.min(candidates.len())
     );
-    let (per_bit_oracles, top_match_pct) =
-        screen_oracles_per_bit(ctx, engine, &candidates, screen_iterations, top_k, rng)?;
+    let (per_bit_oracles, top_match_pct) = screen_oracles_per_bit(
+        ctx,
+        engine,
+        &candidates,
+        screen_iterations,
+        top_k,
+        rng,
+        shift,
+    )?;
     let mut inverted_total = 0usize;
     for selections in &per_bit_oracles {
         inverted_total += selections.iter().filter(|sel| sel.invert).count();
@@ -1971,8 +2027,14 @@ fn run_information_sufficiency_tests(
         );
     }
 
-    let speculative_report =
-        run_bitwise_speculative_oracle_attempt(ctx, engine, &candidates, &per_bit_oracles, message)?;
+    let speculative_report = run_bitwise_speculative_oracle_attempt(
+        ctx,
+        engine,
+        &candidates,
+        &per_bit_oracles,
+        message,
+        shift,
+    )?;
     
     println!(
         "Bitwise speculative oracle recovered (hex): {}",
@@ -2049,6 +2111,7 @@ fn run_information_sufficiency_tests(
 /// - `engine`: Engine configuration controlling export behavior.
 /// - `rng`: Random number generator used for sampling messages.
 /// - `analytics`: Session analytics accumulator for r candidate metadata.
+/// - `shift`: Whether to shift ciphertext by encrypted 2 before conversion.
 ///
 /// # Returns
 /// - `Result<(), Box<dyn Error>>`: `Ok(())` on success or an error on failure.
@@ -2060,6 +2123,7 @@ fn run_enciphered_export(
     engine: &EngineConfig,
     rng: &mut RngChoice,
     analytics: &Arc<Mutex<SessionAnalytics>>,
+    shift: bool,
 ) -> Result<(), Box<dyn Error>> {
     let iterations = engine.enciphered_export_iterations.max(1) as usize;
     let fixed_message = if engine.message.is_random {
@@ -2141,6 +2205,7 @@ fn run_enciphered_export(
                 &r_pow_y,
                 y,
                 false,
+                shift,
             );
 
             let finished = done.fetch_add(1, Ordering::Relaxed) + 1;
@@ -2676,6 +2741,7 @@ impl MatchHistogram {
 /// - `rng`: Random number generator for sampling messages/candidates.
 /// - `histogram`: Histogram updated with match frequencies.
 /// - `analytics`: Session analytics accumulator for r candidate metadata.
+/// - `shift`: Whether to shift ciphertext by encrypted 2 before conversion.
 ///
 /// # Returns
 /// - `Result<TestReport, Box<dyn Error>>`: Best matching report or an error.
@@ -2691,6 +2757,7 @@ fn run_message_trial(
     rng: &mut RngChoice,
     histogram: &mut MatchHistogram,
     analytics: &Arc<Mutex<SessionAnalytics>>,
+    shift: bool,
 ) -> Result<TestReport, Box<dyn Error>> {
     let attempts = min_message_trials.max(1);
     let mut best: Option<TestReport> = None;
@@ -2728,7 +2795,8 @@ fn run_message_trial(
             return Err("RSA round trip failed".into());
         }
 
-        let result_default = get_larger_number(&ciphertext, &ctx.n, y, true, false);
+        let shifted = maybe_shift_ciphertext(ctx, &ciphertext, shift);
+        let result_default = get_larger_number(&shifted, &ctx.n, y, true, false);
 
         let (attempt_best, attempt_worst, attempt_hist) = candidates
             .par_iter()
@@ -2874,6 +2942,7 @@ fn run_message_trial(
 /// - `label`: Label used for logging and output filenames.
 /// - `iterations`: Number of iterations to run.
 /// - `rng`: Random number generator for sampling messages.
+/// - `shift`: Whether to shift ciphertext by encrypted 2 before conversion.
 ///
 /// # Returns
 /// - `Option<(f64, f64, usize)>`: `(avg_bits, avg_overlap_pct, max_bits)` or `None` if skipped.
@@ -2887,6 +2956,7 @@ fn run_fixed_r_trials(
     label: &str,
     iterations: u64,
     rng: &mut RngChoice,
+    shift: bool,
 ) -> Option<(f64, f64, usize)> {
     if iterations == 0 {
         return None;
@@ -2930,6 +3000,7 @@ fn run_fixed_r_trials(
                 &r_pow_y,
                 y,
                 true,
+                shift,
             );
 
             let (matching_lsb, matching_total) = count_matching_bits(&dm, &msg);
@@ -3021,6 +3092,7 @@ fn run_fixed_r_trials(
 /// - `config`: Full configuration.
 /// - `engine`: Engine configuration controlling trial behavior.
 /// - `rng`: Random number generator for factorization/trials.
+/// - `shift`: Whether to shift ciphertext by encrypted 2 before conversion.
 ///
 /// # Returns
 /// - `()`: This function returns nothing.
@@ -3034,6 +3106,7 @@ fn run_r_stress_entry(
     config: &Config,
     engine: &EngineConfig,
     rng: &mut RngChoice,
+    shift: bool,
 ) {
     let deadline = Instant::now() + Duration::from_secs(10);
     let Some(factors) = factor_composite_with_timeout(r, rng, deadline) else {
@@ -3056,6 +3129,7 @@ fn run_r_stress_entry(
         label,
         engine.alt_iterations.max(1),
         rng,
+        shift,
     ) {
         println!(
             "{} r {} -> avg bits {:.4}, avg overlap {:.4}%, max bits {}",
@@ -3187,6 +3261,7 @@ fn hbc(x: &BigUint, r: &BigUint, p: &BigUint, engine: &EngineConfig) -> BigUint 
 /// - `r_pow_y`: Precomputed `r^y` value.
 /// - `y`: Rabin exponent used for modular transforms.
 /// - `use_other_root`: Whether to use the alternate square root branch.
+/// - `shift`: Whether to shift ciphertext by encrypted 2 before conversion.
 ///
 /// # Returns
 /// - `BigUint`: Derived candidate message modulo `n`.
@@ -3203,8 +3278,10 @@ fn derive_candidate_message(
     r_pow_y: &BigUint,
     y: u32,
     use_other_root: bool,
+    shift: bool,
 ) -> BigUint {
-    let result_default = get_larger_number(ciphertext, &ctx.n, y, true, use_other_root);
+    let shifted = maybe_shift_ciphertext(ctx, ciphertext, shift);
+    let result_default = get_larger_number(&shifted, &ctx.n, y, true, use_other_root);
     derive_candidate_message_from_result(
         ctx,
         engine,
@@ -3261,6 +3338,26 @@ fn derive_candidate_message_from_result(
     let mask = (BigUint::one() << width) - BigUint::one();
     let inverted_dm = &mask ^ &dm_raw;
     if engine.invert_bits { inverted_dm } else { dm_raw }
+}
+
+/// Applies the optional ciphertext shift by homomorphically multiplying by encrypted 2.
+///
+/// # Parameters
+/// - `ctx`: RSA context containing key material.
+/// - `ciphertext`: Ciphertext to optionally shift.
+/// - `shift`: Whether to apply the shift.
+///
+/// # Returns
+/// - `BigUint`: Shifted ciphertext when enabled, otherwise the original ciphertext.
+///
+/// # Expected Output
+/// - Returns a ciphertext value; no side effects.
+fn maybe_shift_ciphertext(ctx: &RSAContext, ciphertext: &BigUint, shift: bool) -> BigUint {
+    if !shift {
+        return ciphertext.clone();
+    }
+    let enc_two = BigUint::from(2u8).modpow(&ctx.e, &ctx.n);
+    (ciphertext * enc_two) % &ctx.n
 }
 
 #[allow(dead_code)]
@@ -3377,6 +3474,7 @@ mod tests {
             tests: false,
             export: false,
             session_json: "session.json".to_string(),
+            shift: false,
         };
         let analytics = Arc::new(Mutex::new(SessionAnalytics::new(AnalyticsCliArgs {
             bits: args.bits,
@@ -3388,6 +3486,7 @@ mod tests {
             tests: args.tests,
             export: args.export,
             session_json: args.session_json.clone(),
+            shift: args.shift,
         })));
         let result = run_message_trial(
             &ctx,
@@ -3398,6 +3497,7 @@ mod tests {
             &mut rng,
             &mut hist,
             &analytics,
+            args.shift,
         );
         if let Err(err) = &result {
             println!("r candidates success test failed: {}", err);
@@ -3446,6 +3546,7 @@ mod tests {
             tests: false,
             export: false,
             session_json: "session.json".to_string(),
+            shift: false,
         };
         let analytics = Arc::new(Mutex::new(SessionAnalytics::new(AnalyticsCliArgs {
             bits: args.bits,
@@ -3457,6 +3558,7 @@ mod tests {
             tests: args.tests,
             export: args.export,
             session_json: args.session_json.clone(),
+            shift: args.shift,
         })));
         let result = run_message_trial(
             &ctx,
@@ -3467,6 +3569,7 @@ mod tests {
             &mut rng,
             &mut hist,
             &analytics,
+            args.shift,
         );
         if let Err(err) = &result {
             println!("Expected r candidate failure: {}", err);

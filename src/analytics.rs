@@ -29,6 +29,8 @@ pub struct AnalyticsCliArgs {
     pub export: bool,
     /// Output path for the session JSON file.
     pub session_json: String,
+    /// Whether ciphertext shifting is enabled.
+    pub shift: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -42,6 +44,7 @@ struct AnalyticsCliInfo {
     tests: bool,
     export: bool,
     session_json: String,
+    shift: bool,
 }
 
 /// Timing entry for a named step.
@@ -143,6 +146,7 @@ impl SessionAnalytics {
                 tests: args.tests,
                 export: args.export,
                 session_json: args.session_json,
+                shift: args.shift,
             },
             steps: Vec::new(),
             step_summaries: Vec::new(),
