@@ -2,7 +2,7 @@
 set -euo pipefail
 
 RUNS=${RUNS:-100}
-CONFIG=${CONFIG:-"rsa_config_base_256.json"}
+CONFIG=${CONFIG:-"rsa_config_demo.json"}
 SCRIPT_LOG=${SCRIPT_LOG:-"logs_demo_script.log"}
 RESUME=${RESUME:-0}
 PLAINTEXT_HEX=${PLAINTEXT_HEX:-""}
@@ -71,7 +71,7 @@ for i in $(seq 1 "${RUNS}"); do
     exit 1
   fi
 
-  cargo run --bin demo -- --config "${CONFIG}" --decrypt --ciphertext "${ciphertext_hex}" | tee "${decrypt_output}"
+  cargo run --bin demo -- --config "${CONFIG}" --decrypt --ciphertext "0x${ciphertext_hex}" | tee "${decrypt_output}"
   best_case_hex=$(grep -m1 "Recovered (best-case) hex:" "${decrypt_output}" | awk '{print $4}')
   majority_hex=$(grep -m1 "Recovered (majority) hex:" "${decrypt_output}" | awk '{print $4}')
 
