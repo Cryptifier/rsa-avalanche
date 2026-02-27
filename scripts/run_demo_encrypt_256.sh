@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-RUNS=${RUNS:-10}
+RUNS=${RUNS:-100}
 CONFIG=${CONFIG:-"rsa_config_base_256.json"}
 SCRIPT_LOG=${SCRIPT_LOG:-"logs_demo_script.log"}
 RESUME=${RESUME:-0}
@@ -30,6 +30,11 @@ progress_bar() {
   pad=$(printf "%${empty}s" "")
   printf "\r${BLUE}[%-${width}s]${RESET} %3d%% (%d/%d)" "${bar}${pad}" "${percent}" "${current}" "${total}"
 }
+
+best_sum=0
+best_count=0
+major_sum=0
+major_count=0
 
 if [[ -z "${PLAINTEXT_HEX}" ]]; then
   if command -v python3 >/dev/null 2>&1; then
@@ -73,15 +78,41 @@ for i in $(seq 1 "${RUNS}"); do
   if [[ -x "${DIFF_SCRIPT}" ]]; then
     if [[ -n "${best_case_hex}" ]]; then
       echo "Best-case vs plaintext bit diff:"
-      "${DIFF_SCRIPT}" "0x${PLAINTEXT_HEX}" "${best_case_hex}"
+      diff_out="$("${DIFF_SCRIPT}" "0x${PLAINTEXT_HEX}" "${best_case_hex}")"
+      echo "${diff_out}"
+      match_line=$(echo "${diff_out}" | grep -m1 "^Match:")
+      match_pct=$(echo "${match_line}" | awk '{print $2}' | tr -d '%')
+      if [[ -n "${match_pct}" ]]; then
+        best_sum=$(awk -v s="${best_sum}" -v v="${match_pct}" 'BEGIN { printf "%.6f", s + v }')
+        best_count=$((best_count + 1))
+      fi
     fi
     if [[ -n "${majority_hex}" ]]; then
       echo "Majority vs plaintext bit diff:"
-      "${DIFF_SCRIPT}" "0x${PLAINTEXT_HEX}" "${majority_hex}"
+      diff_out="$("${DIFF_SCRIPT}" "0x${PLAINTEXT_HEX}" "${majority_hex}")"
+      echo "${diff_out}"
+      match_line=$(echo "${diff_out}" | grep -m1 "^Match:")
+      match_pct=$(echo "${match_line}" | awk '{print $2}' | tr -d '%')
+      if [[ -n "${match_pct}" ]]; then
+        major_sum=$(awk -v s="${major_sum}" -v v="${match_pct}" 'BEGIN { printf "%.6f", s + v }')
+        major_count=$((major_count + 1))
+      fi
     fi
   else
     echo "Diff script not found or not executable: ${DIFF_SCRIPT}" >&2
   fi
+
+  if [[ "${best_count}" -gt 0 ]]; then
+    best_avg=$(awk -v s="${best_sum}" -v n="${best_count}" 'BEGIN { printf "%.2f", s / n }')
+  else
+    best_avg="N/A"
+  fi
+  if [[ "${major_count}" -gt 0 ]]; then
+    major_avg=$(awk -v s="${major_sum}" -v n="${major_count}" 'BEGIN { printf "%.2f", s / n }')
+  else
+    major_avg="N/A"
+  fi
+  echo "Running averages: best-case ${best_avg}%, majority ${major_avg}%"
 
   rm -f "${encrypt_output}" "${decrypt_output}"
   progress_bar "${i}" "${RUNS}"
