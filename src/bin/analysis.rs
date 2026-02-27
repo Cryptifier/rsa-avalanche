@@ -1726,6 +1726,176 @@ fn run_bitwise_speculative_oracle_attempt(
     })
 }
 
+/// Computes per-bit best-case match percentages for a target message.
+///
+/// # Parameters
+/// - `ctx`: RSA context containing key material.
+/// - `engine`: Engine configuration controlling HBC behavior.
+/// - `candidates`: Prepared r candidates to use as oracles.
+/// - `per_bit_oracles`: Per-bit oracle selection ranked by screening.
+/// - `message`: Reference message to compare against.
+/// - `shift`: Whether to shift ciphertext by encrypted 2 before conversion.
+///
+/// # Returns
+/// - `Result<(Vec<f64>, Vec<bool>), Box<dyn Error>>`: Per-bit match percentages and best-case bits.
+///
+/// # Expected Output
+/// - Returns per-bit match percentages; no side effects.
+fn compute_per_bit_best_case_match(
+    ctx: &RSAContext,
+    engine: &EngineConfig,
+    candidates: &[OracleCandidate],
+    per_bit_oracles: &[Vec<OracleBitSelection>],
+    message: &BigUint,
+    shift: bool,
+) -> Result<(Vec<f64>, Vec<bool>), Box<dyn Error>> {
+    if per_bit_oracles.is_empty() {
+        return Err("per-bit oracle selection is empty".into());
+    }
+
+    let bit_width = message.bits().max(1) as usize;
+    let y = engine.rabin_exponent as u32;
+    let n_pow_y = ctx.n.pow(y);
+    let ciphertext = message.modpow(&ctx.e, &ctx.n);
+    let shifted = maybe_shift_ciphertext(ctx, &ciphertext, shift);
+    let result_default = get_larger_number(&shifted, &ctx.n, y, true, false);
+    let message_bits = biguint_to_bits_le(message, bit_width);
+
+    let mut unique_oracle_indices = std::collections::HashSet::new();
+    for selections in per_bit_oracles {
+        for selection in selections {
+            unique_oracle_indices.insert(selection.oracle_idx);
+        }
+    }
+
+    let mut oracle_bits: Vec<Option<Vec<bool>>> = vec![None; candidates.len()];
+    for oracle_idx in unique_oracle_indices.iter().copied() {
+        let candidate = &candidates[oracle_idx];
+        let dm = derive_candidate_message_from_result(
+            ctx,
+            engine,
+            &result_default,
+            &candidate.r,
+            &candidate.d_new,
+            &n_pow_y,
+            &candidate.r_pow_y,
+            y,
+            false,
+        );
+        oracle_bits[oracle_idx] = Some(biguint_to_bits_le(&dm, bit_width));
+    }
+
+    let mut per_bit_pct = Vec::with_capacity(bit_width);
+    let mut best_case_bits = Vec::with_capacity(bit_width);
+    for (bit_idx, selections) in per_bit_oracles.iter().enumerate().take(bit_width) {
+        let target = message_bits[bit_idx];
+        let mut matched = false;
+        let mut selected_bit = false;
+        for selection in selections {
+            if let Some(bits) = oracle_bits
+                .get(selection.oracle_idx)
+                .and_then(|entry| entry.as_ref())
+            {
+                let bit = if selection.invert { !bits[bit_idx] } else { bits[bit_idx] };
+                if bit == target {
+                    matched = true;
+                    selected_bit = bit;
+                    break;
+                }
+                if !matched {
+                    selected_bit = bit;
+                }
+            }
+        }
+        per_bit_pct.push(if matched { 100.0 } else { 0.0 });
+        best_case_bits.push(selected_bit);
+    }
+
+    Ok((per_bit_pct, best_case_bits))
+}
+
+/// Prints hex strings for the original and best-case messages with color-coded matches.
+///
+/// # Parameters
+/// - `message`: Original message value.
+/// - `best_case_bits`: Best-case bit vector aligned to the original message.
+///
+/// # Returns
+/// - `()`: This function returns nothing.
+///
+/// # Expected Output
+/// - Prints two hex strings with color highlighting; no file output.
+fn print_best_case_hex(message: &BigUint, best_case_bits: &[bool]) {
+    let best_case = bits_le_to_biguint(best_case_bits);
+    let original_hex = to_hex(message);
+    let best_hex = to_hex(&best_case);
+
+    let max_len = original_hex.len().max(best_hex.len());
+    let original_padded = pad_left_hex(&original_hex, max_len);
+    let best_padded = pad_left_hex(&best_hex, max_len);
+
+    let original_colored = colorize_hex_matches(&original_padded, &best_padded);
+    let best_colored = colorize_hex_matches(&best_padded, &original_padded);
+
+    println!("Original message (hex): {}", original_colored);
+    println!("Best-case message (hex): {}", best_colored);
+    println!("Hex match key: green = match, red = mismatch");
+}
+
+/// Pads a hex string with leading zeros to the requested length.
+///
+/// # Parameters
+/// - `value`: Hex string to pad (no 0x prefix).
+/// - `width`: Target width for the output.
+///
+/// # Returns
+/// - `String`: Left-padded hex string.
+///
+/// # Expected Output
+/// - Returns a padded string; no side effects.
+fn pad_left_hex(value: &str, width: usize) -> String {
+    if value.len() >= width {
+        return value.to_string();
+    }
+    let mut padded = String::with_capacity(width);
+    for _ in 0..(width - value.len()) {
+        padded.push('0');
+    }
+    padded.push_str(value);
+    padded
+}
+
+/// Applies ANSI color highlighting for matching hex characters.
+///
+/// # Parameters
+/// - `value`: Hex string to colorize.
+/// - `reference`: Hex string to compare against.
+///
+/// # Returns
+/// - `String`: Colorized string with ANSI escapes.
+///
+/// # Expected Output
+/// - Returns a colorized string; no side effects.
+fn colorize_hex_matches(value: &str, reference: &str) -> String {
+    const GREEN: &str = "\u{1b}[32m";
+    const RED: &str = "\u{1b}[31m";
+    const RESET: &str = "\u{1b}[0m";
+
+    let mut out = String::new();
+    for (a, b) in value.chars().zip(reference.chars()) {
+        if a == b {
+            out.push_str(GREEN);
+            out.push(a);
+            out.push_str(RESET);
+        } else {
+            out.push_str(RED);
+            out.push(a);
+            out.push_str(RESET);
+        }
+    }
+    out
+}
+
 /// Sanitizes a label for use in output filenames.
 ///
 /// # Parameters
@@ -2061,6 +2231,26 @@ fn run_information_sufficiency_tests(
             inverted_total
         );
     }
+
+    let (per_bit_best_pct, best_case_bits) = compute_per_bit_best_case_match(
+        ctx,
+        engine,
+        &candidates,
+        &per_bit_oracles,
+        message,
+        shift,
+    )?;
+    if let Some(stats) = compute_stats(&per_bit_best_pct) {
+        println!(
+            "Per-bit best-case match % on original message: mean {:.2}, std dev {:.2}, min {:.2}, max {:.2}, n {}",
+            stats.mean,
+            stats.stddev,
+            stats.min,
+            stats.max,
+            stats.count
+        );
+    }
+    print_best_case_hex(message, &best_case_bits);
 
     let speculative_report = run_bitwise_speculative_oracle_attempt(
         ctx,
