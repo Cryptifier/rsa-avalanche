@@ -127,38 +127,6 @@ pub fn generate_r_candidates_from_small_primes(
         .max_factors_per_candidate
         .max(min_small_factors + 1);
 
-    let Some(target_bits) = target_bits else {
-        return Vec::new();
-    };
-
-    if target_bits == 0 || max_factors <= min_small_factors {
-        return Vec::new();
-    }
-
-    let min_factor = settings.process_min_factor.clone();
-    let mut primes: Vec<BigUint> = settings
-        .small_primes
-        .iter()
-        .filter(|p| *p >= &min_factor)
-        .cloned()
-        .collect();
-    primes.sort();
-
-    if primes.len() < min_small_factors {
-        return Vec::new();
-    }
-
-    let max_small_prime = primes
-        .last()
-        .cloned()
-        .unwrap_or_else(|| BigUint::from(2u8));
-    let min_large_value = if max_small_prime >= min_factor {
-        &max_small_prime + BigUint::one()
-    } else {
-        min_factor.clone()
-    };
-    let min_large_bits = min_large_value.bits().max(2);
-
     let mut collected: Vec<(BigUint, Vec<(BigUint, u64)>)> = Vec::new();
     let mut seen: HashSet<String> = HashSet::new();
 
@@ -194,6 +162,38 @@ pub fn generate_r_candidates_from_small_primes(
             settings.reuse_r_candidates_path
         );
     }
+
+    let Some(target_bits) = target_bits else {
+        return collected;
+    };
+
+    if target_bits == 0 || max_factors <= min_small_factors {
+        return collected;
+    }
+
+    let min_factor = settings.process_min_factor.clone();
+    let mut primes: Vec<BigUint> = settings
+        .small_primes
+        .iter()
+        .filter(|p| *p >= &min_factor)
+        .cloned()
+        .collect();
+    primes.sort();
+
+    if primes.len() < min_small_factors {
+        return collected;
+    }
+
+    let max_small_prime = primes
+        .last()
+        .cloned()
+        .unwrap_or_else(|| BigUint::from(2u8));
+    let min_large_value = if max_small_prime >= min_factor {
+        &max_small_prime + BigUint::one()
+    } else {
+        min_factor.clone()
+    };
+    let min_large_bits = min_large_value.bits().max(2);
 
     let remaining = target_count.saturating_sub(collected.len());
     if remaining == 0 {
