@@ -21,6 +21,7 @@ use clap::Parser;
 use num_bigint::BigUint;
 use num_traits::{One, Zero};
 use rand::RngCore;
+use serde::Serialize;
 use serde_json::json;
 use rsademo::analytics::{
     AnalyticsCliArgs, SessionAnalytics, generate_r_candidates_with_analytics, write_session_json,
@@ -678,6 +679,15 @@ struct StatSummary {
     count: usize,
 }
 
+#[derive(Debug, Serialize)]
+struct BitSimilarityEntry {
+    index: usize,
+    r: String,
+    candidate_hex: String,
+    match_pct: f64,
+    matching_bits: usize,
+}
+
 /// Computes mean, standard deviation, min, and max for a slice of values.
 ///
 /// # Parameters
@@ -721,6 +731,74 @@ fn compute_stats(values: &[f64]) -> Option<StatSummary> {
         max,
         count,
     })
+}
+
+/// Builds per-candidate bit similarity entries for a fixed message.
+///
+/// # Parameters
+/// - `ctx`: RSA context containing key material.
+/// - `engine`: Engine configuration controlling HBC behavior.
+/// - `candidates`: Prepared r candidates to evaluate.
+/// - `message`: Reference message used for bit comparisons.
+/// - `shift`: Whether to shift ciphertext by encrypted 2 before conversion.
+///
+/// # Returns
+/// - `Vec<BitSimilarityEntry>`: Per-candidate similarity entries.
+///
+/// # Expected Output
+/// - Returns entries describing per-candidate bit matches; no stdout/stderr output.
+fn build_bit_similarity_entries(
+    ctx: &RSAContext,
+    engine: &EngineConfig,
+    candidates: &[OracleCandidate],
+    message: &BigUint,
+    shift: bool,
+) -> Vec<BitSimilarityEntry> {
+    if candidates.is_empty() {
+        return Vec::new();
+    }
+
+    let bit_width = message.bits().max(1) as usize;
+    let message_bits = biguint_to_bits_le(message, bit_width);
+
+    let y = engine.rabin_exponent as u32;
+    let n_pow_y = ctx.n.pow(y);
+    let ciphertext = message.modpow(&ctx.e, &ctx.n);
+    let shifted = maybe_shift_ciphertext(ctx, &ciphertext, shift);
+    let result_default = get_larger_number(&shifted, &ctx.n, y, true, false);
+
+    candidates
+        .iter()
+        .enumerate()
+        .map(|(index, candidate)| {
+            let dm = derive_candidate_message_from_result(
+                ctx,
+                engine,
+                &result_default,
+                &candidate.r,
+                &candidate.d_new,
+                &n_pow_y,
+                &candidate.r_pow_y,
+                y,
+                false,
+            );
+            let dm_bits = biguint_to_bits_le(&dm, bit_width);
+            let matching_bits = dm_bits
+                .iter()
+                .zip(message_bits.iter())
+                .filter(|(a, b)| a == b)
+                .count();
+            let denom = bit_width.max(1) as f64;
+            let match_pct = matching_bits as f64 / denom * 100.0;
+            BitSimilarityEntry {
+                index,
+                r: candidate.r.to_string(),
+                candidate_hex: to_hex(&dm),
+                match_pct,
+                matching_bits,
+            }
+        })
+        .collect()
 }
 
 /// Writes a histogram image for overlap percentages.
@@ -2251,6 +2329,21 @@ fn run_information_sufficiency_tests(
         );
     }
     print_best_case_hex(message, &best_case_bits);
+
+    let bit_similarity_entries =
+        build_bit_similarity_entries(ctx, engine, &candidates, message, shift);
+    with_analytics(analytics, |a| {
+        a.set_feature_stat(
+            "information_sufficiency",
+            "bit_similarity",
+            json!({
+                "bit_order": "lsb0",
+                "bit_width": message.bits().max(1),
+                "original_hex": to_hex(message),
+                "candidates": bit_similarity_entries,
+            }),
+        );
+    });
 
     let speculative_report = run_bitwise_speculative_oracle_attempt(
         ctx,
