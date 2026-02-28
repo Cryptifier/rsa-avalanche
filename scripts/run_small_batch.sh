@@ -8,6 +8,7 @@ ANALYSIS_LOG=${ANALYSIS_LOG:-"logs_current.log"}
 SCRIPT_LOG=${SCRIPT_LOG:-"logs_current_script.log"}
 RESUME=${RESUME:-0}
 ANALYSIS_EXTRA_ARGS=${ANALYSIS_EXTRA_ARGS:-}
+LOG_DIR=${LOG_DIR:-"logs"}
 
 read -r -a EXTRA_ARGS <<< "${ANALYSIS_EXTRA_ARGS}"
 
@@ -48,16 +49,19 @@ fail_count=0
 total_ns=0
 
 echo "Running ${RUNS} iterations with config ${CONFIG}"
+mkdir -p "${LOG_DIR}"
+run_stamp=$(date +"%Y%m%d_%H%M%S")
 
 for i in $(seq 1 "${RUNS}"); do
   seed=$((SEED_START + i - 1))
   run_output="$(mktemp)"
   start_ns=$(date +%s%N)
+  session_path="${LOG_DIR}/session_${run_stamp}_seed_${seed}.json"
 
   echo ""
   echo "===== RUN ${i} (seed ${seed}) ====="
   set +e
-  cargo run --bin analysis -- --bits 56 --seed "${seed}" -c "${CONFIG}" --tests --crypto-rng "${EXTRA_ARGS[@]}" \
+  cargo run --bin analysis -- --bits 56 --seed "${seed}" -c "${CONFIG}" --tests --crypto-rng --session-json "${session_path}" "${EXTRA_ARGS[@]}" \
     2>&1 | tee -a "${ANALYSIS_LOG}" | tee "${run_output}" > /dev/null
   status=$?
   set -e

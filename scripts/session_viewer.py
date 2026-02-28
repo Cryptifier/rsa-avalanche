@@ -66,6 +66,46 @@ def hex_to_bits_le(hex_str, bit_width):
     return bits
 
 
+def empty_session():
+    return {
+        "started_unix_ms": None,
+        "finished_unix_ms": None,
+        "cli": {},
+        "features": [],
+        "r_candidate_batches": [],
+        "errors": [],
+    }
+
+
+def collect_log_paths(default_paths, log_dir):
+    seen = set()
+    results = []
+    for path in default_paths:
+        if not path:
+            continue
+        full = os.path.abspath(path)
+        if os.path.exists(full) and full not in seen:
+            results.append(full)
+            seen.add(full)
+
+    if log_dir and os.path.isdir(log_dir):
+        entries = []
+        for name in os.listdir(log_dir):
+            if not (name.endswith(".json") or name.endswith(".log")):
+                continue
+            full = os.path.abspath(os.path.join(log_dir, name))
+            try:
+                mtime = os.path.getmtime(full)
+            except OSError:
+                mtime = 0
+            entries.append((mtime, full))
+        for _mtime, full in sorted(entries, key=lambda item: item[0], reverse=True):
+            if full not in seen:
+                results.append(full)
+                seen.add(full)
+    return results
+
+
 class BitSimilarityCanvas(QtWidgets.QAbstractScrollArea):
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -366,7 +406,7 @@ class SessionFileWatcher(QtCore.QObject):
 
     def __init__(self, path, parent=None):
         super().__init__(parent)
-        self._path = os.path.abspath(path)
+        self._path = ""
         self._watcher = QtCore.QFileSystemWatcher(self)
         self._watcher.fileChanged.connect(self._schedule_reload)
         self._watcher.directoryChanged.connect(self._schedule_reload)
@@ -376,7 +416,7 @@ class SessionFileWatcher(QtCore.QObject):
         self._debounce.setInterval(300)
         self._debounce.timeout.connect(self._reload)
 
-        self._watch_paths()
+        self.set_path(path)
 
     def _watch_paths(self):
         if self._watcher.files():
@@ -384,6 +424,8 @@ class SessionFileWatcher(QtCore.QObject):
         if self._watcher.directories():
             self._watcher.removePaths(self._watcher.directories())
 
+        if not self._path:
+            return
         directory = os.path.dirname(self._path) or "."
         self._watcher.addPath(directory)
         if os.path.exists(self._path):
@@ -394,6 +436,8 @@ class SessionFileWatcher(QtCore.QObject):
 
     def _reload(self):
         self._watch_paths()
+        if not self._path:
+            return
         try:
             session = load_session(self._path)
         except (OSError, json.JSONDecodeError) as exc:
@@ -401,16 +445,86 @@ class SessionFileWatcher(QtCore.QObject):
             return
         self.session_updated.emit(session)
 
+    def set_path(self, path):
+        self._path = os.path.abspath(path) if path else ""
+        self._watch_paths()
+
 
 class SessionViewer(QtWidgets.QMainWindow):
-    def __init__(self, session, session_path, parent=None):
+    def __init__(self, session, session_path, log_dir, default_paths, parent=None):
         super().__init__(parent)
-        self._session_path = session_path
+        self._session_path = os.path.abspath(session_path) if session_path else ""
+        self._default_paths = [p for p in (default_paths or []) if p]
+        self._log_dir = os.path.abspath(log_dir) if log_dir else ""
+        self._current_session_path = self._session_path
+
         self._tabs = QtWidgets.QTabWidget()
-        self.setCentralWidget(self._tabs)
+        self._log_list = QtWidgets.QListWidget()
+        self._log_list.setSelectionMode(QtWidgets.QAbstractItemView.SelectionMode.SingleSelection)
+        self._log_list.currentItemChanged.connect(self._on_log_selected)
+
+        splitter = QtWidgets.QSplitter()
+        splitter.addWidget(self._log_list)
+        splitter.addWidget(self._tabs)
+        splitter.setStretchFactor(0, 0)
+        splitter.setStretchFactor(1, 1)
+        splitter.setCollapsible(0, False)
+        splitter.setSizes([240, 960])
+        self.setCentralWidget(splitter)
+
         self.setStatusBar(QtWidgets.QStatusBar())
         self.setWindowTitle("RSA Session Viewer")
-        self.resize(1200, 720)
+        self.resize(1280, 760)
+
+        self._file_watcher = SessionFileWatcher(self._current_session_path, self)
+        self._file_watcher.session_updated.connect(self.reload_session)
+        self._file_watcher.error.connect(lambda msg: self.set_status(f"Reload failed: {msg}"))
+
+        self._dir_watcher = QtCore.QFileSystemWatcher(self)
+        self._dir_watcher.directoryChanged.connect(self.refresh_log_list)
+
+        self.refresh_log_list(select_path=self._current_session_path)
+        self.reload_session(session)
+
+    def refresh_log_list(self, *_args, select_path=None):
+        log_paths = collect_log_paths(self._default_paths, self._log_dir)
+        if self._log_dir and os.path.isdir(self._log_dir):
+            if self._log_dir not in self._dir_watcher.directories():
+                self._dir_watcher.addPath(self._log_dir)
+
+        current = select_path or self._current_session_path
+        self._log_list.blockSignals(True)
+        self._log_list.clear()
+        for path in log_paths:
+            item = QtWidgets.QListWidgetItem(os.path.basename(path))
+            item.setToolTip(path)
+            item.setData(QtCore.Qt.ItemDataRole.UserRole, path)
+            self._log_list.addItem(item)
+        self._log_list.blockSignals(False)
+
+        if log_paths:
+            selected_path = current if current in log_paths else log_paths[0]
+            for idx in range(self._log_list.count()):
+                item = self._log_list.item(idx)
+                if item.data(QtCore.Qt.ItemDataRole.UserRole) == selected_path:
+                    self._log_list.setCurrentItem(item)
+                    break
+        else:
+            self._current_session_path = ""
+
+    def _on_log_selected(self, current, _previous):
+        if current is None:
+            return
+        path = current.data(QtCore.Qt.ItemDataRole.UserRole)
+        if not path:
+            return
+        self._current_session_path = path
+        self._file_watcher.set_path(path)
+        try:
+            session = load_session(path)
+        except (OSError, json.JSONDecodeError) as exc:
+            self.set_status(f"Failed to load {os.path.basename(path)}: {exc}")
+            return
         self.reload_session(session)
 
     def reload_session(self, session):
@@ -421,9 +535,10 @@ class SessionViewer(QtWidgets.QMainWindow):
         self._tabs.addTab(self._build_bit_similarity_tab(session), "Bit Similarity")
         if self._tabs.count():
             self._tabs.setCurrentIndex(min(current_index, self._tabs.count() - 1))
-        self.set_status(
-            f"Loaded {os.path.basename(self._session_path)} at {datetime.now().isoformat(sep=' ', timespec='seconds')}"
-        )
+        if self._current_session_path:
+            self.set_status(
+                f"Loaded {os.path.basename(self._current_session_path)} at {datetime.now().isoformat(sep=' ', timespec='seconds')}"
+            )
 
     def set_status(self, message):
         status = self.statusBar()
@@ -540,27 +655,35 @@ def main():
     parser.add_argument(
         "session",
         nargs="?",
-        default="session.json",
-        help="Path to session.json (default: session.json)",
+        default="session.log",
+        help="Path to session log (default: session.log)",
+    )
+    parser.add_argument(
+        "--log-dir",
+        default="logs",
+        help="Directory containing session logs (default: ./logs)",
     )
     args = parser.parse_args()
     session_path = args.session
+    log_dir = args.log_dir
+
+    default_candidates = [session_path]
+    if session_path == "session.log":
+        default_candidates.append("session.json")
+    log_paths = collect_log_paths(default_candidates, log_dir)
+    if log_paths:
+        session_path = log_paths[0]
 
     try:
         session = load_session(session_path)
     except FileNotFoundError:
-        print(f"session file not found: {session_path}", file=sys.stderr)
-        return 1
+        session = empty_session()
     except json.JSONDecodeError as exc:
         print(f"failed to parse session file: {exc}", file=sys.stderr)
-        return 1
+        session = empty_session()
 
     app = QtWidgets.QApplication(sys.argv)
-    viewer = SessionViewer(session, session_path)
-
-    watcher = SessionFileWatcher(session_path)
-    watcher.session_updated.connect(viewer.reload_session)
-    watcher.error.connect(lambda msg: viewer.set_status(f"Reload failed: {msg}"))
+    viewer = SessionViewer(session, session_path, log_dir, default_candidates)
 
     viewer.show()
     return app.exec()
