@@ -235,6 +235,24 @@ class BitSimilarityCanvas(QtWidgets.QAbstractScrollArea):
                 painter.fillRect(x, y1, self._bit_size, self._bit_size, color1)
                 painter.fillRect(x, y2, self._bit_size, self._bit_size, color2)
 
+                text1 = "1" if orig_bit else "0"
+                text2 = "1" if cand_bit else "0"
+                text_color1 = QtGui.QColor(255, 255, 255) if orig_bit else QtGui.QColor(0, 0, 0)
+                text_color2 = QtGui.QColor(255, 255, 255) if cand_bit else QtGui.QColor(0, 0, 0)
+
+                painter.setPen(text_color1)
+                painter.drawText(
+                    QtCore.QRectF(x, y1, self._bit_size, self._bit_size),
+                    QtCore.Qt.AlignmentFlag.AlignCenter,
+                    text1,
+                )
+                painter.setPen(text_color2)
+                painter.drawText(
+                    QtCore.QRectF(x, y2, self._bit_size, self._bit_size),
+                    QtCore.Qt.AlignmentFlag.AlignCenter,
+                    text2,
+                )
+
         painter.end()
 
 
