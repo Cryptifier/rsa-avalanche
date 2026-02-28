@@ -79,7 +79,7 @@ class BitSimilarityCanvas(QtWidgets.QAbstractScrollArea):
 
         self._margin = 8
         self._label_width = 90
-        self._bit_size = 6
+        self._bit_size = 10
         self._bit_spacing = 1
         self._row_spacing = 8
         self._header_height = 18
@@ -168,6 +168,7 @@ class BitSimilarityCanvas(QtWidgets.QAbstractScrollArea):
         painter = QtGui.QPainter(self.viewport())
         painter.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing, False)
         painter.fillRect(self.viewport().rect(), self.palette().base())
+        base_font = painter.font()
 
         if self._display_count == 0:
             painter.setPen(self._text_color)
@@ -214,6 +215,9 @@ class BitSimilarityCanvas(QtWidgets.QAbstractScrollArea):
             original_bits = self._original_bits
             candidate_bits = self._candidate_bits(entry_idx)
             max_bits = self._bit_width
+            small_font = QtGui.QFont(base_font)
+            small_font.setPixelSize(max(4, int(self._bit_size * 0.5)))
+            painter.setFont(small_font)
 
             for bit_idx in range(max_bits):
                 orig_bit = original_bits[bit_idx] if bit_idx < len(original_bits) else False
@@ -253,6 +257,8 @@ class BitSimilarityCanvas(QtWidgets.QAbstractScrollArea):
                     text2,
                 )
 
+            painter.setFont(base_font)
+
         painter.end()
 
 
@@ -278,7 +284,6 @@ class BitSimilarityTab(QtWidgets.QWidget):
         self._rows_spin.valueChanged.connect(self._rebuild_rows)
 
         self._show_all = QtWidgets.QCheckBox("Show all rows")
-        self._show_all.stateChanged.connect(self._toggle_show_all)
         self._show_all.setChecked(True)
 
         control_row.addWidget(QtWidgets.QLabel("Start index:"))
@@ -294,6 +299,8 @@ class BitSimilarityTab(QtWidgets.QWidget):
 
         self._canvas = BitSimilarityCanvas()
         layout.addWidget(self._canvas, 1)
+
+        self._show_all.stateChanged.connect(self._toggle_show_all)
 
         legend = QtWidgets.QLabel("Green = match, Red = mismatch. LSB-first bit order.")
         legend.setStyleSheet("color: #555;")
