@@ -17,6 +17,7 @@ Proof of concept by Nicholas LaRoche <nicholas.louis.laroche@outlook.com>.
 - Use Linux and install Rust.
 ```bash
 cargo build --bin analysis
+cargo build --bin demo
 cargo run --bin analysis | tee output.txt
 ```
 
@@ -25,11 +26,30 @@ cargo run --bin analysis | tee output.txt
 cargo run --bin analysis -- --config rsa_config.json
 ```
 
-- `-b, --bits <u32>`: Bit-length for generated primes when `rsa_keypair.generate` is `true`. Default `56` (range `16..=63`).
+- `-b, --bits <u32>`: Bit-length for generated primes when `rsa_keypair.generate` is `true`. Default `56` (range `16..=8192`).
 - `-m, --message <STRING>`: Plaintext override; supersedes `engine.message.*`.
 - `-e, --public-exponent <u64>`: Public exponent seed. Default `65537`. If left at default, `rsa_keypair.e` from the config is used.
 - `--seed <u64>`: Optional RNG seed for deterministic key generation.
+- `--crypto-rng`: Use cryptographic RNGs for sampling and candidate generation.
 - `-c, --config <PATH>`: JSON/JSON5 config path. Default `rsa_config.json`.
+- `--tests`: Run extended analysis tests and sufficiency checks.
+- `--export`: Export oracle entropy timeline charts and enciphered CSV artifacts.
+- `--session-json <PATH>`: Output analytics session JSON. Default `session.json`.
+- `--shift`: Multiply ciphertext by encrypted 2 before base conversion.
+
+# Command Line (demo)
+```bash
+cargo run --bin demo -- --encrypt --plaintext-hex 74657374
+cargo run --bin demo -- --decrypt --ciphertext 0x1234
+```
+
+- `-c, --config <PATH>`: JSON/JSON5 config path. Default `rsa_config.json`.
+- `--encrypt`: Encrypt a plaintext hex string with the configured RSA key.
+- `--decrypt`: Run speculative decryption with per-bit oracle screening.
+- `--plaintext-hex <HEX>`: Plaintext hex string (required with `--encrypt`).
+- `--ciphertext <VALUE>`: Ciphertext override (decimal or hex). Falls back to `verify.ciphertext_hex` or `verify.ciphertext` in the config.
+- `--shift`: Multiply ciphertext by encrypted 2 before base conversion.
+- Demo runs require `rsa_keypair.generate = false` with `rsa_keypair.p` and `rsa_keypair.q` supplied.
 
 # Configuration (rsa_config.json)
 Notes:
@@ -51,8 +71,12 @@ Notes:
 | `engine.r_use_list` | array(string) | `[]` | Explicit r candidates. |
 | `engine.max_overlap_min` | number | `0.005` | Present for compatibility; currently unused. |
 | `engine.override_best_r` | string | `""` | Overrides best r if non-empty. |
-| `engine.test_iterations` | u64 | `0` | Number of primary test iterations. |
-| `engine.alt_iterations` | u64 | `0` | Number of alternate test iterations. |
+| `engine.test_iterations` | u64 | `4` | Number of primary test iterations. |
+| `engine.alt_iterations` | u64 | `4` | Number of alternate test iterations. |
+| `engine.analysis_tests_iterations` | u64 | `1000` | Timeline iterations for analysis tests. |
+| `engine.oracle_screen_iterations` | u64 | `500` | Iterations for per-bit oracle screening. |
+| `engine.analysis_tests_window` | usize | `32` | Window size for analysis timelines. |
+| `engine.analysis_tests_stride` | usize | `8` | Window stride for analysis timelines. |
 | `engine.process_min_count` | u64 | `25` | Minimum r candidates to process. |
 | `engine.process_count` | u64 | `25` | Target r candidates per batch. |
 | `engine.process_scale` | u32 | `12` | Scaling factor for candidate generation. |
@@ -61,20 +85,24 @@ Notes:
 | `engine.rabin_exponent` | u64 | `3` | Rabin exponent used in candidate math. |
 | `engine.min_message_trials` | u64 | `100` | Minimum message trials per r candidate. |
 | `engine.overlap_report_threshold` | number | `51` | Overlap % threshold for reporting. |
+| `engine.entropy_report_threshold` | number | `0.99` | Entropy threshold for sufficiency checks. |
+| `engine.oracle_accuracy_threshold` | number | `51.0` | Oracle accuracy threshold for sufficiency checks. |
 | `engine.reuse_r_candidates` | bool | `true` | Reuse cached r candidates. |
 | `engine.reuse_r_candidates_path` | string | `r_candidates.csv` | Cache file path. |
 | `engine.reuse_r_candidates_append_only` | bool | `false` | Append-only reuse file behavior. |
 | `engine.r_candidate_mode` | string | `small_primes` | Candidate generation mode. |
 | `engine.r_candidate_small_primes` | array(u64) | `[3, 5, 7, 11, 13, 17]` | Small primes for candidate generation. |
 | `engine.r_candidate_small_prime_factors` | usize | `3` | Number of small prime factors. |
-| `engine.combiner_enable` | bool | `false` | Enable speculative combiner. |
+| `engine.r_candidate_max_factors` | usize | `6` | Maximum total factors per r candidate. |
+| `engine.r_candidate_bit_length` | u64 | `null` | Optional target bit length for r candidates. |
+| `engine.combiner_enable` | bool | `true` | Enable speculative combiner. |
 | `engine.combiner_k_oracles` | usize | `5` | Number of oracles to request. |
 | `engine.combiner_match_probability` | number | `0.75` | Target oracle match probability. |
 | `engine.combiner_tie_breaker` | bool | `true` | Tie-breaking strategy. |
 | `engine.base_convert` | bool | `true` | Enable base conversion in analysis. |
 | `engine.invert_bits` | bool | `false` | Invert bits during analysis. |
 | `engine.use_rs_decrypt` | bool | `true` | Use Rust decrypt path for r analysis. |
-| `engine.enciphered_export_enable` | bool | `true` | Export enciphered bins/ramp data. |
+| `engine.enciphered_export_enable` | bool | `false` | Export enciphered bins/ramp data. |
 | `engine.enciphered_export_iterations` | u64 | `10000` | Export iterations. |
 | `engine.enciphered_export_bins` | usize | `128` | Histogram bins. |
 | `engine.enciphered_export_window` | usize | `128` | Window size. |
@@ -88,3 +116,10 @@ Notes:
 | `engine.message.bits` | u32 | `128` | Random message bit length. |
 | `engine.message.fixed_message` | string | `HeloWrld1234` | Fixed message when `is_random` is `false`. |
 
+# Configuration (demo verification inputs)
+These optional keys are used by `demo` when `--ciphertext` is not provided.
+
+| Key | Type | Default | Notes |
+| --- | --- | --- | --- |
+| `verify.ciphertext` | string (bigint) | `null` | Ciphertext in decimal string form. |
+| `verify.ciphertext_hex` | string | `null` | Ciphertext hex string (0x prefix optional). |
