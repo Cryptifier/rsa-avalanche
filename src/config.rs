@@ -92,6 +92,9 @@ pub struct EngineConfig {
     pub analysis_tests_window: usize,
     #[serde(default = "default_analysis_tests_stride")]
     pub analysis_tests_stride: usize,
+    /// Number of homomorphic left-shift multiplications by 2 to compare per candidate.
+    #[serde(default = "default_analysis_shift_multiplications")]
+    pub analysis_shift_multiplications: usize,
     #[serde(default = "default_oracle_accuracy_threshold")]
     pub oracle_accuracy_threshold: f64,
     #[serde(default = "default_r_use_list_enable")]
@@ -207,6 +210,7 @@ impl Default for EngineConfig {
             oracle_screen_iterations: default_oracle_screen_iterations(),
             analysis_tests_window: default_analysis_tests_window(),
             analysis_tests_stride: default_analysis_tests_stride(),
+            analysis_shift_multiplications: default_analysis_shift_multiplications(),
             oracle_accuracy_threshold: default_oracle_accuracy_threshold(),
             r_use_list_enable: default_r_use_list_enable(),
             r_use_list: Vec::new(),
@@ -626,6 +630,20 @@ fn default_analysis_tests_window() -> usize {
 /// - Returns a constant default value; no side effects.
 fn default_analysis_tests_stride() -> usize {
     4
+}
+
+/// Default number of homomorphic left-shift multiplications by 2 in analysis.
+///
+/// # Parameters
+/// - None.
+///
+/// # Returns
+/// - `usize`: Default shift count.
+///
+/// # Expected Output
+/// - Returns a constant default value; no side effects.
+fn default_analysis_shift_multiplications() -> usize {
+    32
 }
 
 /// Default oracle accuracy threshold for sufficiency tests.

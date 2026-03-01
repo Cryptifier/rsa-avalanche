@@ -682,10 +682,16 @@ struct StatSummary {
 #[derive(Debug, Serialize)]
 struct BitSimilarityEntry {
     index: usize,
+    shift: usize,
     r: String,
     candidate_hex: String,
     match_pct: f64,
     matching_bits: usize,
+    adjusted_match_pct: f64,
+    adjusted_matching_bits: usize,
+    masked_bits: usize,
+    base_match_pct: f64,
+    base_matching_bits: usize,
 }
 
 /// Computes mean, standard deviation, min, and max for a slice of values.
@@ -741,9 +747,10 @@ fn compute_stats(values: &[f64]) -> Option<StatSummary> {
 /// - `candidates`: Prepared r candidates to evaluate.
 /// - `message`: Reference message used for bit comparisons.
 /// - `shift`: Whether to shift ciphertext by encrypted 2 before conversion.
+/// - `shift_levels`: Number of left-shift multiplications to compare per candidate.
 ///
 /// # Returns
-/// - `Vec<BitSimilarityEntry>`: Per-candidate similarity entries.
+/// - `(Vec<BitSimilarityEntry>, Vec<u32>, usize)`: Entries, per-bit match counts, and shift levels used.
 ///
 /// # Expected Output
 /// - Returns entries describing per-candidate bit matches; no stdout/stderr output.
@@ -753,13 +760,16 @@ fn build_bit_similarity_entries(
     candidates: &[OracleCandidate],
     message: &BigUint,
     shift: bool,
-) -> Vec<BitSimilarityEntry> {
+    shift_levels: usize,
+) -> (Vec<BitSimilarityEntry>, Vec<u32>, usize) {
     if candidates.is_empty() {
-        return Vec::new();
+        return (Vec::new(), Vec::new(), 0);
     }
 
     let bit_width = message.bits().max(1) as usize;
     let message_bits = biguint_to_bits_le(message, bit_width);
+    let max_shift = shift_levels.min(bit_width.saturating_sub(1));
+    let mut match_counts = vec![0u32; bit_width];
 
     let y = engine.rabin_exponent as u32;
     let n_pow_y = ctx.n.pow(y);
@@ -767,38 +777,61 @@ fn build_bit_similarity_entries(
     let shifted = maybe_shift_ciphertext(ctx, &ciphertext, shift);
     let result_default = get_larger_number(&shifted, &ctx.n, y, true, false);
 
-    candidates
-        .iter()
-        .enumerate()
-        .map(|(index, candidate)| {
-            let dm = derive_candidate_message_from_result(
-                ctx,
-                engine,
-                &result_default,
-                &candidate.r,
-                &candidate.d_new,
-                &n_pow_y,
-                &candidate.r_pow_y,
-                y,
-                false,
-            );
-            let dm_bits = biguint_to_bits_le(&dm, bit_width);
-            let matching_bits = dm_bits
-                .iter()
-                .zip(message_bits.iter())
-                .filter(|(a, b)| a == b)
-                .count();
-            let denom = bit_width.max(1) as f64;
+    let mut entries = Vec::with_capacity(candidates.len() * (max_shift + 1).max(1));
+    for (index, candidate) in candidates.iter().enumerate() {
+        let dm = derive_candidate_message_from_result(
+            ctx,
+            engine,
+            &result_default,
+            &candidate.r,
+            &candidate.d_new,
+            &n_pow_y,
+            &candidate.r_pow_y,
+            y,
+            false,
+        );
+        let dm_bits = biguint_to_bits_le(&dm, bit_width);
+        let (base_matching_bits, _) = count_matching_bits_masked(&message_bits, &dm_bits, 0);
+        let denom = bit_width.max(1) as f64;
+        let base_match_pct = base_matching_bits as f64 / denom * 100.0;
+
+        for shift_idx in 0..=max_shift {
+            let masked_bits = shift_idx.min(bit_width);
+            let shifted_bits = if shift_idx == 0 {
+                dm_bits.clone()
+            } else {
+                shift_bits_left(&dm_bits, bit_width, shift_idx)
+            };
+            let (matching_bits, adjusted_matching_bits) =
+                count_matching_bits_masked(&message_bits, &shifted_bits, masked_bits);
             let match_pct = matching_bits as f64 / denom * 100.0;
-            BitSimilarityEntry {
+            let adjusted_denom = bit_width.saturating_sub(masked_bits).max(1) as f64;
+            let adjusted_match_pct = adjusted_matching_bits as f64 / adjusted_denom * 100.0;
+
+            let count_limit = bit_width.saturating_sub(masked_bits);
+            for bit_idx in 0..count_limit {
+                if shifted_bits[bit_idx] == message_bits[bit_idx] {
+                    match_counts[bit_idx] = match_counts[bit_idx].saturating_add(1);
+                }
+            }
+
+            entries.push(BitSimilarityEntry {
                 index,
+                shift: shift_idx,
                 r: candidate.r.to_string(),
                 candidate_hex: to_hex(&dm),
                 match_pct,
                 matching_bits,
-            }
-        })
-        .collect()
+                adjusted_match_pct,
+                adjusted_matching_bits,
+                masked_bits,
+                base_match_pct,
+                base_matching_bits,
+            });
+        }
+    }
+
+    (entries, match_counts, max_shift)
 }
 
 /// Writes a histogram image for overlap percentages.
@@ -1067,6 +1100,64 @@ fn count_matching_bits_le(a: &[bool], b: &[bool]) -> (usize, usize) {
     }
 
     (matching_lsb, matching_total)
+}
+
+/// Shifts a little-endian bit vector left by the specified number of bits.
+///
+/// # Parameters
+/// - `bits`: Input bit slice with LSB at index 0.
+/// - `width`: Fixed width of the output vector.
+/// - `shift`: Number of positions to shift left.
+///
+/// # Returns
+/// - `Vec<bool>`: Shifted bit vector of length `width`.
+///
+/// # Expected Output
+/// - Returns a zero-padded vector when `shift` exceeds `width`; no side effects.
+fn shift_bits_left(bits: &[bool], width: usize, shift: usize) -> Vec<bool> {
+    let mut shifted = vec![false; width];
+    if shift >= width {
+        return shifted;
+    }
+    for idx in shift..width {
+        shifted[idx] = bits[idx - shift];
+    }
+    shifted
+}
+
+/// Counts matching bits between two bit vectors, with an optional MSB mask.
+///
+/// # Parameters
+/// - `original`: Reference bit slice (LSB at index 0).
+/// - `candidate`: Candidate bit slice (LSB at index 0).
+/// - `masked_bits`: Number of most-significant bits to exclude from adjusted counts.
+///
+/// # Returns
+/// - `(usize, usize)`: `(matching_total, matching_adjusted)` counts.
+///
+/// # Expected Output
+/// - Returns counts based on bitwise comparisons; no side effects.
+fn count_matching_bits_masked(
+    original: &[bool],
+    candidate: &[bool],
+    masked_bits: usize,
+) -> (usize, usize) {
+    let min_len = original.len().min(candidate.len());
+    if min_len == 0 {
+        return (0, 0);
+    }
+    let mask_start = min_len.saturating_sub(masked_bits);
+    let mut matching_total = 0usize;
+    let mut matching_adjusted = 0usize;
+    for idx in 0..min_len {
+        if original[idx] == candidate[idx] {
+            matching_total += 1;
+            if idx < mask_start {
+                matching_adjusted += 1;
+            }
+        }
+    }
+    (matching_total, matching_adjusted)
 }
 
 /// Builds speculative oracle bit vectors using `r` candidates and HBC transforms.
@@ -2330,8 +2421,15 @@ fn run_information_sufficiency_tests(
     }
     print_best_case_hex(message, &best_case_bits);
 
-    let bit_similarity_entries =
-        build_bit_similarity_entries(ctx, engine, &candidates, message, shift);
+    let (bit_similarity_entries, match_counts_per_bit, shift_levels_used) =
+        build_bit_similarity_entries(
+            ctx,
+            engine,
+            &candidates,
+            message,
+            shift,
+            engine.analysis_shift_multiplications,
+        );
     with_analytics(analytics, |a| {
         a.set_feature_stat(
             "information_sufficiency",
@@ -2340,6 +2438,9 @@ fn run_information_sufficiency_tests(
                 "bit_order": "lsb0",
                 "bit_width": message.bits().max(1),
                 "original_hex": to_hex(message),
+                "shift_levels_configured": engine.analysis_shift_multiplications,
+                "shift_levels_used": shift_levels_used,
+                "match_counts_per_bit": match_counts_per_bit,
                 "candidates": bit_similarity_entries,
             }),
         );

@@ -109,13 +109,17 @@ def collect_log_paths(default_paths, log_dir):
 class BitSimilarityCanvas(QtWidgets.QAbstractScrollArea):
     def __init__(self, parent=None):
         super().__init__(parent)
-        self._entries = []
+        self._rows = []
         self._bit_width = 0
         self._original_bits = []
         self._start_index = 0
         self._display_count = 0
         self._show_all = True
         self._bit_cache = {}
+        self._match_counts = []
+        self._row_tops = []
+        self._content_height_px = 0
+        self._max_shift = 0
 
         self._margin = 8
         self._label_width = 90
@@ -127,25 +131,32 @@ class BitSimilarityCanvas(QtWidgets.QAbstractScrollArea):
 
         self._match_color = QtGui.QColor(46, 160, 67)
         self._mismatch_color = QtGui.QColor(220, 72, 72)
+        self._multi_match_color = QtGui.QColor(242, 201, 76)
+        self._prev_match_color = QtGui.QColor(128, 72, 201)
+        self._masked_fill = QtGui.QColor(0, 0, 0)
+        self._masked_text = QtGui.QColor(46, 160, 67)
         self._text_color = QtGui.QColor(40, 40, 40)
 
         self.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarPolicy.ScrollBarAsNeeded)
         self.setVerticalScrollBarPolicy(QtCore.Qt.ScrollBarPolicy.ScrollBarAsNeeded)
 
-    def set_data(self, entries, bit_width, original_hex):
-        self._entries = list(entries)
+    def set_data(self, rows, bit_width, original_hex, match_counts=None):
+        self._rows = list(rows)
         self._bit_width = int(bit_width or 0)
         self._original_bits = hex_to_bits_le(original_hex, self._bit_width)
         self._bit_cache.clear()
+        self._match_counts = list(match_counts or [])
+        self._max_shift = self._max_shift_for_rows(self._rows)
         self._start_index = 0
-        self._display_count = len(self._entries)
+        self._display_count = len(self._rows)
         self._show_all = True
+        self._rebuild_row_metrics()
         self._update_scrollbars()
         self.viewport().update()
 
     def set_view(self, start_index, count, show_all):
         self._show_all = bool(show_all)
-        total = len(self._entries)
+        total = len(self._rows)
         if total == 0:
             self._start_index = 0
             self._display_count = 0
@@ -157,6 +168,7 @@ class BitSimilarityCanvas(QtWidgets.QAbstractScrollArea):
             count = max(1, min(count, total - start_index))
             self._start_index = start_index
             self._display_count = count
+        self._rebuild_row_metrics()
         self._update_scrollbars()
         self.viewport().update()
 
@@ -165,18 +177,48 @@ class BitSimilarityCanvas(QtWidgets.QAbstractScrollArea):
         self._update_scrollbars()
 
     def _row_height(self):
-        bit_rows_height = 2 * self._bit_size + self._bit_spacing + 8
-        return self._header_height + bit_rows_height + self._row_padding
+        return self._header_height + self._row_padding
+
+    def _row_height_for(self, row):
+        entries = row.get("entries", [])
+        row_gap = self._bit_spacing + 8
+        return (
+            self._header_height
+            + self._bit_size
+            + len(entries) * (self._bit_size + row_gap)
+            + self._row_padding
+        )
 
     def _content_width(self):
-        bits_width = self._bit_width * (self._bit_size + self._bit_spacing)
+        bits_width = (self._bit_width + self._max_shift) * (self._bit_size + self._bit_spacing)
         return self._margin * 2 + self._label_width + bits_width
 
     def _content_height(self):
-        rows = self._display_count
-        if rows == 0:
-            return 0
-        return self._margin * 2 + rows * (self._row_height() + self._row_spacing)
+        return self._content_height_px
+
+    def _max_shift_for_rows(self, rows):
+        max_shift = 0
+        for row in rows:
+            for entry in row.get("entries", []):
+                shift = int(entry.get("shift", 0) or 0)
+                if shift > max_shift:
+                    max_shift = shift
+        return max_shift
+
+    def _rebuild_row_metrics(self):
+        self._row_tops = []
+        if self._display_count == 0:
+            self._content_height_px = 0
+            return
+        y = self._margin
+        end_index = min(len(self._rows), self._start_index + self._display_count)
+        for idx in range(self._start_index, end_index):
+            row = self._rows[idx]
+            self._row_tops.append(y)
+            y += self._row_height_for(row) + self._row_spacing
+        if self._row_tops:
+            y -= self._row_spacing
+        self._content_height_px = self._margin + y
 
     def _update_scrollbars(self):
         viewport = self.viewport().size()
@@ -195,13 +237,24 @@ class BitSimilarityCanvas(QtWidgets.QAbstractScrollArea):
         v_bar.setPageStep(viewport.height())
 
     def _candidate_bits(self, entry):
-        cache_key = entry.get("_orig_index", id(entry))
+        cache_key = entry.get("_orig_index", entry.get("index", id(entry)))
         cached = self._bit_cache.get(cache_key)
         if cached is not None:
             return cached
         bits = hex_to_bits_le(entry.get("candidate_hex", ""), self._bit_width)
         self._bit_cache[cache_key] = bits
         return bits
+
+    def _shifted_bits(self, bits, shift):
+        if shift <= 0:
+            return list(bits)
+        width = self._bit_width
+        shifted = [False] * width
+        if shift >= width:
+            return shifted
+        for idx in range(shift, width):
+            shifted[idx] = bits[idx - shift]
+        return shifted
 
     def paintEvent(self, event):
         super().paintEvent(event)
@@ -218,29 +271,35 @@ class BitSimilarityCanvas(QtWidgets.QAbstractScrollArea):
 
         x_offset = self.horizontalScrollBar().value()
         y_offset = self.verticalScrollBar().value()
-        row_height = self._row_height() + self._row_spacing
-
-        first_row = max(0, y_offset // row_height)
-        last_row = min(
-            self._display_count,
-            (y_offset + self.viewport().height()) // row_height + 1,
-        )
-
-        for row in range(first_row, last_row):
-            entry_idx = self._start_index + row
-            if entry_idx >= len(self._entries):
+        visible_top = y_offset
+        visible_bottom = y_offset + self.viewport().height()
+        start_offset = 0
+        for idx, row_top in enumerate(self._row_tops):
+            row = self._rows[self._start_index + idx]
+            row_bottom = row_top + self._row_height_for(row)
+            if row_bottom >= visible_top:
+                start_offset = idx
                 break
 
-            entry = self._entries[entry_idx]
-            display_idx = entry.get("_orig_index", entry_idx)
-            row_top = self._margin + row * row_height - y_offset
+        for offset_idx in range(start_offset, len(self._row_tops)):
+            row_idx = self._start_index + offset_idx
+            if row_idx >= len(self._rows):
+                break
+            row = self._rows[row_idx]
+            row_top_abs = self._row_tops[offset_idx]
+            row_bottom_abs = row_top_abs + self._row_height_for(row)
+            if row_top_abs > visible_bottom:
+                break
+
+            display_idx = row.get("index", row_idx)
+            row_top = row_top_abs - y_offset
             header_y = row_top + self._header_height - 4
             bits_top = row_top + self._header_height
 
             painter.setPen(self._text_color)
-            r_value = entry.get("r", "")
-            match_pct = entry.get("match_pct", 0.0)
-            matching_bits = entry.get("matching_bits", 0)
+            r_value = row.get("r", "")
+            match_pct = row.get("base_match_pct", 0.0)
+            matching_bits = row.get("base_matching_bits", 0)
             painter.drawText(
                 self._margin - x_offset,
                 header_y,
@@ -249,22 +308,28 @@ class BitSimilarityCanvas(QtWidgets.QAbstractScrollArea):
 
             label_x = self._margin - x_offset
             painter.drawText(label_x, bits_top + self._bit_size, "Original")
-            painter.drawText(
-                label_x, bits_top + self._bit_size + self._bit_spacing + 8 + self._bit_size, "Candidate"
-            )
 
             original_bits = self._original_bits
-            candidate_bits = self._candidate_bits(entry)
+            entries = row.get("entries", [])
+            if not entries:
+                continue
+            base_bits = self._candidate_bits(entries[0])
+            base_candidate_bits = self._shifted_bits(base_bits, 0)
             max_bits = self._bit_width
             small_font = QtGui.QFont(base_font)
             small_font.setPixelSize(max(4, int(self._bit_size * 0.5)))
             painter.setFont(small_font)
-
+            row_gap = self._bit_spacing + 8
+            y1 = bits_top
             for bit_idx in range(max_bits):
                 orig_bit = original_bits[bit_idx] if bit_idx < len(original_bits) else False
-                cand_bit = candidate_bits[bit_idx] if bit_idx < len(candidate_bits) else False
+                cand_bit = (
+                    base_candidate_bits[bit_idx]
+                    if bit_idx < len(base_candidate_bits)
+                    else False
+                )
                 matches = orig_bit == cand_bit
-                base = self._match_color if matches else self._mismatch_color
+                base_original = self._match_color if matches else self._mismatch_color
 
                 x = (
                     self._margin
@@ -272,31 +337,89 @@ class BitSimilarityCanvas(QtWidgets.QAbstractScrollArea):
                     + bit_idx * (self._bit_size + self._bit_spacing)
                     - x_offset
                 )
-                y1 = bits_top
-                y2 = bits_top + self._bit_size + self._bit_spacing + 8
 
-                color1 = base.lighter(130) if not orig_bit else base
-                color2 = base.lighter(130) if not cand_bit else base
+                color1 = base_original.lighter(130) if not orig_bit else base_original
                 painter.fillRect(x, y1, self._bit_size, self._bit_size, color1)
-                painter.fillRect(x, y2, self._bit_size, self._bit_size, color2)
 
                 text1 = "1" if orig_bit else "0"
-                text2 = "1" if cand_bit else "0"
                 text_color1 = QtGui.QColor(255, 255, 255) if orig_bit else QtGui.QColor(0, 0, 0)
-                text_color2 = QtGui.QColor(255, 255, 255) if cand_bit else QtGui.QColor(0, 0, 0)
-
                 painter.setPen(text_color1)
                 painter.drawText(
                     QtCore.QRectF(x, y1, self._bit_size, self._bit_size),
                     QtCore.Qt.AlignmentFlag.AlignCenter,
                     text1,
                 )
-                painter.setPen(text_color2)
-                painter.drawText(
-                    QtCore.QRectF(x, y2, self._bit_size, self._bit_size),
-                    QtCore.Qt.AlignmentFlag.AlignCenter,
-                    text2,
+            for entry_idx, entry in enumerate(entries):
+                shift = int(entry.get("shift", 0) or 0)
+                masked_bits = int(entry.get("masked_bits", max(0, shift)) or 0)
+                row_label = "Candidate" if shift == 0 else f"Candidate << {shift}"
+                adjusted_match_pct = entry.get("adjusted_match_pct", entry.get("match_pct", 0.0))
+                adjusted_matching_bits = entry.get(
+                    "adjusted_matching_bits", entry.get("matching_bits", 0)
                 )
+                adjusted_denom = max(1, self._bit_width - masked_bits)
+                y2 = bits_top + self._bit_size + row_gap + entry_idx * (self._bit_size + row_gap)
+                painter.drawText(
+                    label_x,
+                    y2 + self._bit_size,
+                    f"{row_label} | adj={adjusted_match_pct:.2f}% ({adjusted_matching_bits}/{adjusted_denom})",
+                )
+
+                prev_shift = None
+                if entry_idx > 0:
+                    prev_shift = int(entries[entry_idx - 1].get("shift", 0) or 0)
+
+                for bit_idx in range(max_bits):
+                    masked = masked_bits > 0 and bit_idx >= max_bits - masked_bits
+                    if bit_idx < shift and not masked:
+                        continue
+                    matches_original = False
+                    matches_prev = False
+                    if masked:
+                        cand_bit = base_bits[bit_idx] if bit_idx < len(base_bits) else False
+                    else:
+                        src_idx = bit_idx - shift
+                        cand_bit = base_bits[src_idx] if src_idx < len(base_bits) else False
+                        orig_bit = original_bits[bit_idx] if bit_idx < len(original_bits) else False
+                        matches_original = orig_bit == cand_bit
+                        if prev_shift is not None and bit_idx >= prev_shift:
+                            prev_src_idx = bit_idx - prev_shift
+                            if prev_src_idx < len(base_bits):
+                                prev_bit = base_bits[prev_src_idx]
+                                matches_prev = prev_bit == cand_bit
+                    if matches_original:
+                        base_candidate = self._match_color
+                    elif matches_prev:
+                        base_candidate = self._prev_match_color
+                    else:
+                        base_candidate = self._mismatch_color
+                    if matches_original and matches_prev:
+                        base_candidate = self._multi_match_color
+
+                    x = (
+                        self._margin
+                        + self._label_width
+                        + bit_idx * (self._bit_size + self._bit_spacing)
+                        - x_offset
+                    )
+                    if masked:
+                        color2 = self._masked_fill
+                    else:
+                        color2 = base_candidate.lighter(130) if not cand_bit else base_candidate
+                    painter.fillRect(x, y2, self._bit_size, self._bit_size, color2)
+
+                    if masked:
+                        text2 = "1" if cand_bit else "0"
+                        text_color2 = self._masked_text
+                    else:
+                        text2 = "1" if cand_bit else "0"
+                        text_color2 = QtGui.QColor(255, 255, 255)
+                    painter.setPen(text_color2)
+                    painter.drawText(
+                        QtCore.QRectF(x, y2, self._bit_size, self._bit_size),
+                        QtCore.Qt.AlignmentFlag.AlignCenter,
+                        text2,
+                    )
 
             painter.setFont(base_font)
 
@@ -311,6 +434,7 @@ class BitSimilarityTab(QtWidgets.QWidget):
         self._bit_width = 0
         self._original_hex = ""
         self._bit_order = "lsb0"
+        self._match_counts_raw = []
         self._pending_settings = None
 
         layout = QtWidgets.QVBoxLayout(self)
@@ -337,6 +461,8 @@ class BitSimilarityTab(QtWidgets.QWidget):
 
         self._show_all = QtWidgets.QCheckBox("Show all rows")
         self._show_all.setChecked(True)
+        self._hide_shifted = QtWidgets.QCheckBox("Hide shifted rows")
+        self._hide_shifted.setChecked(False)
 
         control_row.addWidget(QtWidgets.QLabel("Sort:"))
         control_row.addWidget(self._sort_combo)
@@ -345,6 +471,7 @@ class BitSimilarityTab(QtWidgets.QWidget):
         control_row.addWidget(QtWidgets.QLabel("Rows:"))
         control_row.addWidget(self._rows_spin)
         control_row.addWidget(self._show_all)
+        control_row.addWidget(self._hide_shifted)
         control_row.addStretch(1)
         layout.addLayout(control_row)
 
@@ -355,8 +482,11 @@ class BitSimilarityTab(QtWidgets.QWidget):
         layout.addWidget(self._canvas, 1)
 
         self._show_all.stateChanged.connect(self._toggle_show_all)
+        self._hide_shifted.stateChanged.connect(self._on_hide_shifted)
 
-        legend = QtWidgets.QLabel("Green = match, Red = mismatch. LSB-first bit order.")
+        legend = QtWidgets.QLabel(
+            "Green = matches original, Purple = matches previous shift, Yellow = matches both, Black = masked bits. LSB-first bit order."
+        )
         legend.setStyleSheet("color: #555;")
         layout.addWidget(legend)
 
@@ -372,6 +502,7 @@ class BitSimilarityTab(QtWidgets.QWidget):
         self._bit_width = int(bit_similarity.get("bit_width", 0) or 0)
         self._original_hex = bit_similarity.get("original_hex", "")
         self._bit_order = bit_similarity.get("bit_order", "lsb0")
+        self._match_counts_raw = list(bit_similarity.get("match_counts_per_bit", []) or [])
 
         self._apply_sort()
         if self._pending_settings:
@@ -382,17 +513,96 @@ class BitSimilarityTab(QtWidgets.QWidget):
     def _apply_sort(self):
         sort_mode = self._sort_combo.currentText()
         entries = list(self._entries_raw)
+        if self._hide_shifted.isChecked():
+            entries = [entry for entry in entries if int(entry.get("shift", 0) or 0) == 0]
+        base_by_index = {}
+        entries_by_index = {}
+        for entry in entries:
+            idx = int(entry.get("index", entry.get("_orig_index", 0)))
+            entries_by_index.setdefault(idx, []).append(entry)
+            if idx not in base_by_index or int(entry.get("shift", 0) or 0) == 0:
+                base_by_index[idx] = entry
+
+        candidate_indices = list(entries_by_index.keys())
         if sort_mode == "Match % (Descending)":
-            entries.sort(key=lambda e: e.get("match_pct", 0.0), reverse=True)
+            candidate_indices.sort(
+                key=lambda idx: (
+                    -float(
+                        base_by_index[idx].get(
+                            "base_match_pct",
+                            base_by_index[idx].get("match_pct", 0.0),
+                        )
+                    ),
+                    idx,
+                )
+            )
         elif sort_mode == "Match % (Ascending)":
-            entries.sort(key=lambda e: e.get("match_pct", 0.0))
-        self._entries = entries
+            candidate_indices.sort(
+                key=lambda idx: (
+                    float(
+                        base_by_index[idx].get(
+                            "base_match_pct",
+                            base_by_index[idx].get("match_pct", 0.0),
+                        )
+                    ),
+                    idx,
+                )
+            )
+        else:
+            candidate_indices.sort()
+
+        grouped = []
+        for idx in candidate_indices:
+            group_entries = entries_by_index.get(idx, [])
+            group_entries.sort(key=lambda e: int(e.get("shift", 0) or 0))
+            base_entry = base_by_index.get(idx, group_entries[0] if group_entries else {})
+            grouped.append(
+                {
+                    "index": idx,
+                    "r": base_entry.get("r", ""),
+                    "base_match_pct": base_entry.get(
+                        "base_match_pct", base_entry.get("match_pct", 0.0)
+                    ),
+                    "base_matching_bits": base_entry.get(
+                        "base_matching_bits", base_entry.get("matching_bits", 0)
+                    ),
+                    "entries": group_entries,
+                }
+            )
+
+        self._entries = grouped
         self._sync_ranges()
-        self._canvas.set_data(self._entries, self._bit_width, self._original_hex)
+        match_counts = self._match_counts_raw
+        if (
+            not match_counts
+            or len(match_counts) != self._bit_width
+            or self._hide_shifted.isChecked()
+        ):
+            match_counts = self._build_match_counts(entries)
+        self._canvas.set_data(self._entries, self._bit_width, self._original_hex, match_counts)
         self._rebuild_rows()
 
     def _on_sort_changed(self, _idx):
         self._apply_sort()
+
+    def _on_hide_shifted(self, _state):
+        self._apply_sort()
+
+    def _build_match_counts(self, entries):
+        if self._bit_width <= 0 or not entries:
+            return []
+        original_bits = hex_to_bits_le(self._original_hex, self._bit_width)
+        counts = [0 for _ in range(self._bit_width)]
+        for entry in entries:
+            base_bits = hex_to_bits_le(entry.get("candidate_hex", ""), self._bit_width)
+            shift = int(entry.get("shift", 0) or 0)
+            for bit_idx in range(self._bit_width):
+                display_idx = bit_idx + shift
+                if display_idx >= self._bit_width:
+                    continue
+                if base_bits[bit_idx] == original_bits[display_idx]:
+                    counts[display_idx] += 1
+        return counts
 
     def _sync_ranges(self):
         total = len(self._entries)
@@ -414,6 +624,7 @@ class BitSimilarityTab(QtWidgets.QWidget):
         return {
             "sort_index": self._sort_combo.currentIndex(),
             "show_all": self._show_all.isChecked(),
+            "hide_shifted": self._hide_shifted.isChecked(),
             "start": self._start_spin.value(),
             "rows": self._rows_spin.value(),
         }
@@ -440,6 +651,11 @@ class BitSimilarityTab(QtWidgets.QWidget):
         self._show_all.setChecked(settings.get("show_all", True))
         self._show_all.blockSignals(False)
         self._toggle_show_all(self._show_all.isChecked())
+
+        self._hide_shifted.blockSignals(True)
+        self._hide_shifted.setChecked(settings.get("hide_shifted", False))
+        self._hide_shifted.blockSignals(False)
+        self._on_hide_shifted(self._hide_shifted.checkState())
 
     def _toggle_show_all(self, checked):
         show_all = bool(checked)
