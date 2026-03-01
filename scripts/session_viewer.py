@@ -311,6 +311,7 @@ class BitSimilarityTab(QtWidgets.QWidget):
         self._bit_width = 0
         self._original_hex = ""
         self._bit_order = "lsb0"
+        self._pending_settings = None
 
         layout = QtWidgets.QVBoxLayout(self)
 
@@ -372,9 +373,13 @@ class BitSimilarityTab(QtWidgets.QWidget):
         self._original_hex = bit_similarity.get("original_hex", "")
         self._bit_order = bit_similarity.get("bit_order", "lsb0")
 
-        self._apply_sort(reset_view=True)
+        self._apply_sort()
+        if self._pending_settings:
+            pending = self._pending_settings
+            self._pending_settings = None
+            self.apply_settings(pending)
 
-    def _apply_sort(self, reset_view):
+    def _apply_sort(self):
         sort_mode = self._sort_combo.currentText()
         entries = list(self._entries_raw)
         if sort_mode == "Match % (Descending)":
@@ -382,7 +387,14 @@ class BitSimilarityTab(QtWidgets.QWidget):
         elif sort_mode == "Match % (Ascending)":
             entries.sort(key=lambda e: e.get("match_pct", 0.0))
         self._entries = entries
+        self._sync_ranges()
+        self._canvas.set_data(self._entries, self._bit_width, self._original_hex)
+        self._rebuild_rows()
 
+    def _on_sort_changed(self, _idx):
+        self._apply_sort()
+
+    def _sync_ranges(self):
         total = len(self._entries)
         self._start_spin.blockSignals(True)
         self._rows_spin.blockSignals(True)
@@ -398,13 +410,36 @@ class BitSimilarityTab(QtWidgets.QWidget):
         self._start_spin.blockSignals(False)
         self._rows_spin.blockSignals(False)
 
-        self._canvas.set_data(self._entries, self._bit_width, self._original_hex)
-        if reset_view:
-            self._show_all.setChecked(True)
-        self._toggle_show_all(self._show_all.isChecked())
+    def get_settings(self):
+        return {
+            "sort_index": self._sort_combo.currentIndex(),
+            "show_all": self._show_all.isChecked(),
+            "start": self._start_spin.value(),
+            "rows": self._rows_spin.value(),
+        }
 
-    def _on_sort_changed(self, _idx):
-        self._apply_sort(reset_view=True)
+    def apply_settings(self, settings):
+        if not settings:
+            return
+        if not self._entries_raw:
+            self._pending_settings = settings
+            return
+        self._sort_combo.blockSignals(True)
+        self._sort_combo.setCurrentIndex(settings.get("sort_index", 0))
+        self._sort_combo.blockSignals(False)
+        self._apply_sort()
+
+        self._start_spin.blockSignals(True)
+        self._rows_spin.blockSignals(True)
+        self._start_spin.setValue(settings.get("start", self._start_spin.value()))
+        self._rows_spin.setValue(settings.get("rows", self._rows_spin.value()))
+        self._start_spin.blockSignals(False)
+        self._rows_spin.blockSignals(False)
+
+        self._show_all.blockSignals(True)
+        self._show_all.setChecked(settings.get("show_all", True))
+        self._show_all.blockSignals(False)
+        self._toggle_show_all(self._show_all.isChecked())
 
     def _toggle_show_all(self, checked):
         show_all = bool(checked)
@@ -489,6 +524,7 @@ class SessionViewer(QtWidgets.QMainWindow):
         self._default_paths = [p for p in (default_paths or []) if p]
         self._log_dir = os.path.abspath(log_dir) if log_dir else ""
         self._current_session_path = self._session_path
+        self._bit_similarity_settings = None
 
         self._tabs = QtWidgets.QTabWidget()
         self._log_list = QtWidgets.QListWidget()
@@ -560,6 +596,7 @@ class SessionViewer(QtWidgets.QMainWindow):
         self.reload_session(session)
 
     def reload_session(self, session):
+        self._capture_bit_similarity_settings()
         current_index = self._tabs.currentIndex() if self._tabs.count() else 0
         self._tabs.clear()
         self._tabs.addTab(self._build_summary_tab(session), "Summary")
@@ -679,7 +716,19 @@ class SessionViewer(QtWidgets.QMainWindow):
             )
             return widget
 
-        return BitSimilarityTab(bit_similarity)
+        tab = BitSimilarityTab(bit_similarity)
+        if self._bit_similarity_settings:
+            tab.apply_settings(self._bit_similarity_settings)
+        return tab
+
+    def _capture_bit_similarity_settings(self):
+        for idx in range(self._tabs.count()):
+            if self._tabs.tabText(idx) != "Bit Similarity":
+                continue
+            tab = self._tabs.widget(idx)
+            if hasattr(tab, "get_settings"):
+                self._bit_similarity_settings = tab.get_settings()
+            break
 
 
 def main():
