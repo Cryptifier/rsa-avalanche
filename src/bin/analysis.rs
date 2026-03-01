@@ -812,13 +812,13 @@ fn build_bit_similarity_entries(
             let masked_bits = (*shift_idx).min(bit_width);
             let mut matching_bits = 0usize;
             for bit_idx in 0..bit_width {
-                let orig_idx = bit_idx + *shift_idx;
-                if orig_idx >= bit_width {
+                let cand_idx = bit_idx + *shift_idx;
+                if cand_idx >= bit_width {
                     continue;
                 }
-                if dm_bits[bit_idx] == message_bits[orig_idx] {
+                if dm_bits[cand_idx] == message_bits[bit_idx] {
                     matching_bits += 1;
-                    match_counts[orig_idx] = match_counts[orig_idx].saturating_add(1);
+                    match_counts[bit_idx] = match_counts[bit_idx].saturating_add(1);
                 }
             }
             let adjusted_matching_bits = matching_bits;

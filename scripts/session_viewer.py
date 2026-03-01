@@ -132,7 +132,6 @@ class BitSimilarityCanvas(QtWidgets.QAbstractScrollArea):
         self._match_color = QtGui.QColor(46, 160, 67)
         self._mismatch_color = QtGui.QColor(220, 72, 72)
         self._multi_match_color = QtGui.QColor(242, 201, 76)
-        self._prev_match_color = QtGui.QColor(128, 72, 201)
         self._masked_fill = QtGui.QColor(0, 0, 0)
         self._masked_text = QtGui.QColor(46, 160, 67)
         self._text_color = QtGui.QColor(40, 40, 40)
@@ -366,28 +365,22 @@ class BitSimilarityCanvas(QtWidgets.QAbstractScrollArea):
                 candidate_bits = self._candidate_bits(entry)
 
                 for bit_idx in range(max_bits):
-                    orig_idx = bit_idx + shift
-                    masked = orig_idx >= max_bits
+                    cand_idx = bit_idx + shift
+                    masked = cand_idx >= max_bits
                     matches_original = False
                     matches_prev = False
                     cand_bit = (
-                        candidate_bits[bit_idx]
-                        if bit_idx < len(candidate_bits)
+                        candidate_bits[cand_idx]
+                        if cand_idx < len(candidate_bits)
                         else False
                     )
                     if not masked:
-                        orig_bit = (
-                            original_bits[orig_idx]
-                            if orig_idx < len(original_bits)
-                            else False
-                        )
+                        orig_bit = original_bits[bit_idx] if bit_idx < len(original_bits) else False
                         matches_original = orig_bit == cand_bit
-                        if prev_bits is not None and bit_idx < len(prev_bits):
-                            matches_prev = prev_bits[bit_idx] == cand_bit
+                        if prev_bits is not None and cand_idx < len(prev_bits):
+                            matches_prev = prev_bits[cand_idx] == cand_bit
                     if matches_original and matches_prev:
                         base_candidate = self._multi_match_color
-                    elif matches_prev:
-                        base_candidate = self._prev_match_color
                     elif matches_original:
                         base_candidate = self._match_color
                     else:
@@ -406,7 +399,12 @@ class BitSimilarityCanvas(QtWidgets.QAbstractScrollArea):
                     painter.fillRect(x, y2, self._bit_size, self._bit_size, color2)
 
                     if masked:
-                        text2 = "1" if cand_bit else "0"
+                        masked_bit = (
+                            candidate_bits[bit_idx]
+                            if bit_idx < len(candidate_bits)
+                            else False
+                        )
+                        text2 = "1" if masked_bit else "0"
                         text_color2 = self._masked_text
                     else:
                         text2 = "1" if cand_bit else "0"
@@ -482,7 +480,7 @@ class BitSimilarityTab(QtWidgets.QWidget):
         self._hide_shifted.stateChanged.connect(self._on_hide_shifted)
 
         legend = QtWidgets.QLabel(
-            "Green = matches original, Purple = matches previous shift, Yellow = matches both, Black = masked bits. LSB-first bit order."
+            "Green = matches original, Yellow = multi-match with original, Black = masked bits. LSB-first bit order."
         )
         legend.setStyleSheet("color: #555;")
         layout.addWidget(legend)
@@ -594,11 +592,11 @@ class BitSimilarityTab(QtWidgets.QWidget):
             candidate_bits = hex_to_bits_le(entry.get("candidate_hex", ""), self._bit_width)
             shift = int(entry.get("shift", 0) or 0)
             for bit_idx in range(self._bit_width):
-                orig_idx = bit_idx + shift
-                if orig_idx >= self._bit_width:
+                cand_idx = bit_idx + shift
+                if cand_idx >= self._bit_width:
                     continue
-                if candidate_bits[bit_idx] == original_bits[orig_idx]:
-                    counts[orig_idx] += 1
+                if candidate_bits[cand_idx] == original_bits[bit_idx]:
+                    counts[bit_idx] += 1
         return counts
 
     def _sync_ranges(self):
