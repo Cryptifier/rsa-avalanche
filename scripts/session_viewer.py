@@ -678,6 +678,196 @@ class BitSimilarityTab(QtWidgets.QWidget):
         self._canvas.set_view(start, count, self._show_all.isChecked())
 
 
+class BitTrueTimelineCanvas(QtWidgets.QAbstractScrollArea):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._frames = []
+        self._bit_width = 0
+        self._window = 0
+        self._stride = 0
+
+        self._margin = 12
+        self._bar_width = 8
+        self._bar_gap = 2
+        self._depth_x = 4
+        self._depth_y = 3
+        self._max_height = 120
+
+        self._base_color = QtGui.QColor(52, 128, 235)
+        self._axis_color = QtGui.QColor(80, 80, 80)
+        self._text_color = QtGui.QColor(40, 40, 40)
+
+        self.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        self.setVerticalScrollBarPolicy(QtCore.Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+
+    def set_data(self, frames, bit_width, window, stride):
+        self._frames = list(frames or [])
+        self._bit_width = int(bit_width or 0)
+        self._window = int(window or 0)
+        self._stride = int(stride or 0)
+        self._update_scrollbars()
+        self.viewport().update()
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._update_scrollbars()
+
+    def _content_width(self):
+        frames = len(self._frames)
+        return (
+            self._margin * 2
+            + frames * (self._bar_width + self._bar_gap)
+            + self._bit_width * self._depth_x
+            + self._bar_width
+        )
+
+    def _content_height(self):
+        return (
+            self._margin * 2
+            + self._bit_width * self._depth_y
+            + self._max_height
+            + self._depth_y
+        )
+
+    def _update_scrollbars(self):
+        viewport = self.viewport().size()
+        content_width = self._content_width()
+        content_height = self._content_height()
+
+        h_bar = self.horizontalScrollBar()
+        v_bar = self.verticalScrollBar()
+
+        h_max = max(0, content_width - viewport.width())
+        v_max = max(0, content_height - viewport.height())
+
+        h_bar.setRange(0, h_max)
+        h_bar.setPageStep(viewport.width())
+        v_bar.setRange(0, v_max)
+        v_bar.setPageStep(viewport.height())
+
+    def _bar_color(self, prob):
+        intensity = max(0.0, min(1.0, prob))
+        base = QtGui.QColor(self._base_color)
+        base.setAlphaF(0.25 + 0.75 * intensity)
+        return base
+
+    def paintEvent(self, event):
+        super().paintEvent(event)
+        painter = QtGui.QPainter(self.viewport())
+        painter.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing, False)
+        painter.fillRect(self.viewport().rect(), self.palette().base())
+
+        if not self._frames or self._bit_width == 0:
+            painter.setPen(self._text_color)
+            painter.drawText(self._margin, self._margin + 16, "No bit probability timeline data.")
+            painter.end()
+            return
+
+        x_offset = self.horizontalScrollBar().value()
+        y_offset = self.verticalScrollBar().value()
+
+        origin_x = self._margin - x_offset
+        origin_y = (
+            self._margin
+            + self._bit_width * self._depth_y
+            + self._max_height
+            - y_offset
+        )
+
+        painter.setPen(self._axis_color)
+        painter.drawLine(origin_x, origin_y, origin_x + self._content_width(), origin_y)
+
+        frames = len(self._frames)
+        for frame_idx in range(frames):
+            frame = self._frames[frame_idx]
+            for bit_idx in range(min(self._bit_width, len(frame))):
+                prob = frame[bit_idx]
+                if prob <= 0.0:
+                    continue
+                height = max(1, int(prob * self._max_height))
+                x = (
+                    origin_x
+                    + frame_idx * (self._bar_width + self._bar_gap)
+                    + (self._bit_width - 1 - bit_idx) * self._depth_x
+                )
+                y = (
+                    origin_y
+                    - (self._bit_width - 1 - bit_idx) * self._depth_y
+                    - height
+                )
+
+                base_color = self._bar_color(prob)
+                top_color = base_color.lighter(130)
+                side_color = base_color.darker(130)
+
+                front = QtCore.QRectF(x, y, self._bar_width, height)
+                painter.fillRect(front, base_color)
+
+                top = QtGui.QPolygonF(
+                    [
+                        QtCore.QPointF(x, y),
+                        QtCore.QPointF(x + self._depth_x, y - self._depth_y),
+                        QtCore.QPointF(x + self._bar_width + self._depth_x, y - self._depth_y),
+                        QtCore.QPointF(x + self._bar_width, y),
+                    ]
+                )
+                painter.setBrush(top_color)
+                painter.setPen(QtCore.Qt.PenStyle.NoPen)
+                painter.drawPolygon(top)
+
+                side = QtGui.QPolygonF(
+                    [
+                        QtCore.QPointF(x + self._bar_width, y),
+                        QtCore.QPointF(x + self._bar_width + self._depth_x, y - self._depth_y),
+                        QtCore.QPointF(
+                            x + self._bar_width + self._depth_x,
+                            y - self._depth_y + height,
+                        ),
+                        QtCore.QPointF(x + self._bar_width, y + height),
+                    ]
+                )
+                painter.setBrush(side_color)
+                painter.drawPolygon(side)
+
+        painter.end()
+
+
+class BitTrueTimelineTab(QtWidgets.QWidget):
+    def __init__(self, timeline=None, parent=None):
+        super().__init__(parent)
+        self._bit_width = 0
+        self._window = 0
+        self._stride = 0
+        self._frames = []
+
+        layout = QtWidgets.QVBoxLayout(self)
+        self._info_label = QtWidgets.QLabel("")
+        layout.addWidget(self._info_label)
+
+        self._canvas = BitTrueTimelineCanvas()
+        layout.addWidget(self._canvas, 1)
+
+        legend = QtWidgets.QLabel(
+            "3D bars show per-bit P(1) over time (LSB-first)."
+        )
+        legend.setStyleSheet("color: #555;")
+        layout.addWidget(legend)
+
+        if timeline is not None:
+            self.set_data(timeline)
+
+    def set_data(self, timeline):
+        timeline = timeline or {}
+        self._bit_width = int(timeline.get("bit_width", 0) or 0)
+        self._window = int(timeline.get("window", 0) or 0)
+        self._stride = int(timeline.get("stride", 0) or 0)
+        self._frames = list(timeline.get("frames", []) or [])
+        frame_count = len(self._frames)
+        self._info_label.setText(
+            f"Frames: {frame_count} | Bits: {self._bit_width} | Window: {self._window} | Stride: {self._stride}"
+        )
+        self._canvas.set_data(self._frames, self._bit_width, self._window, self._stride)
+
 class SessionFileWatcher(QtCore.QObject):
     session_updated = QtCore.Signal(dict)
     error = QtCore.Signal(str)
@@ -823,6 +1013,7 @@ class SessionViewer(QtWidgets.QMainWindow):
         self._tabs.addTab(self._build_summary_tab(session), "Summary")
         self._tabs.addTab(self._build_candidates_tab(session), "Candidates")
         self._tabs.addTab(self._build_bit_similarity_tab(session), "Bit Similarity")
+        self._tabs.addTab(self._build_bit_true_timeline_tab(session), "Bit True Timeline")
         if self._tabs.count():
             self._tabs.setCurrentIndex(min(current_index, self._tabs.count() - 1))
         if self._current_session_path:
@@ -941,6 +1132,25 @@ class SessionViewer(QtWidgets.QMainWindow):
         if self._bit_similarity_settings:
             tab.apply_settings(self._bit_similarity_settings)
         return tab
+
+    def _build_bit_true_timeline_tab(self, session):
+        feature = get_feature(session, "information_sufficiency")
+        timeline = None
+        if feature:
+            stats = feature.get("stats", {})
+            timeline = stats.get("bit_true_timeline")
+
+        if not timeline:
+            widget = QtWidgets.QWidget()
+            layout = QtWidgets.QVBoxLayout(widget)
+            layout.addWidget(
+                QtWidgets.QLabel(
+                    "Bit true timeline data not found. Run analysis with --tests to populate it."
+                )
+            )
+            return widget
+
+        return BitTrueTimelineTab(timeline)
 
     def _capture_bit_similarity_settings(self):
         for idx in range(self._tabs.count()):

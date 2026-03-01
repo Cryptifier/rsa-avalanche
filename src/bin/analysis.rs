@@ -989,6 +989,7 @@ struct MatchSample {
 struct MatchTimelineSeries {
     entropy_mean: Vec<f64>,
     match_pct_mean: Vec<f64>,
+    bit_true_prob: Vec<Vec<f64>>,
 }
 
 #[derive(Clone, Debug)]
@@ -1592,6 +1593,7 @@ fn run_match_entropy_timeline(
             let end = (start + window).min(samples.len());
             let frame_samples = &samples[start..end];
             let mut match_counts = vec![0u32; bit_width];
+            let mut one_counts = vec![0u32; bit_width];
             let window_len_f = frame_samples.len().max(1) as f64;
 
             for sample in frame_samples {
@@ -1601,33 +1603,41 @@ fn run_match_entropy_timeline(
                     if a == b {
                         match_counts[bit_idx] = match_counts[bit_idx].saturating_add(1);
                     }
+                    if b {
+                        one_counts[bit_idx] = one_counts[bit_idx].saturating_add(1);
+                    }
                 }
             }
 
             let mut entropy_sum = 0.0;
             let mut match_sum = 0.0;
-            for count in match_counts {
+            let mut prob_one = Vec::with_capacity(bit_width);
+            for (count, ones) in match_counts.into_iter().zip(one_counts.into_iter()) {
                 let p = count as f64 / window_len_f;
                 entropy_sum += shannon_entropy_bit(p);
                 match_sum += p * 100.0;
+                prob_one.push(ones as f64 / window_len_f);
             }
 
             let denom = bit_width.max(1) as f64;
-            (frame_idx, entropy_sum / denom, match_sum / denom)
+            (frame_idx, entropy_sum / denom, match_sum / denom, prob_one)
         })
         .collect::<Vec<_>>();
 
-    frames.sort_by_key(|(idx, _, _)| *idx);
+    frames.sort_by_key(|(idx, _, _, _)| *idx);
     let mut entropy_mean = Vec::with_capacity(frame_count);
     let mut match_pct_mean = Vec::with_capacity(frame_count);
-    for (_, entropy, match_pct) in frames {
+    let mut bit_true_prob = Vec::with_capacity(frame_count);
+    for (_, entropy, match_pct, prob_one) in frames {
         entropy_mean.push(entropy);
         match_pct_mean.push(match_pct);
+        bit_true_prob.push(prob_one);
     }
 
     Ok(MatchTimelineSeries {
         entropy_mean,
         match_pct_mean,
+        bit_true_prob,
     })
 }
 
@@ -2301,6 +2311,11 @@ fn run_information_sufficiency_tests(
         match_pct_stats.max,
         match_pct_stats.count
     );
+    let bit_true_width = match_series
+        .bit_true_prob
+        .first()
+        .map(|row| row.len())
+        .unwrap_or(0);
     with_analytics(analytics, |a| {
         a.set_feature_stat(
             "information_sufficiency",
@@ -2311,6 +2326,17 @@ fn run_information_sufficiency_tests(
             "information_sufficiency",
             "match_pct_mean",
             json!(match_pct_stats.mean),
+        );
+        a.set_feature_stat(
+            "information_sufficiency",
+            "bit_true_timeline",
+            json!({
+                "bit_order": "lsb0",
+                "bit_width": bit_true_width,
+                "window": window,
+                "stride": stride,
+                "frames": match_series.bit_true_prob,
+            }),
         );
     });
 
