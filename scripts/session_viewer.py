@@ -181,10 +181,11 @@ class BitSimilarityCanvas(QtWidgets.QAbstractScrollArea):
     def _row_height_for(self, row):
         entries = row.get("entries", [])
         row_gap = self._bit_spacing + 8
+        extra_rows = 1 if entries else 0
         return (
             self._header_height
             + self._bit_size
-            + len(entries) * (self._bit_size + row_gap)
+            + (len(entries) + extra_rows) * (self._bit_size + row_gap)
             + self._row_padding
         )
 
@@ -415,6 +416,89 @@ class BitSimilarityCanvas(QtWidgets.QAbstractScrollArea):
                         QtCore.Qt.AlignmentFlag.AlignCenter,
                         text2,
                     )
+
+            majority_bits = [False] * max_bits
+            majority_votes = [0] * max_bits
+            majority_ones = [0] * max_bits
+            for entry in entries:
+                shift = int(entry.get("shift", 0) or 0)
+                candidate_bits = self._candidate_bits(entry)
+                for bit_idx in range(max_bits):
+                    cand_idx = bit_idx + shift
+                    if cand_idx >= max_bits:
+                        continue
+                    bit_val = candidate_bits[cand_idx] if cand_idx < len(candidate_bits) else False
+                    if bit_val:
+                        majority_ones[bit_idx] += 1
+                    majority_votes[bit_idx] += 1
+
+            for bit_idx in range(max_bits):
+                votes = majority_votes[bit_idx]
+                if votes == 0:
+                    continue
+                ones = majority_ones[bit_idx]
+                zeros = votes - ones
+                majority_bits[bit_idx] = ones >= zeros
+
+            majority_matches = 0
+            majority_unmasked = 0
+            for bit_idx in range(max_bits):
+                if majority_votes[bit_idx] == 0:
+                    continue
+                majority_unmasked += 1
+                if majority_bits[bit_idx] == original_bits[bit_idx]:
+                    majority_matches += 1
+
+            majority_denom = max(1, majority_unmasked)
+            majority_pct = (majority_matches / float(majority_denom)) * 100.0
+            majority_row_y = (
+                bits_top
+                + self._bit_size
+                + row_gap
+                + len(entries) * (self._bit_size + row_gap)
+            )
+            painter.drawText(
+                label_x,
+                majority_row_y + self._bit_size,
+                f"Majority vote | adj={majority_pct:.2f}% ({majority_matches}/{majority_denom})",
+            )
+
+            for bit_idx in range(max_bits):
+                votes = majority_votes[bit_idx]
+                masked = votes == 0
+                majority_bit = majority_bits[bit_idx]
+                matches_original = (not masked) and (majority_bit == original_bits[bit_idx])
+                if matches_original and votes > 1:
+                    base_candidate = self._multi_match_color
+                elif matches_original:
+                    base_candidate = self._match_color
+                else:
+                    base_candidate = self._mismatch_color
+
+                x = (
+                    self._margin
+                    + self._label_width
+                    + bit_idx * (self._bit_size + self._bit_spacing)
+                    - x_offset
+                )
+                if masked:
+                    color2 = self._masked_fill
+                else:
+                    color2 = base_candidate.lighter(130) if not majority_bit else base_candidate
+                painter.fillRect(x, majority_row_y, self._bit_size, self._bit_size, color2)
+
+                if masked:
+                    text2 = "1" if majority_bit else "0"
+                    text_color2 = self._masked_text
+                else:
+                    text2 = "1" if majority_bit else "0"
+                    text_color2 = QtGui.QColor(255, 255, 255)
+                painter.setPen(text_color2)
+                painter.drawText(
+                    QtCore.QRectF(x, majority_row_y, self._bit_size, self._bit_size),
+                    QtCore.Qt.AlignmentFlag.AlignCenter,
+                    text2,
+                )
 
             painter.setFont(base_font)
 
