@@ -551,16 +551,22 @@ class SessionViewer(QtWidgets.QMainWindow):
         self._dir_watcher = QtCore.QFileSystemWatcher(self)
         self._dir_watcher.directoryChanged.connect(self.refresh_log_list)
 
-        self.refresh_log_list(select_path=self._current_session_path)
+        self.refresh_log_list(select_path=self._current_session_path, reload_selected=False)
         self.reload_session(session)
 
-    def refresh_log_list(self, *_args, select_path=None):
+    def refresh_log_list(self, *_args, select_path=None, reload_selected=True):
         log_paths = collect_log_paths(self._default_paths, self._log_dir)
         if self._log_dir and os.path.isdir(self._log_dir):
             if self._log_dir not in self._dir_watcher.directories():
                 self._dir_watcher.addPath(self._log_dir)
 
         current = select_path or self._current_session_path
+        keep_current = (
+            select_path is None
+            and current
+            and current == self._current_session_path
+            and current in log_paths
+        )
         self._log_list.blockSignals(True)
         self._log_list.clear()
         for path in log_paths:
@@ -568,17 +574,21 @@ class SessionViewer(QtWidgets.QMainWindow):
             item.setToolTip(path)
             item.setData(QtCore.Qt.ItemDataRole.UserRole, path)
             self._log_list.addItem(item)
-        self._log_list.blockSignals(False)
-
+        selected_item = None
         if log_paths:
             selected_path = current if current in log_paths else log_paths[0]
             for idx in range(self._log_list.count()):
                 item = self._log_list.item(idx)
                 if item.data(QtCore.Qt.ItemDataRole.UserRole) == selected_path:
+                    selected_item = item
                     self._log_list.setCurrentItem(item)
                     break
         else:
             self._current_session_path = ""
+        self._log_list.blockSignals(False)
+
+        if reload_selected and not keep_current and selected_item is not None:
+            self._on_log_selected(selected_item, None)
 
     def _on_log_selected(self, current, _previous):
         if current is None:
