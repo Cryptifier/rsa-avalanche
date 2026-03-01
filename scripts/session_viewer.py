@@ -194,13 +194,13 @@ class BitSimilarityCanvas(QtWidgets.QAbstractScrollArea):
         v_bar.setRange(0, v_max)
         v_bar.setPageStep(viewport.height())
 
-    def _candidate_bits(self, entry_idx):
-        cached = self._bit_cache.get(entry_idx)
+    def _candidate_bits(self, entry):
+        cache_key = entry.get("_orig_index", id(entry))
+        cached = self._bit_cache.get(cache_key)
         if cached is not None:
             return cached
-        entry = self._entries[entry_idx]
         bits = hex_to_bits_le(entry.get("candidate_hex", ""), self._bit_width)
-        self._bit_cache[entry_idx] = bits
+        self._bit_cache[cache_key] = bits
         return bits
 
     def paintEvent(self, event):
@@ -232,6 +232,7 @@ class BitSimilarityCanvas(QtWidgets.QAbstractScrollArea):
                 break
 
             entry = self._entries[entry_idx]
+            display_idx = entry.get("_orig_index", entry_idx)
             row_top = self._margin + row * row_height - y_offset
             header_y = row_top + self._header_height - 4
             bits_top = row_top + self._header_height
@@ -243,7 +244,7 @@ class BitSimilarityCanvas(QtWidgets.QAbstractScrollArea):
             painter.drawText(
                 self._margin - x_offset,
                 header_y,
-                f"#{entry_idx} | r={r_value} | match={match_pct:.2f}% | matching bits={matching_bits}",
+                f"#{display_idx} | r={r_value} | match={match_pct:.2f}% | matching bits={matching_bits}",
             )
 
             label_x = self._margin - x_offset
@@ -253,7 +254,7 @@ class BitSimilarityCanvas(QtWidgets.QAbstractScrollArea):
             )
 
             original_bits = self._original_bits
-            candidate_bits = self._candidate_bits(entry_idx)
+            candidate_bits = self._candidate_bits(entry)
             max_bits = self._bit_width
             small_font = QtGui.QFont(base_font)
             small_font.setPixelSize(max(4, int(self._bit_size * 0.5)))
@@ -305,6 +306,7 @@ class BitSimilarityCanvas(QtWidgets.QAbstractScrollArea):
 class BitSimilarityTab(QtWidgets.QWidget):
     def __init__(self, bit_similarity=None, parent=None):
         super().__init__(parent)
+        self._entries_raw = []
         self._entries = []
         self._bit_width = 0
         self._original_hex = ""
@@ -313,6 +315,15 @@ class BitSimilarityTab(QtWidgets.QWidget):
         layout = QtWidgets.QVBoxLayout(self)
 
         control_row = QtWidgets.QHBoxLayout()
+        self._sort_combo = QtWidgets.QComboBox()
+        self._sort_combo.addItems(
+            [
+                "Original order",
+                "Match % (Descending)",
+                "Match % (Ascending)",
+            ]
+        )
+        self._sort_combo.currentIndexChanged.connect(self._on_sort_changed)
         self._start_spin = QtWidgets.QSpinBox()
         self._start_spin.setRange(0, 0)
         self._start_spin.setValue(0)
@@ -326,6 +337,8 @@ class BitSimilarityTab(QtWidgets.QWidget):
         self._show_all = QtWidgets.QCheckBox("Show all rows")
         self._show_all.setChecked(True)
 
+        control_row.addWidget(QtWidgets.QLabel("Sort:"))
+        control_row.addWidget(self._sort_combo)
         control_row.addWidget(QtWidgets.QLabel("Start index:"))
         control_row.addWidget(self._start_spin)
         control_row.addWidget(QtWidgets.QLabel("Rows:"))
@@ -351,10 +364,24 @@ class BitSimilarityTab(QtWidgets.QWidget):
 
     def set_data(self, bit_similarity):
         bit_similarity = bit_similarity or {}
-        self._entries = list(bit_similarity.get("candidates", []))
+        self._entries_raw = [
+            {**entry, "_orig_index": idx}
+            for idx, entry in enumerate(bit_similarity.get("candidates", []))
+        ]
         self._bit_width = int(bit_similarity.get("bit_width", 0) or 0)
         self._original_hex = bit_similarity.get("original_hex", "")
         self._bit_order = bit_similarity.get("bit_order", "lsb0")
+
+        self._apply_sort(reset_view=True)
+
+    def _apply_sort(self, reset_view):
+        sort_mode = self._sort_combo.currentText()
+        entries = list(self._entries_raw)
+        if sort_mode == "Match % (Descending)":
+            entries.sort(key=lambda e: e.get("match_pct", 0.0), reverse=True)
+        elif sort_mode == "Match % (Ascending)":
+            entries.sort(key=lambda e: e.get("match_pct", 0.0))
+        self._entries = entries
 
         total = len(self._entries)
         self._start_spin.blockSignals(True)
@@ -372,7 +399,12 @@ class BitSimilarityTab(QtWidgets.QWidget):
         self._rows_spin.blockSignals(False)
 
         self._canvas.set_data(self._entries, self._bit_width, self._original_hex)
+        if reset_view:
+            self._show_all.setChecked(True)
         self._toggle_show_all(self._show_all.isChecked())
+
+    def _on_sort_changed(self, _idx):
+        self._apply_sort(reset_view=True)
 
     def _toggle_show_all(self, checked):
         show_all = bool(checked)
