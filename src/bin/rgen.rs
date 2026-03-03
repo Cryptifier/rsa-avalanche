@@ -64,6 +64,10 @@ struct Args {
     #[arg(long, alias = "bit-length", value_name = "BITS")]
     r_bits: Option<u64>,
 
+    /// Percent smaller than modulus bit length for r candidates (default 30 when flag is present)
+    #[arg(long, value_name = "PCT", num_args = 0..=1, default_missing_value = "30")]
+    r_bits_percent: Option<f64>,
+
     /// Number of r candidates to generate (overrides config counts)
     #[arg(long)]
     count: Option<u64>,
@@ -159,8 +163,14 @@ fn run_rgen(args: Args, config: Config) -> Result<(), Box<dyn Error>> {
         .clone()
         .unwrap_or_else(|| config.engine.reuse_r_candidates_path.clone());
 
-    let settings = build_r_candidate_settings(&config.engine, &args, &output_path)?;
     let modulus = resolve_modulus(&args, &config, &mut rng)?;
+    let target_bit_length_override = resolve_target_bit_length_override(&args, modulus.as_ref())?;
+    let settings = build_r_candidate_settings(
+        &config.engine,
+        &args,
+        &output_path,
+        target_bit_length_override,
+    )?;
 
     if settings.mode == RCandidateMode::Factoring && modulus.is_none() {
         return Err(
@@ -281,6 +291,7 @@ fn resolve_modulus(
 /// - `engine`: Engine configuration used for defaults.
 /// - `args`: CLI arguments that override defaults.
 /// - `output_path`: Output file path used for reuse metadata.
+/// - `target_bit_length_override`: Optional target bit length override from percent-based settings.
 ///
 /// # Returns
 /// - `Result<RCandidateSettings, Box<dyn Error>>`: Fully populated settings.
@@ -291,6 +302,7 @@ fn build_r_candidate_settings(
     engine: &EngineConfig,
     args: &Args,
     output_path: &str,
+    target_bit_length_override: Option<u64>,
 ) -> Result<RCandidateSettings, Box<dyn Error>> {
     let override_best_r = if let Some(ref raw) = args.override_r {
         Some(parse_biguint_arg(raw)?)
@@ -346,8 +358,50 @@ fn build_r_candidate_settings(
         max_factors_per_candidate: args
             .max_factors
             .unwrap_or(engine.r_candidate_max_factors),
-        target_bit_length: args.r_bits.or(engine.r_candidate_bit_length),
+        target_bit_length: args
+            .r_bits
+            .or(target_bit_length_override)
+            .or(engine.r_candidate_bit_length),
     })
+}
+
+/// Resolves a target bit length override from the modulus and percent flag.
+///
+/// # Parameters
+/// - `args`: CLI arguments that may include a percent reduction.
+/// - `modulus`: Resolved RSA modulus used to compute the target length.
+///
+/// # Returns
+/// - `Result<Option<u64>, Box<dyn Error>>`: Computed target bit length override when set.
+///
+/// # Expected Output
+/// - Returns `Ok(None)` when no percent is provided; no side effects.
+fn resolve_target_bit_length_override(
+    args: &Args,
+    modulus: Option<&BigUint>,
+) -> Result<Option<u64>, Box<dyn Error>> {
+    let Some(percent) = args.r_bits_percent else {
+        return Ok(None);
+    };
+
+    if !(percent > 0.0 && percent < 100.0) || percent.is_nan() {
+        return Err("--r-bits-percent must be greater than 0 and less than 100".into());
+    }
+
+    let modulus = modulus.ok_or(
+        "--r-bits-percent requires a modulus from config, --n, --p/--q, or --bits",
+    )?;
+    let bits = modulus.bits();
+    if bits == 0 {
+        return Err("modulus bit length must be non-zero".into());
+    }
+
+    let target = ((bits as f64) * (1.0 - (percent / 100.0))).floor() as u64;
+    if target == 0 {
+        return Err("--r-bits-percent produces a zero bit-length target".into());
+    }
+
+    Ok(Some(target))
 }
 
 /// Writes r candidates to a CSV file, optionally appending.
@@ -660,6 +714,7 @@ mod tests {
             max_factors: None,
             override_r: None,
             r_bits: None,
+            r_bits_percent: None,
         }
     }
 
@@ -695,7 +750,7 @@ mod tests {
         args.max_factors = Some(12);
         args.r_bits = Some(80);
 
-        let settings = build_r_candidate_settings(&engine, &args, "r_candidates.csv")
+        let settings = build_r_candidate_settings(&engine, &args, "r_candidates.csv", None)
             .expect("settings failed");
         assert_eq!(settings.process_count, 10);
         assert_eq!(settings.process_min_count, 8);
@@ -733,6 +788,17 @@ mod tests {
         assert!(joined.contains("small_prime_factors=3"));
         assert!(joined.contains("max_factors=6"));
         assert!(joined.contains("target_bits=64"));
+    }
+
+    #[test]
+    fn test_resolve_target_bit_length_override_percent() {
+        let mut args = base_args();
+        args.r_bits_percent = Some(30.0);
+        let modulus = BigUint::from(1u8) << 99;
+        let target = resolve_target_bit_length_override(&args, Some(&modulus))
+            .expect("resolve percent failed")
+            .expect("missing target bits");
+        assert_eq!(target, 70);
     }
 
     #[test]
