@@ -682,10 +682,16 @@ struct StatSummary {
 #[derive(Debug, Serialize)]
 struct BitSimilarityEntry {
     index: usize,
+    shift: usize,
     r: String,
     candidate_hex: String,
     match_pct: f64,
     matching_bits: usize,
+    adjusted_match_pct: f64,
+    adjusted_matching_bits: usize,
+    masked_bits: usize,
+    base_match_pct: f64,
+    base_matching_bits: usize,
 }
 
 /// Computes mean, standard deviation, min, and max for a slice of values.
@@ -741,9 +747,10 @@ fn compute_stats(values: &[f64]) -> Option<StatSummary> {
 /// - `candidates`: Prepared r candidates to evaluate.
 /// - `message`: Reference message used for bit comparisons.
 /// - `shift`: Whether to shift ciphertext by encrypted 2 before conversion.
+/// - `shift_levels`: Number of left-shift multiplications to compare per candidate.
 ///
 /// # Returns
-/// - `Vec<BitSimilarityEntry>`: Per-candidate similarity entries.
+/// - `(Vec<BitSimilarityEntry>, Vec<u32>, usize)`: Entries, per-bit match counts, and shift levels used.
 ///
 /// # Expected Output
 /// - Returns entries describing per-candidate bit matches; no stdout/stderr output.
@@ -753,28 +760,47 @@ fn build_bit_similarity_entries(
     candidates: &[OracleCandidate],
     message: &BigUint,
     shift: bool,
-) -> Vec<BitSimilarityEntry> {
+    shift_levels: usize,
+) -> (Vec<BitSimilarityEntry>, Vec<u32>, usize) {
     if candidates.is_empty() {
-        return Vec::new();
+        return (Vec::new(), Vec::new(), 0);
     }
 
     let bit_width = message.bits().max(1) as usize;
     let message_bits = biguint_to_bits_le(message, bit_width);
+    let base_shift = if shift { 1usize } else { 0usize };
+    let max_shift = (base_shift + shift_levels).min(bit_width.saturating_sub(1));
+    let mut match_counts = vec![0u32; bit_width];
 
     let y = engine.rabin_exponent as u32;
     let n_pow_y = ctx.n.pow(y);
     let ciphertext = message.modpow(&ctx.e, &ctx.n);
-    let shifted = maybe_shift_ciphertext(ctx, &ciphertext, shift);
-    let result_default = get_larger_number(&shifted, &ctx.n, y, true, false);
+    let enc_two = BigUint::from(2u8).modpow(&ctx.e, &ctx.n);
+    let mut shift_results = Vec::new();
+    let mut enc_two_pow = BigUint::one();
+    for shift_idx in 0..=max_shift {
+        if shift_idx > 0 {
+            enc_two_pow = (&enc_two_pow * &enc_two) % &ctx.n;
+        }
+        if shift_idx < base_shift {
+            continue;
+        }
+        let shifted_ciphertext = (&ciphertext * &enc_two_pow) % &ctx.n;
+        let result_default = get_larger_number(&shifted_ciphertext, &ctx.n, y, true, false);
+        shift_results.push((shift_idx, result_default));
+    }
 
-    candidates
-        .iter()
-        .enumerate()
-        .map(|(index, candidate)| {
+    let mut entries = Vec::with_capacity(candidates.len() * (max_shift + 1).max(1));
+    for (index, candidate) in candidates.iter().enumerate() {
+        let mut base_match_pct = 0.0;
+        let mut base_matching_bits = 0;
+        let denom = bit_width.max(1) as f64;
+
+        for (shift_idx, result_default) in &shift_results {
             let dm = derive_candidate_message_from_result(
                 ctx,
                 engine,
-                &result_default,
+                result_default,
                 &candidate.r,
                 &candidate.d_new,
                 &n_pow_y,
@@ -783,22 +809,43 @@ fn build_bit_similarity_entries(
                 false,
             );
             let dm_bits = biguint_to_bits_le(&dm, bit_width);
-            let matching_bits = dm_bits
-                .iter()
-                .zip(message_bits.iter())
-                .filter(|(a, b)| a == b)
-                .count();
-            let denom = bit_width.max(1) as f64;
+            let masked_bits = (*shift_idx).min(bit_width);
+            let mut matching_bits = 0usize;
+            for bit_idx in 0..bit_width {
+                let cand_idx = bit_idx + *shift_idx;
+                if cand_idx >= bit_width {
+                    continue;
+                }
+                if dm_bits[cand_idx] == message_bits[bit_idx] {
+                    matching_bits += 1;
+                    match_counts[bit_idx] = match_counts[bit_idx].saturating_add(1);
+                }
+            }
+            let adjusted_matching_bits = matching_bits;
             let match_pct = matching_bits as f64 / denom * 100.0;
-            BitSimilarityEntry {
+            let adjusted_denom = bit_width.saturating_sub(masked_bits).max(1) as f64;
+            let adjusted_match_pct = adjusted_matching_bits as f64 / adjusted_denom * 100.0;
+            if *shift_idx == base_shift {
+                base_match_pct = match_pct;
+                base_matching_bits = matching_bits;
+            }
+            entries.push(BitSimilarityEntry {
                 index,
+                shift: *shift_idx,
                 r: candidate.r.to_string(),
                 candidate_hex: to_hex(&dm),
                 match_pct,
                 matching_bits,
-            }
-        })
-        .collect()
+                adjusted_match_pct,
+                adjusted_matching_bits,
+                masked_bits,
+                base_match_pct,
+                base_matching_bits,
+            });
+        }
+    }
+
+    (entries, match_counts, max_shift)
 }
 
 /// Writes a histogram image for overlap percentages.
@@ -942,6 +989,7 @@ struct MatchSample {
 struct MatchTimelineSeries {
     entropy_mean: Vec<f64>,
     match_pct_mean: Vec<f64>,
+    bit_true_prob: Vec<Vec<f64>>,
 }
 
 #[derive(Clone, Debug)]
@@ -1545,6 +1593,7 @@ fn run_match_entropy_timeline(
             let end = (start + window).min(samples.len());
             let frame_samples = &samples[start..end];
             let mut match_counts = vec![0u32; bit_width];
+            let mut one_counts = vec![0u32; bit_width];
             let window_len_f = frame_samples.len().max(1) as f64;
 
             for sample in frame_samples {
@@ -1554,33 +1603,41 @@ fn run_match_entropy_timeline(
                     if a == b {
                         match_counts[bit_idx] = match_counts[bit_idx].saturating_add(1);
                     }
+                    if b {
+                        one_counts[bit_idx] = one_counts[bit_idx].saturating_add(1);
+                    }
                 }
             }
 
             let mut entropy_sum = 0.0;
             let mut match_sum = 0.0;
-            for count in match_counts {
+            let mut prob_one = Vec::with_capacity(bit_width);
+            for (count, ones) in match_counts.into_iter().zip(one_counts.into_iter()) {
                 let p = count as f64 / window_len_f;
                 entropy_sum += shannon_entropy_bit(p);
                 match_sum += p * 100.0;
+                prob_one.push(ones as f64 / window_len_f);
             }
 
             let denom = bit_width.max(1) as f64;
-            (frame_idx, entropy_sum / denom, match_sum / denom)
+            (frame_idx, entropy_sum / denom, match_sum / denom, prob_one)
         })
         .collect::<Vec<_>>();
 
-    frames.sort_by_key(|(idx, _, _)| *idx);
+    frames.sort_by_key(|(idx, _, _, _)| *idx);
     let mut entropy_mean = Vec::with_capacity(frame_count);
     let mut match_pct_mean = Vec::with_capacity(frame_count);
-    for (_, entropy, match_pct) in frames {
+    let mut bit_true_prob = Vec::with_capacity(frame_count);
+    for (_, entropy, match_pct, prob_one) in frames {
         entropy_mean.push(entropy);
         match_pct_mean.push(match_pct);
+        bit_true_prob.push(prob_one);
     }
 
     Ok(MatchTimelineSeries {
         entropy_mean,
         match_pct_mean,
+        bit_true_prob,
     })
 }
 
@@ -2254,6 +2311,11 @@ fn run_information_sufficiency_tests(
         match_pct_stats.max,
         match_pct_stats.count
     );
+    let bit_true_width = match_series
+        .bit_true_prob
+        .first()
+        .map(|row| row.len())
+        .unwrap_or(0);
     with_analytics(analytics, |a| {
         a.set_feature_stat(
             "information_sufficiency",
@@ -2264,6 +2326,17 @@ fn run_information_sufficiency_tests(
             "information_sufficiency",
             "match_pct_mean",
             json!(match_pct_stats.mean),
+        );
+        a.set_feature_stat(
+            "information_sufficiency",
+            "bit_true_timeline",
+            json!({
+                "bit_order": "lsb0",
+                "bit_width": bit_true_width,
+                "window": window,
+                "stride": stride,
+                "frames": match_series.bit_true_prob,
+            }),
         );
     });
 
@@ -2330,8 +2403,15 @@ fn run_information_sufficiency_tests(
     }
     print_best_case_hex(message, &best_case_bits);
 
-    let bit_similarity_entries =
-        build_bit_similarity_entries(ctx, engine, &candidates, message, shift);
+    let (bit_similarity_entries, match_counts_per_bit, shift_levels_used) =
+        build_bit_similarity_entries(
+            ctx,
+            engine,
+            &candidates,
+            message,
+            shift,
+            engine.analysis_shift_multiplications,
+        );
     with_analytics(analytics, |a| {
         a.set_feature_stat(
             "information_sufficiency",
@@ -2340,6 +2420,9 @@ fn run_information_sufficiency_tests(
                 "bit_order": "lsb0",
                 "bit_width": message.bits().max(1),
                 "original_hex": to_hex(message),
+                "shift_levels_configured": engine.analysis_shift_multiplications,
+                "shift_levels_used": shift_levels_used,
+                "match_counts_per_bit": match_counts_per_bit,
                 "candidates": bit_similarity_entries,
             }),
         );

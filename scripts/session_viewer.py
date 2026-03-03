@@ -66,16 +66,60 @@ def hex_to_bits_le(hex_str, bit_width):
     return bits
 
 
+def empty_session():
+    return {
+        "started_unix_ms": None,
+        "finished_unix_ms": None,
+        "cli": {},
+        "features": [],
+        "r_candidate_batches": [],
+        "errors": [],
+    }
+
+
+def collect_log_paths(default_paths, log_dir):
+    seen = set()
+    results = []
+    for path in default_paths:
+        if not path:
+            continue
+        full = os.path.abspath(path)
+        if os.path.exists(full) and full not in seen:
+            results.append(full)
+            seen.add(full)
+
+    if log_dir and os.path.isdir(log_dir):
+        entries = []
+        for name in os.listdir(log_dir):
+            if not (name.endswith(".json") or name.endswith(".log")):
+                continue
+            full = os.path.abspath(os.path.join(log_dir, name))
+            try:
+                mtime = os.path.getmtime(full)
+            except OSError:
+                mtime = 0
+            entries.append((mtime, full))
+        for _mtime, full in sorted(entries, key=lambda item: item[0], reverse=True):
+            if full not in seen:
+                results.append(full)
+                seen.add(full)
+    return results
+
+
 class BitSimilarityCanvas(QtWidgets.QAbstractScrollArea):
     def __init__(self, parent=None):
         super().__init__(parent)
-        self._entries = []
+        self._rows = []
         self._bit_width = 0
         self._original_bits = []
         self._start_index = 0
         self._display_count = 0
         self._show_all = True
         self._bit_cache = {}
+        self._match_counts = []
+        self._row_tops = []
+        self._content_height_px = 0
+        self._max_shift = 0
 
         self._margin = 8
         self._label_width = 90
@@ -87,25 +131,31 @@ class BitSimilarityCanvas(QtWidgets.QAbstractScrollArea):
 
         self._match_color = QtGui.QColor(46, 160, 67)
         self._mismatch_color = QtGui.QColor(220, 72, 72)
+        self._multi_match_color = QtGui.QColor(242, 201, 76)
+        self._masked_fill = QtGui.QColor(0, 0, 0)
+        self._masked_text = QtGui.QColor(46, 160, 67)
         self._text_color = QtGui.QColor(40, 40, 40)
 
         self.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarPolicy.ScrollBarAsNeeded)
         self.setVerticalScrollBarPolicy(QtCore.Qt.ScrollBarPolicy.ScrollBarAsNeeded)
 
-    def set_data(self, entries, bit_width, original_hex):
-        self._entries = list(entries)
+    def set_data(self, rows, bit_width, original_hex, match_counts=None):
+        self._rows = list(rows)
         self._bit_width = int(bit_width or 0)
         self._original_bits = hex_to_bits_le(original_hex, self._bit_width)
         self._bit_cache.clear()
+        self._match_counts = list(match_counts or [])
+        self._max_shift = self._max_shift_for_rows(self._rows)
         self._start_index = 0
-        self._display_count = len(self._entries)
+        self._display_count = len(self._rows)
         self._show_all = True
+        self._rebuild_row_metrics()
         self._update_scrollbars()
         self.viewport().update()
 
     def set_view(self, start_index, count, show_all):
         self._show_all = bool(show_all)
-        total = len(self._entries)
+        total = len(self._rows)
         if total == 0:
             self._start_index = 0
             self._display_count = 0
@@ -117,6 +167,7 @@ class BitSimilarityCanvas(QtWidgets.QAbstractScrollArea):
             count = max(1, min(count, total - start_index))
             self._start_index = start_index
             self._display_count = count
+        self._rebuild_row_metrics()
         self._update_scrollbars()
         self.viewport().update()
 
@@ -125,18 +176,49 @@ class BitSimilarityCanvas(QtWidgets.QAbstractScrollArea):
         self._update_scrollbars()
 
     def _row_height(self):
-        bit_rows_height = 2 * self._bit_size + self._bit_spacing + 8
-        return self._header_height + bit_rows_height + self._row_padding
+        return self._header_height + self._row_padding
+
+    def _row_height_for(self, row):
+        entries = row.get("entries", [])
+        row_gap = self._bit_spacing + 8
+        extra_rows = 1 if entries else 0
+        return (
+            self._header_height
+            + self._bit_size
+            + (len(entries) + extra_rows) * (self._bit_size + row_gap)
+            + self._row_padding
+        )
 
     def _content_width(self):
-        bits_width = self._bit_width * (self._bit_size + self._bit_spacing)
+        bits_width = (self._bit_width + self._max_shift) * (self._bit_size + self._bit_spacing)
         return self._margin * 2 + self._label_width + bits_width
 
     def _content_height(self):
-        rows = self._display_count
-        if rows == 0:
-            return 0
-        return self._margin * 2 + rows * (self._row_height() + self._row_spacing)
+        return self._content_height_px
+
+    def _max_shift_for_rows(self, rows):
+        max_shift = 0
+        for row in rows:
+            for entry in row.get("entries", []):
+                shift = int(entry.get("shift", 0) or 0)
+                if shift > max_shift:
+                    max_shift = shift
+        return max_shift
+
+    def _rebuild_row_metrics(self):
+        self._row_tops = []
+        if self._display_count == 0:
+            self._content_height_px = 0
+            return
+        y = self._margin
+        end_index = min(len(self._rows), self._start_index + self._display_count)
+        for idx in range(self._start_index, end_index):
+            row = self._rows[idx]
+            self._row_tops.append(y)
+            y += self._row_height_for(row) + self._row_spacing
+        if self._row_tops:
+            y -= self._row_spacing
+        self._content_height_px = self._margin + y
 
     def _update_scrollbars(self):
         viewport = self.viewport().size()
@@ -154,14 +236,25 @@ class BitSimilarityCanvas(QtWidgets.QAbstractScrollArea):
         v_bar.setRange(0, v_max)
         v_bar.setPageStep(viewport.height())
 
-    def _candidate_bits(self, entry_idx):
-        cached = self._bit_cache.get(entry_idx)
+    def _candidate_bits(self, entry):
+        cache_key = entry.get("_orig_index", entry.get("index", id(entry)))
+        cached = self._bit_cache.get(cache_key)
         if cached is not None:
             return cached
-        entry = self._entries[entry_idx]
         bits = hex_to_bits_le(entry.get("candidate_hex", ""), self._bit_width)
-        self._bit_cache[entry_idx] = bits
+        self._bit_cache[cache_key] = bits
         return bits
+
+    def _shifted_bits(self, bits, shift):
+        if shift <= 0:
+            return list(bits)
+        width = self._bit_width
+        shifted = [False] * width
+        if shift >= width:
+            return shifted
+        for idx in range(shift, width):
+            shifted[idx] = bits[idx - shift]
+        return shifted
 
     def paintEvent(self, event):
         super().paintEvent(event)
@@ -178,52 +271,60 @@ class BitSimilarityCanvas(QtWidgets.QAbstractScrollArea):
 
         x_offset = self.horizontalScrollBar().value()
         y_offset = self.verticalScrollBar().value()
-        row_height = self._row_height() + self._row_spacing
-
-        first_row = max(0, y_offset // row_height)
-        last_row = min(
-            self._display_count,
-            (y_offset + self.viewport().height()) // row_height + 1,
-        )
-
-        for row in range(first_row, last_row):
-            entry_idx = self._start_index + row
-            if entry_idx >= len(self._entries):
+        visible_top = y_offset
+        visible_bottom = y_offset + self.viewport().height()
+        start_offset = 0
+        for idx, row_top in enumerate(self._row_tops):
+            row = self._rows[self._start_index + idx]
+            row_bottom = row_top + self._row_height_for(row)
+            if row_bottom >= visible_top:
+                start_offset = idx
                 break
 
-            entry = self._entries[entry_idx]
-            row_top = self._margin + row * row_height - y_offset
+        for offset_idx in range(start_offset, len(self._row_tops)):
+            row_idx = self._start_index + offset_idx
+            if row_idx >= len(self._rows):
+                break
+            row = self._rows[row_idx]
+            row_top_abs = self._row_tops[offset_idx]
+            row_bottom_abs = row_top_abs + self._row_height_for(row)
+            if row_top_abs > visible_bottom:
+                break
+
+            display_idx = row.get("index", row_idx)
+            row_top = row_top_abs - y_offset
             header_y = row_top + self._header_height - 4
             bits_top = row_top + self._header_height
 
             painter.setPen(self._text_color)
-            r_value = entry.get("r", "")
-            match_pct = entry.get("match_pct", 0.0)
-            matching_bits = entry.get("matching_bits", 0)
+            r_value = row.get("r", "")
+            match_pct = row.get("base_match_pct", 0.0)
+            matching_bits = row.get("base_matching_bits", 0)
             painter.drawText(
                 self._margin - x_offset,
                 header_y,
-                f"#{entry_idx} | r={r_value} | match={match_pct:.2f}% | matching bits={matching_bits}",
+                f"#{display_idx} | r={r_value} | match={match_pct:.2f}% | matching bits={matching_bits}",
             )
 
             label_x = self._margin - x_offset
             painter.drawText(label_x, bits_top + self._bit_size, "Original")
-            painter.drawText(
-                label_x, bits_top + self._bit_size + self._bit_spacing + 8 + self._bit_size, "Candidate"
-            )
 
             original_bits = self._original_bits
-            candidate_bits = self._candidate_bits(entry_idx)
+            entries = row.get("entries", [])
+            if not entries:
+                continue
+            base_bits = self._candidate_bits(entries[0])
             max_bits = self._bit_width
             small_font = QtGui.QFont(base_font)
             small_font.setPixelSize(max(4, int(self._bit_size * 0.5)))
             painter.setFont(small_font)
-
+            row_gap = self._bit_spacing + 8
+            y1 = bits_top
             for bit_idx in range(max_bits):
                 orig_bit = original_bits[bit_idx] if bit_idx < len(original_bits) else False
-                cand_bit = candidate_bits[bit_idx] if bit_idx < len(candidate_bits) else False
+                cand_bit = base_bits[bit_idx] if bit_idx < len(base_bits) else False
                 matches = orig_bit == cand_bit
-                base = self._match_color if matches else self._mismatch_color
+                base_original = self._match_color if matches else self._mismatch_color
 
                 x = (
                     self._margin
@@ -231,28 +332,170 @@ class BitSimilarityCanvas(QtWidgets.QAbstractScrollArea):
                     + bit_idx * (self._bit_size + self._bit_spacing)
                     - x_offset
                 )
-                y1 = bits_top
-                y2 = bits_top + self._bit_size + self._bit_spacing + 8
 
-                color1 = base.lighter(130) if not orig_bit else base
-                color2 = base.lighter(130) if not cand_bit else base
+                color1 = base_original.lighter(130) if not orig_bit else base_original
                 painter.fillRect(x, y1, self._bit_size, self._bit_size, color1)
-                painter.fillRect(x, y2, self._bit_size, self._bit_size, color2)
 
                 text1 = "1" if orig_bit else "0"
-                text2 = "1" if cand_bit else "0"
                 text_color1 = QtGui.QColor(255, 255, 255) if orig_bit else QtGui.QColor(0, 0, 0)
-                text_color2 = QtGui.QColor(255, 255, 255) if cand_bit else QtGui.QColor(0, 0, 0)
-
                 painter.setPen(text_color1)
                 painter.drawText(
                     QtCore.QRectF(x, y1, self._bit_size, self._bit_size),
                     QtCore.Qt.AlignmentFlag.AlignCenter,
                     text1,
                 )
+            for entry_idx, entry in enumerate(entries):
+                shift = int(entry.get("shift", 0) or 0)
+                masked_bits = int(entry.get("masked_bits", max(0, shift)) or 0)
+                row_label = "Candidate" if shift == 0 else f"Candidate << {shift}"
+                adjusted_match_pct = entry.get("adjusted_match_pct", entry.get("match_pct", 0.0))
+                adjusted_matching_bits = entry.get(
+                    "adjusted_matching_bits", entry.get("matching_bits", 0)
+                )
+                adjusted_denom = max(1, self._bit_width - masked_bits)
+                y2 = bits_top + self._bit_size + row_gap + entry_idx * (self._bit_size + row_gap)
+                painter.drawText(
+                    label_x,
+                    y2 + self._bit_size,
+                    f"{row_label} | adj={adjusted_match_pct:.2f}% ({adjusted_matching_bits}/{adjusted_denom})",
+                )
+
+                prev_bits = None
+                if entry_idx > 0:
+                    prev_bits = self._candidate_bits(entries[entry_idx - 1])
+                candidate_bits = self._candidate_bits(entry)
+
+                for bit_idx in range(max_bits):
+                    cand_idx = bit_idx + shift
+                    masked = cand_idx >= max_bits
+                    matches_original = False
+                    matches_prev = False
+                    cand_bit = (
+                        candidate_bits[cand_idx]
+                        if cand_idx < len(candidate_bits)
+                        else False
+                    )
+                    if not masked:
+                        orig_bit = original_bits[bit_idx] if bit_idx < len(original_bits) else False
+                        matches_original = orig_bit == cand_bit
+                        if prev_bits is not None and cand_idx < len(prev_bits):
+                            matches_prev = prev_bits[cand_idx] == cand_bit
+                    if matches_original and matches_prev:
+                        base_candidate = self._multi_match_color
+                    elif matches_original:
+                        base_candidate = self._match_color
+                    else:
+                        base_candidate = self._mismatch_color
+
+                    x = (
+                        self._margin
+                        + self._label_width
+                        + bit_idx * (self._bit_size + self._bit_spacing)
+                        - x_offset
+                    )
+                    if masked:
+                        color2 = self._masked_fill
+                    else:
+                        color2 = base_candidate.lighter(130) if not cand_bit else base_candidate
+                    painter.fillRect(x, y2, self._bit_size, self._bit_size, color2)
+
+                    if masked:
+                        masked_bit = (
+                            candidate_bits[bit_idx]
+                            if bit_idx < len(candidate_bits)
+                            else False
+                        )
+                        text2 = "1" if masked_bit else "0"
+                        text_color2 = self._masked_text
+                    else:
+                        text2 = "1" if cand_bit else "0"
+                        text_color2 = QtGui.QColor(255, 255, 255)
+                    painter.setPen(text_color2)
+                    painter.drawText(
+                        QtCore.QRectF(x, y2, self._bit_size, self._bit_size),
+                        QtCore.Qt.AlignmentFlag.AlignCenter,
+                        text2,
+                    )
+
+            majority_bits = [False] * max_bits
+            majority_votes = [0] * max_bits
+            majority_ones = [0] * max_bits
+            for entry in entries:
+                shift = int(entry.get("shift", 0) or 0)
+                candidate_bits = self._candidate_bits(entry)
+                for bit_idx in range(max_bits):
+                    cand_idx = bit_idx + shift
+                    if cand_idx >= max_bits:
+                        continue
+                    bit_val = candidate_bits[cand_idx] if cand_idx < len(candidate_bits) else False
+                    if bit_val:
+                        majority_ones[bit_idx] += 1
+                    majority_votes[bit_idx] += 1
+
+            for bit_idx in range(max_bits):
+                votes = majority_votes[bit_idx]
+                if votes == 0:
+                    continue
+                ones = majority_ones[bit_idx]
+                zeros = votes - ones
+                majority_bits[bit_idx] = ones >= zeros
+
+            majority_matches = 0
+            majority_unmasked = 0
+            for bit_idx in range(max_bits):
+                if majority_votes[bit_idx] == 0:
+                    continue
+                majority_unmasked += 1
+                if majority_bits[bit_idx] == original_bits[bit_idx]:
+                    majority_matches += 1
+
+            majority_denom = max(1, majority_unmasked)
+            majority_pct = (majority_matches / float(majority_denom)) * 100.0
+            majority_row_y = (
+                bits_top
+                + self._bit_size
+                + row_gap
+                + len(entries) * (self._bit_size + row_gap)
+            )
+            painter.drawText(
+                label_x,
+                majority_row_y + self._bit_size,
+                f"Majority vote | adj={majority_pct:.2f}% ({majority_matches}/{majority_denom})",
+            )
+
+            for bit_idx in range(max_bits):
+                votes = majority_votes[bit_idx]
+                masked = votes == 0
+                majority_bit = majority_bits[bit_idx]
+                matches_original = (not masked) and (majority_bit == original_bits[bit_idx])
+                if matches_original and votes > 1:
+                    base_candidate = self._multi_match_color
+                elif matches_original:
+                    base_candidate = self._match_color
+                else:
+                    base_candidate = self._mismatch_color
+
+                x = (
+                    self._margin
+                    + self._label_width
+                    + bit_idx * (self._bit_size + self._bit_spacing)
+                    - x_offset
+                )
+                if masked:
+                    color2 = self._masked_fill
+                else:
+                    color2 = base_candidate.lighter(130) if not majority_bit else base_candidate
+                painter.fillRect(x, majority_row_y, self._bit_size, self._bit_size, color2)
+
+                if masked:
+                    text2 = "1" if majority_bit else "0"
+                    text_color2 = self._masked_text
+                else:
+                    text2 = "1" if majority_bit else "0"
+                    text_color2 = QtGui.QColor(255, 255, 255)
                 painter.setPen(text_color2)
                 painter.drawText(
-                    QtCore.QRectF(x, y2, self._bit_size, self._bit_size),
+                    QtCore.QRectF(x, majority_row_y, self._bit_size, self._bit_size),
                     QtCore.Qt.AlignmentFlag.AlignCenter,
                     text2,
                 )
@@ -265,14 +508,26 @@ class BitSimilarityCanvas(QtWidgets.QAbstractScrollArea):
 class BitSimilarityTab(QtWidgets.QWidget):
     def __init__(self, bit_similarity=None, parent=None):
         super().__init__(parent)
+        self._entries_raw = []
         self._entries = []
         self._bit_width = 0
         self._original_hex = ""
         self._bit_order = "lsb0"
+        self._match_counts_raw = []
+        self._pending_settings = None
 
         layout = QtWidgets.QVBoxLayout(self)
 
         control_row = QtWidgets.QHBoxLayout()
+        self._sort_combo = QtWidgets.QComboBox()
+        self._sort_combo.addItems(
+            [
+                "Original order",
+                "Match % (Descending)",
+                "Match % (Ascending)",
+            ]
+        )
+        self._sort_combo.currentIndexChanged.connect(self._on_sort_changed)
         self._start_spin = QtWidgets.QSpinBox()
         self._start_spin.setRange(0, 0)
         self._start_spin.setValue(0)
@@ -285,12 +540,17 @@ class BitSimilarityTab(QtWidgets.QWidget):
 
         self._show_all = QtWidgets.QCheckBox("Show all rows")
         self._show_all.setChecked(True)
+        self._hide_shifted = QtWidgets.QCheckBox("Hide shifted rows")
+        self._hide_shifted.setChecked(False)
 
+        control_row.addWidget(QtWidgets.QLabel("Sort:"))
+        control_row.addWidget(self._sort_combo)
         control_row.addWidget(QtWidgets.QLabel("Start index:"))
         control_row.addWidget(self._start_spin)
         control_row.addWidget(QtWidgets.QLabel("Rows:"))
         control_row.addWidget(self._rows_spin)
         control_row.addWidget(self._show_all)
+        control_row.addWidget(self._hide_shifted)
         control_row.addStretch(1)
         layout.addLayout(control_row)
 
@@ -301,8 +561,11 @@ class BitSimilarityTab(QtWidgets.QWidget):
         layout.addWidget(self._canvas, 1)
 
         self._show_all.stateChanged.connect(self._toggle_show_all)
+        self._hide_shifted.stateChanged.connect(self._on_hide_shifted)
 
-        legend = QtWidgets.QLabel("Green = match, Red = mismatch. LSB-first bit order.")
+        legend = QtWidgets.QLabel(
+            "Green = matches original, Yellow = multi-match with original, Black = masked bits. LSB-first bit order."
+        )
         legend.setStyleSheet("color: #555;")
         layout.addWidget(legend)
 
@@ -311,11 +574,116 @@ class BitSimilarityTab(QtWidgets.QWidget):
 
     def set_data(self, bit_similarity):
         bit_similarity = bit_similarity or {}
-        self._entries = list(bit_similarity.get("candidates", []))
+        self._entries_raw = [
+            {**entry, "_orig_index": idx}
+            for idx, entry in enumerate(bit_similarity.get("candidates", []))
+        ]
         self._bit_width = int(bit_similarity.get("bit_width", 0) or 0)
         self._original_hex = bit_similarity.get("original_hex", "")
         self._bit_order = bit_similarity.get("bit_order", "lsb0")
+        self._match_counts_raw = list(bit_similarity.get("match_counts_per_bit", []) or [])
 
+        self._apply_sort()
+        if self._pending_settings:
+            pending = self._pending_settings
+            self._pending_settings = None
+            self.apply_settings(pending)
+
+    def _apply_sort(self):
+        sort_mode = self._sort_combo.currentText()
+        entries = list(self._entries_raw)
+        if self._hide_shifted.isChecked():
+            entries = [entry for entry in entries if int(entry.get("shift", 0) or 0) == 0]
+        base_by_index = {}
+        entries_by_index = {}
+        for entry in entries:
+            idx = int(entry.get("index", entry.get("_orig_index", 0)))
+            entries_by_index.setdefault(idx, []).append(entry)
+            if idx not in base_by_index or int(entry.get("shift", 0) or 0) == 0:
+                base_by_index[idx] = entry
+
+        candidate_indices = list(entries_by_index.keys())
+        if sort_mode == "Match % (Descending)":
+            candidate_indices.sort(
+                key=lambda idx: (
+                    -float(
+                        base_by_index[idx].get(
+                            "base_match_pct",
+                            base_by_index[idx].get("match_pct", 0.0),
+                        )
+                    ),
+                    idx,
+                )
+            )
+        elif sort_mode == "Match % (Ascending)":
+            candidate_indices.sort(
+                key=lambda idx: (
+                    float(
+                        base_by_index[idx].get(
+                            "base_match_pct",
+                            base_by_index[idx].get("match_pct", 0.0),
+                        )
+                    ),
+                    idx,
+                )
+            )
+        else:
+            candidate_indices.sort()
+
+        grouped = []
+        for idx in candidate_indices:
+            group_entries = entries_by_index.get(idx, [])
+            group_entries.sort(key=lambda e: int(e.get("shift", 0) or 0))
+            base_entry = base_by_index.get(idx, group_entries[0] if group_entries else {})
+            grouped.append(
+                {
+                    "index": idx,
+                    "r": base_entry.get("r", ""),
+                    "base_match_pct": base_entry.get(
+                        "base_match_pct", base_entry.get("match_pct", 0.0)
+                    ),
+                    "base_matching_bits": base_entry.get(
+                        "base_matching_bits", base_entry.get("matching_bits", 0)
+                    ),
+                    "entries": group_entries,
+                }
+            )
+
+        self._entries = grouped
+        self._sync_ranges()
+        match_counts = self._match_counts_raw
+        if (
+            not match_counts
+            or len(match_counts) != self._bit_width
+            or self._hide_shifted.isChecked()
+        ):
+            match_counts = self._build_match_counts(entries)
+        self._canvas.set_data(self._entries, self._bit_width, self._original_hex, match_counts)
+        self._rebuild_rows()
+
+    def _on_sort_changed(self, _idx):
+        self._apply_sort()
+
+    def _on_hide_shifted(self, _state):
+        self._apply_sort()
+
+    def _build_match_counts(self, entries):
+        if self._bit_width <= 0 or not entries:
+            return []
+        original_bits = hex_to_bits_le(self._original_hex, self._bit_width)
+        counts = [0 for _ in range(self._bit_width)]
+        for entry in entries:
+            candidate_bits = hex_to_bits_le(entry.get("candidate_hex", ""), self._bit_width)
+            shift = int(entry.get("shift", 0) or 0)
+            for bit_idx in range(self._bit_width):
+                cand_idx = bit_idx + shift
+                if cand_idx >= self._bit_width:
+                    continue
+                if candidate_bits[cand_idx] == original_bits[bit_idx]:
+                    counts[bit_idx] += 1
+        return counts
+
+    def _sync_ranges(self):
         total = len(self._entries)
         self._start_spin.blockSignals(True)
         self._rows_spin.blockSignals(True)
@@ -331,8 +699,42 @@ class BitSimilarityTab(QtWidgets.QWidget):
         self._start_spin.blockSignals(False)
         self._rows_spin.blockSignals(False)
 
-        self._canvas.set_data(self._entries, self._bit_width, self._original_hex)
+    def get_settings(self):
+        return {
+            "sort_index": self._sort_combo.currentIndex(),
+            "show_all": self._show_all.isChecked(),
+            "hide_shifted": self._hide_shifted.isChecked(),
+            "start": self._start_spin.value(),
+            "rows": self._rows_spin.value(),
+        }
+
+    def apply_settings(self, settings):
+        if not settings:
+            return
+        if not self._entries_raw:
+            self._pending_settings = settings
+            return
+        self._sort_combo.blockSignals(True)
+        self._sort_combo.setCurrentIndex(settings.get("sort_index", 0))
+        self._sort_combo.blockSignals(False)
+        self._apply_sort()
+
+        self._start_spin.blockSignals(True)
+        self._rows_spin.blockSignals(True)
+        self._start_spin.setValue(settings.get("start", self._start_spin.value()))
+        self._rows_spin.setValue(settings.get("rows", self._rows_spin.value()))
+        self._start_spin.blockSignals(False)
+        self._rows_spin.blockSignals(False)
+
+        self._show_all.blockSignals(True)
+        self._show_all.setChecked(settings.get("show_all", True))
+        self._show_all.blockSignals(False)
         self._toggle_show_all(self._show_all.isChecked())
+
+        self._hide_shifted.blockSignals(True)
+        self._hide_shifted.setChecked(settings.get("hide_shifted", False))
+        self._hide_shifted.blockSignals(False)
+        self._on_hide_shifted(self._hide_shifted.checkState())
 
     def _toggle_show_all(self, checked):
         show_all = bool(checked)
@@ -360,13 +762,203 @@ class BitSimilarityTab(QtWidgets.QWidget):
         self._canvas.set_view(start, count, self._show_all.isChecked())
 
 
+class BitTrueTimelineCanvas(QtWidgets.QAbstractScrollArea):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._frames = []
+        self._bit_width = 0
+        self._window = 0
+        self._stride = 0
+
+        self._margin = 12
+        self._bar_width = 8
+        self._bar_gap = 2
+        self._depth_x = 4
+        self._depth_y = 3
+        self._max_height = 120
+
+        self._base_color = QtGui.QColor(52, 128, 235)
+        self._axis_color = QtGui.QColor(80, 80, 80)
+        self._text_color = QtGui.QColor(40, 40, 40)
+
+        self.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        self.setVerticalScrollBarPolicy(QtCore.Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+
+    def set_data(self, frames, bit_width, window, stride):
+        self._frames = list(frames or [])
+        self._bit_width = int(bit_width or 0)
+        self._window = int(window or 0)
+        self._stride = int(stride or 0)
+        self._update_scrollbars()
+        self.viewport().update()
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._update_scrollbars()
+
+    def _content_width(self):
+        frames = len(self._frames)
+        return (
+            self._margin * 2
+            + frames * (self._bar_width + self._bar_gap)
+            + self._bit_width * self._depth_x
+            + self._bar_width
+        )
+
+    def _content_height(self):
+        return (
+            self._margin * 2
+            + self._bit_width * self._depth_y
+            + self._max_height
+            + self._depth_y
+        )
+
+    def _update_scrollbars(self):
+        viewport = self.viewport().size()
+        content_width = self._content_width()
+        content_height = self._content_height()
+
+        h_bar = self.horizontalScrollBar()
+        v_bar = self.verticalScrollBar()
+
+        h_max = max(0, content_width - viewport.width())
+        v_max = max(0, content_height - viewport.height())
+
+        h_bar.setRange(0, h_max)
+        h_bar.setPageStep(viewport.width())
+        v_bar.setRange(0, v_max)
+        v_bar.setPageStep(viewport.height())
+
+    def _bar_color(self, prob):
+        intensity = max(0.0, min(1.0, prob))
+        base = QtGui.QColor(self._base_color)
+        base.setAlphaF(0.25 + 0.75 * intensity)
+        return base
+
+    def paintEvent(self, event):
+        super().paintEvent(event)
+        painter = QtGui.QPainter(self.viewport())
+        painter.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing, False)
+        painter.fillRect(self.viewport().rect(), self.palette().base())
+
+        if not self._frames or self._bit_width == 0:
+            painter.setPen(self._text_color)
+            painter.drawText(self._margin, self._margin + 16, "No bit probability timeline data.")
+            painter.end()
+            return
+
+        x_offset = self.horizontalScrollBar().value()
+        y_offset = self.verticalScrollBar().value()
+
+        origin_x = self._margin - x_offset
+        origin_y = (
+            self._margin
+            + self._bit_width * self._depth_y
+            + self._max_height
+            - y_offset
+        )
+
+        painter.setPen(self._axis_color)
+        painter.drawLine(origin_x, origin_y, origin_x + self._content_width(), origin_y)
+
+        frames = len(self._frames)
+        for frame_idx in range(frames):
+            frame = self._frames[frame_idx]
+            for bit_idx in range(min(self._bit_width, len(frame))):
+                prob = frame[bit_idx]
+                if prob <= 0.0:
+                    continue
+                height = max(1, int(prob * self._max_height))
+                x = (
+                    origin_x
+                    + frame_idx * (self._bar_width + self._bar_gap)
+                    + (self._bit_width - 1 - bit_idx) * self._depth_x
+                )
+                y = (
+                    origin_y
+                    - (self._bit_width - 1 - bit_idx) * self._depth_y
+                    - height
+                )
+
+                base_color = self._bar_color(prob)
+                top_color = base_color.lighter(130)
+                side_color = base_color.darker(130)
+
+                front = QtCore.QRectF(x, y, self._bar_width, height)
+                painter.fillRect(front, base_color)
+
+                top = QtGui.QPolygonF(
+                    [
+                        QtCore.QPointF(x, y),
+                        QtCore.QPointF(x + self._depth_x, y - self._depth_y),
+                        QtCore.QPointF(x + self._bar_width + self._depth_x, y - self._depth_y),
+                        QtCore.QPointF(x + self._bar_width, y),
+                    ]
+                )
+                painter.setBrush(top_color)
+                painter.setPen(QtCore.Qt.PenStyle.NoPen)
+                painter.drawPolygon(top)
+
+                side = QtGui.QPolygonF(
+                    [
+                        QtCore.QPointF(x + self._bar_width, y),
+                        QtCore.QPointF(x + self._bar_width + self._depth_x, y - self._depth_y),
+                        QtCore.QPointF(
+                            x + self._bar_width + self._depth_x,
+                            y - self._depth_y + height,
+                        ),
+                        QtCore.QPointF(x + self._bar_width, y + height),
+                    ]
+                )
+                painter.setBrush(side_color)
+                painter.drawPolygon(side)
+
+        painter.end()
+
+
+class BitTrueTimelineTab(QtWidgets.QWidget):
+    def __init__(self, timeline=None, parent=None):
+        super().__init__(parent)
+        self._bit_width = 0
+        self._window = 0
+        self._stride = 0
+        self._frames = []
+
+        layout = QtWidgets.QVBoxLayout(self)
+        self._info_label = QtWidgets.QLabel("")
+        layout.addWidget(self._info_label)
+
+        self._canvas = BitTrueTimelineCanvas()
+        layout.addWidget(self._canvas, 1)
+
+        legend = QtWidgets.QLabel(
+            "3D bars show per-bit P(1) over time (LSB-first)."
+        )
+        legend.setStyleSheet("color: #555;")
+        layout.addWidget(legend)
+
+        if timeline is not None:
+            self.set_data(timeline)
+
+    def set_data(self, timeline):
+        timeline = timeline or {}
+        self._bit_width = int(timeline.get("bit_width", 0) or 0)
+        self._window = int(timeline.get("window", 0) or 0)
+        self._stride = int(timeline.get("stride", 0) or 0)
+        self._frames = list(timeline.get("frames", []) or [])
+        frame_count = len(self._frames)
+        self._info_label.setText(
+            f"Frames: {frame_count} | Bits: {self._bit_width} | Window: {self._window} | Stride: {self._stride}"
+        )
+        self._canvas.set_data(self._frames, self._bit_width, self._window, self._stride)
+
 class SessionFileWatcher(QtCore.QObject):
     session_updated = QtCore.Signal(dict)
     error = QtCore.Signal(str)
 
     def __init__(self, path, parent=None):
         super().__init__(parent)
-        self._path = os.path.abspath(path)
+        self._path = ""
         self._watcher = QtCore.QFileSystemWatcher(self)
         self._watcher.fileChanged.connect(self._schedule_reload)
         self._watcher.directoryChanged.connect(self._schedule_reload)
@@ -376,7 +968,7 @@ class SessionFileWatcher(QtCore.QObject):
         self._debounce.setInterval(300)
         self._debounce.timeout.connect(self._reload)
 
-        self._watch_paths()
+        self.set_path(path)
 
     def _watch_paths(self):
         if self._watcher.files():
@@ -384,6 +976,8 @@ class SessionFileWatcher(QtCore.QObject):
         if self._watcher.directories():
             self._watcher.removePaths(self._watcher.directories())
 
+        if not self._path:
+            return
         directory = os.path.dirname(self._path) or "."
         self._watcher.addPath(directory)
         if os.path.exists(self._path):
@@ -394,6 +988,8 @@ class SessionFileWatcher(QtCore.QObject):
 
     def _reload(self):
         self._watch_paths()
+        if not self._path:
+            return
         try:
             session = load_session(self._path)
         except (OSError, json.JSONDecodeError) as exc:
@@ -401,29 +997,113 @@ class SessionFileWatcher(QtCore.QObject):
             return
         self.session_updated.emit(session)
 
+    def set_path(self, path):
+        self._path = os.path.abspath(path) if path else ""
+        self._watch_paths()
+
 
 class SessionViewer(QtWidgets.QMainWindow):
-    def __init__(self, session, session_path, parent=None):
+    def __init__(self, session, session_path, log_dir, default_paths, parent=None):
         super().__init__(parent)
-        self._session_path = session_path
+        self._session_path = os.path.abspath(session_path) if session_path else ""
+        self._default_paths = [p for p in (default_paths or []) if p]
+        self._log_dir = os.path.abspath(log_dir) if log_dir else ""
+        self._current_session_path = self._session_path
+        self._bit_similarity_settings = None
+
         self._tabs = QtWidgets.QTabWidget()
-        self.setCentralWidget(self._tabs)
+        self._log_list = QtWidgets.QListWidget()
+        self._log_list.setSelectionMode(QtWidgets.QAbstractItemView.SelectionMode.SingleSelection)
+        self._log_list.currentItemChanged.connect(self._on_log_selected)
+
+        splitter = QtWidgets.QSplitter()
+        splitter.addWidget(self._log_list)
+        splitter.addWidget(self._tabs)
+        splitter.setStretchFactor(0, 0)
+        splitter.setStretchFactor(1, 1)
+        splitter.setCollapsible(0, False)
+        splitter.setSizes([240, 960])
+        self.setCentralWidget(splitter)
+
         self.setStatusBar(QtWidgets.QStatusBar())
         self.setWindowTitle("RSA Session Viewer")
-        self.resize(1200, 720)
+        self.resize(1280, 760)
+
+        self._file_watcher = SessionFileWatcher(self._current_session_path, self)
+        self._file_watcher.session_updated.connect(self.reload_session)
+        self._file_watcher.error.connect(lambda msg: self.set_status(f"Reload failed: {msg}"))
+
+        self._dir_watcher = QtCore.QFileSystemWatcher(self)
+        self._dir_watcher.directoryChanged.connect(self.refresh_log_list)
+
+        self.refresh_log_list(select_path=self._current_session_path, reload_selected=False)
+        self.reload_session(session)
+
+    def refresh_log_list(self, *_args, select_path=None, reload_selected=True):
+        log_paths = collect_log_paths(self._default_paths, self._log_dir)
+        if self._log_dir and os.path.isdir(self._log_dir):
+            if self._log_dir not in self._dir_watcher.directories():
+                self._dir_watcher.addPath(self._log_dir)
+
+        current = select_path or self._current_session_path
+        keep_current = (
+            select_path is None
+            and current
+            and current == self._current_session_path
+            and current in log_paths
+        )
+        self._log_list.blockSignals(True)
+        self._log_list.clear()
+        for path in log_paths:
+            item = QtWidgets.QListWidgetItem(os.path.basename(path))
+            item.setToolTip(path)
+            item.setData(QtCore.Qt.ItemDataRole.UserRole, path)
+            self._log_list.addItem(item)
+        selected_item = None
+        if log_paths:
+            selected_path = current if current in log_paths else log_paths[0]
+            for idx in range(self._log_list.count()):
+                item = self._log_list.item(idx)
+                if item.data(QtCore.Qt.ItemDataRole.UserRole) == selected_path:
+                    selected_item = item
+                    self._log_list.setCurrentItem(item)
+                    break
+        else:
+            self._current_session_path = ""
+        self._log_list.blockSignals(False)
+
+        if reload_selected and not keep_current and selected_item is not None:
+            self._on_log_selected(selected_item, None)
+
+    def _on_log_selected(self, current, _previous):
+        if current is None:
+            return
+        path = current.data(QtCore.Qt.ItemDataRole.UserRole)
+        if not path:
+            return
+        self._current_session_path = path
+        self._file_watcher.set_path(path)
+        try:
+            session = load_session(path)
+        except (OSError, json.JSONDecodeError) as exc:
+            self.set_status(f"Failed to load {os.path.basename(path)}: {exc}")
+            return
         self.reload_session(session)
 
     def reload_session(self, session):
+        self._capture_bit_similarity_settings()
         current_index = self._tabs.currentIndex() if self._tabs.count() else 0
         self._tabs.clear()
         self._tabs.addTab(self._build_summary_tab(session), "Summary")
         self._tabs.addTab(self._build_candidates_tab(session), "Candidates")
         self._tabs.addTab(self._build_bit_similarity_tab(session), "Bit Similarity")
+        self._tabs.addTab(self._build_bit_true_timeline_tab(session), "Bit True Timeline")
         if self._tabs.count():
             self._tabs.setCurrentIndex(min(current_index, self._tabs.count() - 1))
-        self.set_status(
-            f"Loaded {os.path.basename(self._session_path)} at {datetime.now().isoformat(sep=' ', timespec='seconds')}"
-        )
+        if self._current_session_path:
+            self.set_status(
+                f"Loaded {os.path.basename(self._current_session_path)} at {datetime.now().isoformat(sep=' ', timespec='seconds')}"
+            )
 
     def set_status(self, message):
         status = self.statusBar()
@@ -532,7 +1212,38 @@ class SessionViewer(QtWidgets.QMainWindow):
             )
             return widget
 
-        return BitSimilarityTab(bit_similarity)
+        tab = BitSimilarityTab(bit_similarity)
+        if self._bit_similarity_settings:
+            tab.apply_settings(self._bit_similarity_settings)
+        return tab
+
+    def _build_bit_true_timeline_tab(self, session):
+        feature = get_feature(session, "information_sufficiency")
+        timeline = None
+        if feature:
+            stats = feature.get("stats", {})
+            timeline = stats.get("bit_true_timeline")
+
+        if not timeline:
+            widget = QtWidgets.QWidget()
+            layout = QtWidgets.QVBoxLayout(widget)
+            layout.addWidget(
+                QtWidgets.QLabel(
+                    "Bit true timeline data not found. Run analysis with --tests to populate it."
+                )
+            )
+            return widget
+
+        return BitTrueTimelineTab(timeline)
+
+    def _capture_bit_similarity_settings(self):
+        for idx in range(self._tabs.count()):
+            if self._tabs.tabText(idx) != "Bit Similarity":
+                continue
+            tab = self._tabs.widget(idx)
+            if hasattr(tab, "get_settings"):
+                self._bit_similarity_settings = tab.get_settings()
+            break
 
 
 def main():
@@ -540,27 +1251,35 @@ def main():
     parser.add_argument(
         "session",
         nargs="?",
-        default="session.json",
-        help="Path to session.json (default: session.json)",
+        default="session.log",
+        help="Path to session log (default: session.log)",
+    )
+    parser.add_argument(
+        "--log-dir",
+        default="logs",
+        help="Directory containing session logs (default: ./logs)",
     )
     args = parser.parse_args()
     session_path = args.session
+    log_dir = args.log_dir
+
+    default_candidates = [session_path]
+    if session_path == "session.log":
+        default_candidates.append("session.json")
+    log_paths = collect_log_paths(default_candidates, log_dir)
+    if log_paths:
+        session_path = log_paths[0]
 
     try:
         session = load_session(session_path)
     except FileNotFoundError:
-        print(f"session file not found: {session_path}", file=sys.stderr)
-        return 1
+        session = empty_session()
     except json.JSONDecodeError as exc:
         print(f"failed to parse session file: {exc}", file=sys.stderr)
-        return 1
+        session = empty_session()
 
     app = QtWidgets.QApplication(sys.argv)
-    viewer = SessionViewer(session, session_path)
-
-    watcher = SessionFileWatcher(session_path)
-    watcher.session_updated.connect(viewer.reload_session)
-    watcher.error.connect(lambda msg: viewer.set_status(f"Reload failed: {msg}"))
+    viewer = SessionViewer(session, session_path, log_dir, default_candidates)
 
     viewer.show()
     return app.exec()
