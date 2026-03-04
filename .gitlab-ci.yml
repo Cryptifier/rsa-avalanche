@@ -1,0 +1,15 @@
+image: rust:1.85
+
+stages:
+  - test
+
+variables:
+  CARGO_TERM_COLOR: "always"
+
+test:
+  stage: test
+  tags:
+    - rust
+  script:
+    - make
+    - cargo test
