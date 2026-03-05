@@ -89,6 +89,15 @@ pub struct RCandidateEntry {
     factors: Vec<RCandidateFactor>,
 }
 
+/// Step-by-step trace entry for a single r candidate.
+#[derive(Debug, Serialize)]
+pub struct RCandidateTraceEntry {
+    r: String,
+    r_bits: u64,
+    hbc_ciphertext_r: String,
+    candidate_decryption: String,
+}
+
 /// Analytics payload for a batch of r candidates.
 #[derive(Debug, Serialize)]
 pub struct RCandidateBatchAnalytics {
@@ -108,6 +117,43 @@ pub struct RCandidateBatchAnalytics {
     candidates: Vec<RCandidateEntry>,
 }
 
+/// Per-candidate accuracy entry for a shared message batch.
+#[derive(Debug, Serialize)]
+pub struct RCandidateAccuracyEntry {
+    r: String,
+    r_bits: u64,
+    factors: Vec<RCandidateFactor>,
+    accuracy_pct: f64,
+    hbc_ciphertexts_r: Vec<String>,
+    candidate_decryptions: Vec<String>,
+}
+
+/// Accuracy batch payload for a shared message set.
+#[derive(Debug, Serialize)]
+pub struct RCandidateAccuracyBatch {
+    context: String,
+    messages: Vec<String>,
+    ciphertexts: Vec<String>,
+    shifted_ciphertexts: Vec<String>,
+    rabin_exponent: u32,
+    tonelli_shanks_modulus: String,
+    tonelli_shanks_ciphertexts: Vec<String>,
+    candidates: Vec<RCandidateAccuracyEntry>,
+}
+
+/// Trace payload for r candidates evaluated against a specific message.
+#[derive(Debug, Serialize)]
+pub struct RCandidateTraceBatch {
+    context: String,
+    message: String,
+    ciphertext: String,
+    shifted_ciphertext: String,
+    rabin_exponent: u32,
+    tonelli_shanks_modulus: String,
+    tonelli_shanks_ciphertext: String,
+    candidates: Vec<RCandidateTraceEntry>,
+}
+
 /// Top-level analytics session payload.
 #[derive(Debug, Serialize)]
 pub struct SessionAnalytics {
@@ -118,6 +164,8 @@ pub struct SessionAnalytics {
     step_summaries: Vec<StepSummary>,
     features: Vec<FeatureAnalytics>,
     r_candidate_batches: Vec<RCandidateBatchAnalytics>,
+    r_candidate_accuracy_batches: Vec<RCandidateAccuracyBatch>,
+    r_candidate_traces: Vec<RCandidateTraceBatch>,
     errors: Vec<String>,
 }
 
@@ -152,6 +200,8 @@ impl SessionAnalytics {
             step_summaries: Vec::new(),
             features: Vec::new(),
             r_candidate_batches: Vec::new(),
+            r_candidate_accuracy_batches: Vec::new(),
+            r_candidate_traces: Vec::new(),
             errors: Vec::new(),
         }
     }
@@ -308,6 +358,34 @@ impl SessionAnalytics {
     /// - Appends the batch entry; no stdout/stderr output.
     pub fn push_r_candidate_batch(&mut self, batch: RCandidateBatchAnalytics) {
         self.r_candidate_batches.push(batch);
+    }
+
+    /// Stores r candidate accuracy batch data for the session.
+    ///
+    /// # Parameters
+    /// - `batch`: Candidate accuracy batch record.
+    ///
+    /// # Returns
+    /// - `()`: This method returns nothing.
+    ///
+    /// # Expected Output
+    /// - Appends the accuracy batch entry; no stdout/stderr output.
+    pub fn push_r_candidate_accuracy_batch(&mut self, batch: RCandidateAccuracyBatch) {
+        self.r_candidate_accuracy_batches.push(batch);
+    }
+
+    /// Stores r candidate trace data for a specific message context.
+    ///
+    /// # Parameters
+    /// - `batch`: Candidate trace batch to record.
+    ///
+    /// # Returns
+    /// - `()`: This method returns nothing.
+    ///
+    /// # Expected Output
+    /// - Appends the trace entry; no stdout/stderr output.
+    pub fn push_r_candidate_trace_batch(&mut self, batch: RCandidateTraceBatch) {
+        self.r_candidate_traces.push(batch);
     }
 
     fn feature_mut(&mut self, name: &str) -> &mut FeatureAnalytics {
