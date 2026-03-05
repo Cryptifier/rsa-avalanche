@@ -485,11 +485,12 @@ mod tests {
         assert_eq!(projected.ncols(), 2);
         assert!(projected.iter().all(|v| v.is_finite()));
 
-        let mut path = std::env::temp_dir();
-        path.push("rsademo_pca_projection.png");
-        plot_pca_png(&projected, &path).expect("plot");
-        let meta = std::fs::metadata(&path).expect("metadata");
+        let path = Path::new("images/pca_projection.png");
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).expect("create images dir");
+        }
+        plot_pca_png(&projected, path).expect("plot");
+        let meta = std::fs::metadata(path).expect("metadata");
         assert!(meta.len() > 0);
-        let _ = std::fs::remove_file(&path);
     }
 }
