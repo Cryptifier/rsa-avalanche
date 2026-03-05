@@ -11,3 +11,4 @@ enciphered_bins2_frames/
 *.pyo
 *frames/
 *.json
+*.zip

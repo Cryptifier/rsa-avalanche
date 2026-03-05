@@ -17,5 +17,9 @@ serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 json5 = "0.4"
 rayon = "1.10"
-plotters = "0.3.6"
+plotters = { version = "0.3.6", optional = true }
 ctrlc = "3.4.5"
+
+[features]
+default = []
+plots = ["plotters"]

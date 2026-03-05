@@ -6,16 +6,32 @@ use std::{
     error::Error,
     fs::{self, OpenOptions},
     io::Write,
-    path::Path,
     sync::{
-        atomic::{AtomicU64, AtomicUsize, Ordering},
+        atomic::{AtomicU64, Ordering},
         Arc, Mutex,
     },
     time::{Duration, Instant},
 };
 
 use rayon::prelude::*;
+#[cfg(feature = "plots")]
 use plotters::prelude::*;
+#[cfg(feature = "plots")]
+use std::sync::atomic::AtomicUsize;
+#[cfg(feature = "plots")]
+use std::path::Path;
+
+#[cfg(not(feature = "plots"))]
+type RGBColor = (u8, u8, u8);
+
+#[cfg(not(feature = "plots"))]
+const RED: RGBColor = (220, 20, 60);
+#[cfg(not(feature = "plots"))]
+const GREEN: RGBColor = (46, 139, 87);
+#[cfg(not(feature = "plots"))]
+const BLUE: RGBColor = (30, 144, 255);
+#[cfg(not(feature = "plots"))]
+const BLACK: RGBColor = (0, 0, 0);
 
 use clap::Parser;
 use num_bigint::BigUint;
@@ -859,6 +875,7 @@ fn build_bit_similarity_entries(
 ///
 /// # Expected Output
 /// - Writes a PNG into `./images` and prints the output path.
+#[cfg(feature = "plots")]
 fn plot_overlap_histogram(overlaps_pct: &[f64], label: &str) -> Result<(), Box<dyn Error>> {
     if overlaps_pct.is_empty() {
         return Ok(());
@@ -918,6 +935,11 @@ fn plot_overlap_histogram(overlaps_pct: &[f64], label: &str) -> Result<(), Box<d
 
     root.present()?;
     println!("Saved overlap histogram to {}", path.display());
+    Ok(())
+}
+
+#[cfg(not(feature = "plots"))]
+fn plot_overlap_histogram(_overlaps_pct: &[f64], _label: &str) -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
@@ -2041,6 +2063,7 @@ fn colorize_hex_matches(value: &str, reference: &str) -> String {
 ///
 /// # Expected Output
 /// - Returns a sanitized string; no side effects.
+#[cfg(feature = "plots")]
 fn sanitize_label(label: &str) -> String {
     label
         .chars()
@@ -2064,6 +2087,7 @@ fn sanitize_label(label: &str) -> String {
 ///
 /// # Expected Output
 /// - Writes a PNG into `./images` and prints the output path.
+#[cfg(feature = "plots")]
 fn plot_timeline_series(
     series: &[f64],
     label: &str,
@@ -2115,6 +2139,19 @@ fn plot_timeline_series(
 
     root.present()?;
     println!("Saved timeline chart to {}", path.display());
+    Ok(())
+}
+
+#[cfg(not(feature = "plots"))]
+fn plot_timeline_series(
+    _series: &[f64],
+    _label: &str,
+    _caption: &str,
+    _y_desc: &str,
+    _y_range: (f64, f64),
+    _file_prefix: &str,
+    _color: RGBColor,
+) -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
@@ -3068,6 +3105,7 @@ impl MatchHistogram {
     ///
     /// # Expected Output
     /// - Writes a PNG into `./images` and prints the output path.
+    #[cfg(feature = "plots")]
     fn write_histogram(&self, label: &str) -> Result<(), Box<dyn Error>> {
         if self.samples.is_empty() {
             return Ok(());
@@ -3127,6 +3165,21 @@ impl MatchHistogram {
 
         root.present()?;
         println!("Saved bit match frequency histogram to {}", path.display());
+        Ok(())
+    }
+
+    /// Writes a PNG histogram showing per-bit match frequency.
+    ///
+    /// # Parameters
+    /// - `label`: Label used in the chart caption and output filename.
+    ///
+    /// # Returns
+    /// - `Result<(), Box<dyn Error>>`: `Ok(())` when plotting is disabled.
+    ///
+    /// # Expected Output
+    /// - No side effects when plotting is disabled.
+    #[cfg(not(feature = "plots"))]
+    fn write_histogram(&self, _label: &str) -> Result<(), Box<dyn Error>> {
         Ok(())
     }
 }

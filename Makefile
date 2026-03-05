@@ -1,4 +1,4 @@
-.PHONY: all build test
+.PHONY: all build test deploy
 
 all: build
 
@@ -7,3 +7,6 @@ build:
 
 test:
 	cargo test
+
+deploy:
+	./scripts/make_deploy.sh
