@@ -199,7 +199,7 @@ where
     let endpoint = socket
         .get_last_endpoint()
         .map_err(|err| format!("router endpoint error: {err}"))?
-        .ok_or("router endpoint missing".to_string())?;
+        .map_err(|err| format!("router endpoint decode error: {err:?}"))?;
     endpoint_tx
         .send(endpoint)
         .map_err(|_| "router endpoint send failed".to_string())?;
