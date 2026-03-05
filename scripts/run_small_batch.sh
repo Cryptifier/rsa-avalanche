@@ -3,7 +3,7 @@ set -euo pipefail
 
 RUNS=${RUNS:-100}
 SEED_START=${SEED_START:-1}
-CONFIG=${CONFIG:-"rsa_config_small.json"}
+CONFIG=${CONFIG:-"config/rsa_config_small.json"}
 ANALYSIS_LOG=${ANALYSIS_LOG:-"logs_current.log"}
 SCRIPT_LOG=${SCRIPT_LOG:-"logs_current_script.log"}
 RESUME=${RESUME:-0}

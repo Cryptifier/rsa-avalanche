@@ -1,4 +1,4 @@
-//! Configuration schema and loader for rsa_config.json.
+//! Configuration schema and loader for config/rsa_config.json.
 
 use std::{error::Error, fs, path::Path};
 
@@ -7,7 +7,7 @@ use serde::Deserialize;
 
 use crate::r_candidates::RCandidateMode;
 
-/// Top-level configuration matching the rsa_config.json schema.
+/// Top-level configuration matching the config/rsa_config.json schema.
 #[derive(Debug, Deserialize, Clone)]
 pub struct Config {
     /// RSA keypair configuration.

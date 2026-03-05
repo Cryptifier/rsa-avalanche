@@ -2,7 +2,7 @@
 set -euo pipefail
 
 RUNS=${RUNS:-100}
-CONFIG=${CONFIG:-"rsa_config_demo.json"}
+CONFIG=${CONFIG:-"config/rsa_config_demo.json"}
 SCRIPT_LOG=${SCRIPT_LOG:-"logs_demo_script.log"}
 RESUME=${RESUME:-0}
 PLAINTEXT_HEX=${PLAINTEXT_HEX:-""}

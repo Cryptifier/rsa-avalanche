@@ -23,7 +23,7 @@ cargo run --bin analysis | tee output.txt
 
 # Command Line (analysis)
 ```bash
-cargo run --bin analysis -- --config rsa_config.json
+cargo run --bin analysis -- --config config/rsa_config.json
 ```
 
 - `-b, --bits <u32>`: Bit-length for generated primes when `rsa_keypair.generate` is `true`. Default `56` (range `16..=8192`).
@@ -31,7 +31,7 @@ cargo run --bin analysis -- --config rsa_config.json
 - `-e, --public-exponent <u64>`: Public exponent seed. Default `65537`. If left at default, `rsa_keypair.e` from the config is used.
 - `--seed <u64>`: Optional RNG seed for deterministic key generation.
 - `--crypto-rng`: Use cryptographic RNGs for sampling and candidate generation.
-- `-c, --config <PATH>`: JSON/JSON5 config path. Default `rsa_config.json`.
+- `-c, --config <PATH>`: JSON/JSON5 config path. Default `config/rsa_config.json`.
 - `--tests`: Run extended analysis tests and sufficiency checks.
 - `--export`: Export oracle entropy timeline charts and enciphered CSV artifacts.
 - `--session-json <PATH>`: Output analytics session JSON. Default `session.json`.
@@ -43,7 +43,7 @@ cargo run --bin demo -- --encrypt --plaintext-hex 74657374
 cargo run --bin demo -- --decrypt --ciphertext 0x1234
 ```
 
-- `-c, --config <PATH>`: JSON/JSON5 config path. Default `rsa_config.json`.
+- `-c, --config <PATH>`: JSON/JSON5 config path. Default `config/rsa_config.json`.
 - `--encrypt`: Encrypt a plaintext hex string with the configured RSA key.
 - `--decrypt`: Run speculative decryption with per-bit oracle screening.
 - `--plaintext-hex <HEX>`: Plaintext hex string (required with `--encrypt`).
@@ -51,13 +51,13 @@ cargo run --bin demo -- --decrypt --ciphertext 0x1234
 - `--shift`: Multiply ciphertext by encrypted 2 before base conversion.
 - Demo runs require `rsa_keypair.generate = false` with `rsa_keypair.p` and `rsa_keypair.q` supplied.
 
-# Configuration (rsa_config.json)
+# Configuration (config/rsa_config.json)
 Notes:
 - Missing config files fall back to built-in defaults; when present, values below are read.
 - Unknown keys are ignored by `analysis.rs`. The `padding` and `engine.max_overlap_min` fields are currently not used.
 - `rsa_keypair.p` and `rsa_keypair.q` must be set when `rsa_keypair.generate` is `false`.
 
-| Key | Type | Default in `rsa_config.json` | Notes |
+| Key | Type | Default in `config/rsa_config.json` | Notes |
 | --- | --- | --- | --- |
 | `rsa_keypair.generate` | bool | `false` | Generate primes when `true`. |
 | `rsa_keypair.e` | u64 | `65537` | Public exponent seed. |

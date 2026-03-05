@@ -10,7 +10,7 @@ usage() {
 Usage: make_rgen_grid.sh [--config PATH] [--out-dir DIR] [--pcts "5,10,20,30,40,50"] [--size small|medium]
 
 Options:
-  --config PATH   Config JSON/JSON5 file (default: rsa_config_small.json)
+  --config PATH   Config JSON/JSON5 file (default: config/rsa_config_small.json)
   --out-dir DIR   Output directory (default: data/rgen_grid)
   --pcts LIST     Comma-separated percentages (default: 5,10,20,30,40,50)
   --size VALUE    Override size label (small or medium). Otherwise inferred from config name.

@@ -24,8 +24,8 @@ use rsademo::r_candidates::{generate_r_candidates, RCandidateMode, RCandidateSet
     version
 )]
 struct Args {
-    /// Path to a JSON/JSON5 config file (defaults to rsa_config.json)
-    #[arg(short = 'c', long, default_value = "rsa_config.json")]
+    /// Path to a JSON/JSON5 config file (defaults to config/rsa_config.json)
+    #[arg(short = 'c', long, default_value = "config/rsa_config.json")]
     config: String,
 
     /// Output CSV path (defaults to config reuse_r_candidates_path)
@@ -174,7 +174,7 @@ fn run_rgen(args: Args, config: Config) -> Result<(), Box<dyn Error>> {
 
     if settings.mode == RCandidateMode::Factoring && modulus.is_none() {
         return Err(
-            "factoring mode requires --n, --p/--q, --bits, or rsa_config.json with p and q".into(),
+            "factoring mode requires --n, --p/--q, --bits, or config/rsa_config.json with p and q".into(),
         );
     }
 
@@ -695,7 +695,7 @@ mod tests {
 
     fn base_args() -> Args {
         Args {
-            config: "rsa_config.json".to_string(),
+            config: "config/rsa_config.json".to_string(),
             output: None,
             append: false,
             seed: None,

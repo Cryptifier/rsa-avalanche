@@ -50,10 +50,12 @@ rsync -a --prune-empty-dirs \
   --include '/Cargo.toml' \
   --include '/Cargo.lock' \
   --include '/Makefile' \
-  --include '/rsa_config_demo.json' \
+  --include '/config/' \
+  --include '/config/rsa_config_demo.json' \
   --include '/rgen_output_256.csv' \
   --include '/*.md' \
   --include '/LICENSE' \
+  --include '/scripts/***' \
   --exclude '/historical/***' \
   --exclude '/images/***' \
   --exclude '/logs/***' \

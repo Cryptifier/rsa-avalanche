@@ -6,7 +6,7 @@ The statistical-advantage analysis adds a secondary modulus search layer that op
 
 The demo CLI (`src/bin/demo.rs`) focuses on single-shot speculative decryption: it can encrypt a provided plaintext with the configured RSA key or recover a provided ciphertext by screening per-bit oracles and producing best-case and majority-vote recovered hex strings. Demo runs require a fixed RSA keypair in the config and reuse the same r-candidate generation settings, oracle screening iterations, and optional ciphertext shift flag as the analysis pipeline.
 
-The results from the analysis using the `rsa_config_base_256.json` config are based on the following premise:
+The results from the analysis using the `config/rsa_config_base_256.json` config are based on the following premise:
   - Predictions for the match percentage can either be a positive or negative result requiring negation. It has been observed that 50.39% to 60% of bits can be recovered consistently and that when probability is below 50% the entire prediction is bit-wise negated to reveal the other half of the bits as true.
   - This script runs the process with repeated trials `scripts/run_medium_batch.sh` and requires a SEED_START=123456 environment variable to alter the reproducible results for subsequent tests. Running without setting this environment variable results in reproducible tests with 100 iterations. The proof of concept results are available in the `poc_script.log` file.
   - All tests using this config and the run script use the ChaCha cryptographic number generator.
