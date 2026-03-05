@@ -88,7 +88,7 @@ Notes:
 | `engine.entropy_report_threshold` | number | `0.99` | Entropy threshold for sufficiency checks. |
 | `engine.oracle_accuracy_threshold` | number | `51.0` | Oracle accuracy threshold for sufficiency checks. |
 | `engine.reuse_r_candidates` | bool | `true` | Reuse cached r candidates. |
-| `engine.reuse_r_candidates_path` | string | `r_candidates.csv` | Cache file path. |
+| `engine.reuse_r_candidates_path` | string | `data/r_candidates.csv` | Cache file path. |
 | `engine.reuse_r_candidates_append_only` | bool | `false` | Append-only reuse file behavior. |
 | `engine.r_candidate_mode` | string | `small_primes` | Candidate generation mode. |
 | `engine.r_candidate_small_primes` | array(u64) | `[3, 5, 7, 11, 13, 17]` | Small primes for candidate generation. |

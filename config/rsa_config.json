@@ -51,7 +51,7 @@
         "entropy_report_threshold" : 0.99,
         "oracle_accuracy_threshold" : 51.0,
         "reuse_r_candidates" : true,
-        "reuse_r_candidates_path" : "r_candidates.csv",
+        "reuse_r_candidates_path" : "data/r_candidates.csv",
         "reuse_r_candidates_append_only" : false,
         "r_candidate_mode" : "small_primes",
         "r_candidate_small_primes" : [3, 5, 7, 11, 13, 17],

@@ -765,7 +765,7 @@ fn default_reuse_r_candidates() -> bool {
 /// # Expected Output
 /// - Returns a constant default value; no side effects.
 fn default_reuse_r_candidates_path() -> String {
-    "r_candidates.csv".to_string()
+    "data/r_candidates.csv".to_string()
 }
 
 /// Default flag for append-only reuse file behavior.
