@@ -13,6 +13,53 @@ The results from the analysis using the `rsa_config_base_256.json` config are ba
 
 The analytics loop runs repeated trials, records overlap statistics and LSB runs, and surfaces best- and worst-case candidates relative to a threshold (the README highlights 51%). It includes an optional speculative combiner that aggregates noisy oracle bits with majority voting, plus signal-processing routines that scan exported enciphered bins for ramp-like patterns and summarize their strength. CSV exports and plotted artifacts are produced to support offline inspection of distributions, thresholds, and signal features. The companion Python script `scripts/enciphered_bins_video.py` turns exported `enciphered_*` CSVs into a 3D scrolling surface video, supports smoothing and z-scale transforms, and can render frames in parallel before stitching with ffmpeg (or fall back to frame output when ffmpeg is unavailable).
 
+**R Candidate Generation**
+
+The r-candidate module (`src/r_candidates.rs`) provides multiple strategies for building candidate moduli `r`. These methods are used to derive alternate exponents and evaluate bit recovery accuracy. The ciphertext-stream variant is implemented for experimentation but is not currently wired into `analysis` or `rgen`.
+
+**Pseudocode: Factoring Mode**
+```
+inputs: n, settings, rng
+if settings.override_best_r:
+  r = override_best_r
+  if r is prime: return []
+  return [(r, factor(r))]
+
+target = max(settings.process_count, settings.process_min_count)
+for attempt in 1..target * scale:
+  r = random_composite_near(n, rng)
+  factors = factor(r)
+  if factors meet min_factor and count constraints:
+    collect r
+  stop when target collected
+return candidates
+```
+
+**Pseudocode: Small-Primes Mode**
+```
+inputs: settings, rng
+target = max(settings.process_count, settings.process_min_count)
+target_bits = settings.target_bit_length
+seed candidates from reuse file if enabled
+while candidates < target:
+  pick K small primes from list (>= min_factor)
+  choose a larger prime so r reaches target_bits
+  r = product(small_primes) * large_prime
+  collect r and its factor list
+return candidates
+```
+
+**Pseudocode: Ciphertext Stream (c^x mod N)**
+```
+inputs: ciphertext c, modulus n, count, start_exponent
+x = start_exponent
+for i in 1..count:
+  r = c^x mod n
+  x = x + 1
+  collect r (factor list empty)
+return candidates
+```
+
 **Algorithms**
 - RSA key generation (probable primes), modular inverse, and modular exponentiation
 - Homomorphic base conversion and candidate modulus construction
