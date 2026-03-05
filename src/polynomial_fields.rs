@@ -36,6 +36,12 @@ use ndarray::Array2;
 use plotters::prelude::*;
 #[cfg(feature = "pca")]
 use std::{error::Error, path::Path};
+#[cfg(feature = "cluster")]
+use linfa::prelude::Predict;
+#[cfg(feature = "cluster")]
+use linfa_clustering::KMeans;
+#[cfg(feature = "cluster")]
+use ndarray::Array1;
 
 /// Builds polynomial fields from configuration.
 ///
@@ -132,6 +138,113 @@ pub fn pca_project_coordinates(
         .map_err(|err| format!("pca fit failed: {err}"))?;
     let projected = model.transform(dataset);
     Ok(projected.records)
+}
+
+/// Runs k-means clustering on PCA-projected coordinates.
+///
+/// # Parameters
+/// - `points`: PCA-projected coordinates (rows are samples).
+/// - `k`: Number of clusters to fit.
+///
+/// # Returns
+/// - `Result<Array1<usize>, String>`: Cluster labels for each sample.
+///
+/// # Expected Output
+/// - Returns cluster labels; no stdout/stderr output.
+#[cfg(feature = "cluster")]
+pub fn kmeans_cluster(points: &Array2<f64>, k: usize) -> Result<Array1<usize>, String> {
+    if k == 0 {
+        return Err("cluster count must be >= 1".to_string());
+    }
+    if points.nrows() == 0 {
+        return Err("no points provided".to_string());
+    }
+    let dataset = DatasetBase::from(points.clone());
+    let model = KMeans::params(k)
+        .fit(&dataset)
+        .map_err(|err| format!("kmeans fit failed: {err}"))?;
+    let labels = model.predict(&dataset);
+    Ok(labels)
+}
+
+/// Writes a PNG scatter plot for clustered PCA coordinates.
+///
+/// # Parameters
+/// - `points`: PCA-projected coordinates with at least two columns.
+/// - `labels`: Cluster labels for each point.
+/// - `path`: Output PNG path.
+///
+/// # Returns
+/// - `Result<(), Box<dyn Error>>`: `Ok(())` on success or an error on failure.
+///
+/// # Expected Output
+/// - Writes a PNG to `path`; no stdout/stderr output.
+#[cfg(feature = "cluster")]
+pub fn plot_clustered_png(
+    points: &Array2<f64>,
+    labels: &Array1<usize>,
+    path: &Path,
+) -> Result<(), Box<dyn Error>> {
+    if points.ncols() < 2 || points.nrows() == 0 {
+        return Ok(());
+    }
+    if labels.len() != points.nrows() {
+        return Err("label count does not match point count".into());
+    }
+
+    let xs: Vec<f64> = points.column(0).iter().copied().collect();
+    let ys: Vec<f64> = points.column(1).iter().copied().collect();
+    let (min_x, max_x) = min_max_range(&xs);
+    let (min_y, max_y) = min_max_range(&ys);
+
+    let root = BitMapBackend::new(path, (1000, 800)).into_drawing_area();
+    root.fill(&WHITE)?;
+    let mut chart = ChartBuilder::on(&root)
+        .caption("PCA Projection (Clustered)", ("sans-serif", 30).into_font())
+        .margin(20)
+        .x_label_area_size(40)
+        .y_label_area_size(40)
+        .build_cartesian_2d(min_x..max_x, min_y..max_y)?;
+
+    chart.configure_mesh().x_desc("PC1").y_desc("PC2").draw()?;
+
+    chart.draw_series(xs.iter().zip(ys.iter()).zip(labels.iter()).map(|((x, y), label)| {
+        let color = cluster_color(*label);
+        Circle::new((*x, *y), 3, color.filled())
+    }))?;
+
+    root.present()?;
+    Ok(())
+}
+
+/// Runs PCA and k-means clustering, then writes a clustered scatter PNG.
+///
+/// # Parameters
+/// - `coordinates`: Input coordinate vectors to project and cluster.
+/// - `components`: Number of PCA components to compute (must be >= 2).
+/// - `k`: Number of clusters to fit.
+/// - `path`: Output PNG path.
+///
+/// # Returns
+/// - `Result<(), Box<dyn Error>>`: `Ok(())` on success or an error on failure.
+///
+/// # Expected Output
+/// - Writes a PNG to `path`; no stdout/stderr output.
+#[cfg(feature = "cluster")]
+pub fn cluster_coordinates_to_png(
+    coordinates: &[Vec<f64>],
+    components: usize,
+    k: usize,
+    path: &Path,
+) -> Result<(), Box<dyn Error>> {
+    if components < 2 {
+        return Err("components must be >= 2 for plotting".into());
+    }
+    let projected = pca_project_coordinates(coordinates, components)
+        .map_err(|err| format!("pca projection failed: {err}"))?;
+    let labels = kmeans_cluster(&projected, k)
+        .map_err(|err| format!("kmeans failed: {err}"))?;
+    plot_clustered_png(&projected, &labels, path)
 }
 
 /// Writes a PNG scatter plot for PCA coordinates using the first two components.
@@ -352,6 +465,23 @@ fn min_max_range(values: &[f64]) -> (f64, f64) {
     }
 }
 
+#[cfg(feature = "cluster")]
+fn cluster_color(label: usize) -> RGBColor {
+    const COLORS: [RGBColor; 10] = [
+        RGBColor(31, 119, 180),
+        RGBColor(255, 127, 14),
+        RGBColor(44, 160, 44),
+        RGBColor(214, 39, 40),
+        RGBColor(148, 103, 189),
+        RGBColor(140, 86, 75),
+        RGBColor(227, 119, 194),
+        RGBColor(127, 127, 127),
+        RGBColor(188, 189, 34),
+        RGBColor(23, 190, 207),
+    ];
+    COLORS[label % COLORS.len()]
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -490,6 +620,36 @@ mod tests {
             std::fs::create_dir_all(parent).expect("create images dir");
         }
         plot_pca_png(&projected, path).expect("plot");
+        let meta = std::fs::metadata(path).expect("metadata");
+        assert!(meta.len() > 0);
+    }
+
+    #[cfg(feature = "cluster")]
+    #[test]
+    fn test_cluster_projection_with_large_vectors() {
+        let primes: Vec<u64> = vec![
+            251, 257, 263, 269, 271, 277, 281, 283, 293, 307, 311, 313, 317, 331, 337, 349,
+        ];
+        let seeds: Vec<u64> = (1..=16).collect();
+        let config = make_config(&primes, &seeds);
+        let fields = build_polynomial_fields(&config).expect("fields");
+
+        let base: BigUint = BigUint::one() << 128;
+        let step: BigUint = BigUint::from(9_876_543u64);
+        let mut vectors = Vec::with_capacity(100);
+        for idx in 0..100u64 {
+            let addend = &step * BigUint::from(idx);
+            let mut ciphertext = base.clone();
+            ciphertext += addend;
+            let coords = coordinates_for_ciphertext(&ciphertext, &fields);
+            vectors.push(coords.into_iter().map(|c| c.value).collect::<Vec<_>>());
+        }
+
+        let path = Path::new("images/pca_cluster_projection.png");
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).expect("create images dir");
+        }
+        cluster_coordinates_to_png(&vectors, 2, 4, path).expect("cluster plot");
         let meta = std::fs::metadata(path).expect("metadata");
         assert!(meta.len() > 0);
     }
