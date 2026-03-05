@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-RGEN_SMALL_CONFIG=${RGEN_SMALL_CONFIG:-"rsa_config_small.json"}
+RGEN_SMALL_CONFIG=${RGEN_SMALL_CONFIG:-"config/rsa_config_small.json"}
 RGEN_SMALL_OUTPUT=${RGEN_SMALL_OUTPUT:-"rgen_output_smaller.csv"}
 RGEN_SMALL_MIN_COUNT=${RGEN_SMALL_MIN_COUNT:-1000000}
 RGEN_SMALL_MODE=${RGEN_SMALL_MODE:-"small-primes"}

@@ -1,4 +1,4 @@
-.PHONY: all build test deploy
+.PHONY: all build test deploy install-deps
 
 all: build
 
@@ -10,3 +10,6 @@ test:
 
 deploy:
 	./scripts/make_deploy.sh
+
+install-deps:
+	./scripts/install_deps.sh

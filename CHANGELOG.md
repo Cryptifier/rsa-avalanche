@@ -55,7 +55,7 @@ Weekly changelog derived from git history.
 - 2026-02-17: Changed and updated documentation.
 - 2026-02-16: Parallelized the enciphered export functions over all iterations.
 - 2026-02-16: Added code to analysis.rs and combiner.rs to compute based on oracles from r candidate decryptions.
-- 2026-02-16: Updated rsa_config.json with the new options.
+- 2026-02-16: Updated config/rsa_config.json with the new options.
 - 2026-02-16: Refactored code and implemented combiner experiment.
 
 ## 2026-W07 (2026-02-09 to 2026-02-15)

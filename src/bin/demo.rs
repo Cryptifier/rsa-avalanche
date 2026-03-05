@@ -20,7 +20,7 @@ use rsademo::rng::{RngChoice, RngMode};
 #[command(name = "demo", about = "Speculative RSA decrypt demo", author, version)]
 struct Args {
     /// Path to a JSON/JSON5 config file
-    #[arg(short = 'c', long, default_value = "rsa_config.json")]
+    #[arg(short = 'c', long, default_value = "config/rsa_config.json")]
     config: String,
 
     /// Encrypt a plaintext (hex string) using the config RSA key

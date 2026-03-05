@@ -5,8 +5,8 @@ This repository stores generated datasets under `./data` so they are easy to loc
 ## Directories
 
 - `data/`: Root folder for generated datasets and grid outputs.
-- `data/rgen_grid/`: Grid CSVs generated from the small config (`rsa_config_small.json`). Filenames include the percent offset and size label (for example, `rgen_grid_small_pct_30.csv`).
-- `data/rgen_grid_medium/`: Grid CSVs generated from medium configs (for example, `rsa_config_base_medium.json`). Use this directory when creating the medium-sized grid outputs so small and medium datasets do not mix.
+- `data/rgen_grid/`: Grid CSVs generated from the small config (`config/rsa_config_small.json`). Filenames include the percent offset and size label (for example, `rgen_grid_small_pct_30.csv`).
+- `data/rgen_grid_medium/`: Grid CSVs generated from medium configs (for example, `config/rsa_config_medium.json`). Use this directory when creating the medium-sized grid outputs so small and medium datasets do not mix.
 
 ## Purpose
 

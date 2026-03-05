@@ -1,0 +1,11 @@
+---
+source: src/polynomial_fields.rs
+assertion_line: 290
+expression: out
+---
+- "X:0.64400000"
+- "Y:0.85546875"
+- "Z:0.40839695"
+- "W:0.08582090"
+- "V:0.44074074"
+- "U:0.95652174"
