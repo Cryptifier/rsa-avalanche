@@ -69,7 +69,7 @@ for i in $(seq 1 "${RUNS}"); do
   echo ""
   echo "===== RUN ${i} (seed ${seed}) ====="
   set +e
-  cargo run --bin analysis -- --bits 56 --seed "${seed}" -c "${CONFIG}" --crypto-rng --session-json "${session_path}" "${TEST_ARGS[@]}" "${EXTRA_ARGS[@]}" \
+  cargo run --bin analysis -- --bits 56 --seed "${seed}" -c "${CONFIG}" --tests --crypto-rng --session-json "${session_path}" "${TEST_ARGS[@]}" "${EXTRA_ARGS[@]}" \
     2>&1 | tee -a "${ANALYSIS_LOG}" | tee "${run_output}" > /dev/null
   status=$?
   set -e

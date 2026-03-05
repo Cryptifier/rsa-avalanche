@@ -76,82 +76,128 @@ pub struct FeatureAnalytics {
 /// Factor metadata for an r candidate.
 #[derive(Debug, Serialize)]
 pub struct RCandidateFactor {
-    prime: String,
-    exponent: u64,
-    prime_bits: u64,
+    /// Prime factor value.
+    pub prime: String,
+    /// Exponent for the prime factor.
+    pub exponent: u64,
+    /// Bit length of the prime factor.
+    pub prime_bits: u64,
 }
 
 /// Serialized r candidate entry with factors.
 #[derive(Debug, Serialize)]
 pub struct RCandidateEntry {
-    r: String,
-    r_bits: u64,
-    factors: Vec<RCandidateFactor>,
+    /// Candidate modulus value.
+    pub r: String,
+    /// Bit length of the candidate modulus.
+    pub r_bits: u64,
+    /// Prime factorization metadata.
+    pub factors: Vec<RCandidateFactor>,
 }
 
 /// Step-by-step trace entry for a single r candidate.
 #[derive(Debug, Serialize)]
 pub struct RCandidateTraceEntry {
-    r: String,
-    r_bits: u64,
-    hbc_ciphertext_r: String,
-    candidate_decryption: String,
+    /// Candidate modulus value.
+    pub r: String,
+    /// Bit length of the candidate modulus.
+    pub r_bits: u64,
+    /// Ciphertext after homomorphic base conversion into `r`.
+    pub hbc_ciphertext_r: String,
+    /// Candidate-derived plaintext.
+    pub candidate_decryption: String,
 }
 
 /// Analytics payload for a batch of r candidates.
 #[derive(Debug, Serialize)]
 pub struct RCandidateBatchAnalytics {
-    context: String,
-    mode: String,
-    target_count: usize,
-    generated_count: usize,
-    duration_ms: u128,
-    reuse_path: String,
-    reuse_enabled: bool,
-    reuse_append_only: bool,
-    min_factor: String,
-    process_scale: u32,
-    small_prime_factors: usize,
-    max_factors: usize,
-    target_bit_length: Option<u64>,
-    candidates: Vec<RCandidateEntry>,
+    /// Label describing the candidate batch usage.
+    pub context: String,
+    /// Candidate generation mode.
+    pub mode: String,
+    /// Target count requested for the batch.
+    pub target_count: usize,
+    /// Actual count generated.
+    pub generated_count: usize,
+    /// Duration in milliseconds.
+    pub duration_ms: u128,
+    /// Reuse file path for candidates.
+    pub reuse_path: String,
+    /// Whether reuse loading is enabled.
+    pub reuse_enabled: bool,
+    /// Whether reuse append-only mode is enabled.
+    pub reuse_append_only: bool,
+    /// Minimum factor used for candidate screening.
+    pub min_factor: String,
+    /// Process scale factor for candidate generation.
+    pub process_scale: u32,
+    /// Number of small primes per candidate.
+    pub small_prime_factors: usize,
+    /// Maximum factor count per candidate.
+    pub max_factors: usize,
+    /// Optional target bit length for candidates.
+    pub target_bit_length: Option<u64>,
+    /// Candidate entries for the batch.
+    pub candidates: Vec<RCandidateEntry>,
 }
 
 /// Per-candidate accuracy entry for a shared message batch.
 #[derive(Debug, Serialize)]
 pub struct RCandidateAccuracyEntry {
-    r: String,
-    r_bits: u64,
-    factors: Vec<RCandidateFactor>,
-    accuracy_pct: f64,
-    hbc_ciphertexts_r: Vec<String>,
-    candidate_decryptions: Vec<String>,
+    /// Candidate modulus value.
+    pub r: String,
+    /// Bit length of the candidate modulus.
+    pub r_bits: u64,
+    /// Prime factorization metadata.
+    pub factors: Vec<RCandidateFactor>,
+    /// Mean accuracy percentage across the message batch.
+    pub accuracy_pct: f64,
+    /// HBC ciphertexts in the candidate modulus (per message).
+    pub hbc_ciphertexts_r: Vec<String>,
+    /// Candidate-derived plaintexts (per message).
+    pub candidate_decryptions: Vec<String>,
 }
 
 /// Accuracy batch payload for a shared message set.
 #[derive(Debug, Serialize)]
 pub struct RCandidateAccuracyBatch {
-    context: String,
-    messages: Vec<String>,
-    ciphertexts: Vec<String>,
-    shifted_ciphertexts: Vec<String>,
-    rabin_exponent: u32,
-    tonelli_shanks_modulus: String,
-    tonelli_shanks_ciphertexts: Vec<String>,
-    candidates: Vec<RCandidateAccuracyEntry>,
+    /// Label describing the batch usage.
+    pub context: String,
+    /// Plaintext messages used in the batch.
+    pub messages: Vec<String>,
+    /// Ciphertexts corresponding to the messages.
+    pub ciphertexts: Vec<String>,
+    /// Shifted ciphertexts when shift is enabled.
+    pub shifted_ciphertexts: Vec<String>,
+    /// Rabin exponent used for the batch transforms.
+    pub rabin_exponent: u32,
+    /// Tonelli-Shanks modulus value (`n^k`).
+    pub tonelli_shanks_modulus: String,
+    /// Tonelli-Shanks ciphertexts (per message).
+    pub tonelli_shanks_ciphertexts: Vec<String>,
+    /// Per-candidate accuracy entries.
+    pub candidates: Vec<RCandidateAccuracyEntry>,
 }
 
 /// Trace payload for r candidates evaluated against a specific message.
 #[derive(Debug, Serialize)]
 pub struct RCandidateTraceBatch {
-    context: String,
-    message: String,
-    ciphertext: String,
-    shifted_ciphertext: String,
-    rabin_exponent: u32,
-    tonelli_shanks_modulus: String,
-    tonelli_shanks_ciphertext: String,
-    candidates: Vec<RCandidateTraceEntry>,
+    /// Label describing the batch usage.
+    pub context: String,
+    /// Plaintext message used in the trace.
+    pub message: String,
+    /// Ciphertext corresponding to the message.
+    pub ciphertext: String,
+    /// Shifted ciphertext when shift is enabled.
+    pub shifted_ciphertext: String,
+    /// Rabin exponent used for the trace transforms.
+    pub rabin_exponent: u32,
+    /// Tonelli-Shanks modulus value (`n^k`).
+    pub tonelli_shanks_modulus: String,
+    /// Tonelli-Shanks ciphertext.
+    pub tonelli_shanks_ciphertext: String,
+    /// Per-candidate trace entries.
+    pub candidates: Vec<RCandidateTraceEntry>,
 }
 
 /// Top-level analytics session payload.
