@@ -573,7 +573,7 @@ fn build_header_lines(
     count: usize,
 ) -> Vec<String> {
     let mut lines = Vec::new();
-    lines.push("# rgen r_candidates.csv".to_string());
+    lines.push("# rgen data/r_candidates.csv".to_string());
     lines.push(format!("# mode={}", mode_label(settings.mode)));
     lines.push(format!("# count={}", count));
 
@@ -750,7 +750,7 @@ mod tests {
         args.max_factors = Some(12);
         args.r_bits = Some(80);
 
-        let settings = build_r_candidate_settings(&engine, &args, "r_candidates.csv", None)
+        let settings = build_r_candidate_settings(&engine, &args, "data/r_candidates.csv", None)
             .expect("settings failed");
         assert_eq!(settings.process_count, 10);
         assert_eq!(settings.process_min_count, 8);
@@ -772,7 +772,7 @@ mod tests {
             process_count: 2,
             process_min_count: 1,
             process_scale: 8,
-            reuse_r_candidates_path: "r_candidates.csv".to_string(),
+            reuse_r_candidates_path: "data/r_candidates.csv".to_string(),
             reuse_r_candidates: false,
             reuse_r_candidates_append_only: false,
             small_primes: vec![3u8, 5u8, 7u8].into_iter().map(BigUint::from).collect(),
