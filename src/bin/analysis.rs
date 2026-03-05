@@ -40,7 +40,9 @@ use rand::RngCore;
 use serde::Serialize;
 use serde_json::json;
 use rsademo::analytics::{
-    AnalyticsCliArgs, SessionAnalytics, generate_r_candidates_with_analytics, write_session_json,
+    AnalyticsCliArgs, RCandidateAccuracyBatch, RCandidateAccuracyEntry, RCandidateFactor,
+    RCandidateTraceBatch, RCandidateTraceEntry, SessionAnalytics, generate_r_candidates_with_analytics,
+    write_session_json,
 };
 use rsademo::config::{load_config, Config, EngineConfig};
 use rsademo::combiner::majority_vote_with_distribution;
@@ -187,6 +189,7 @@ fn run_demo(args: Args, config: Config, analytics: &Arc<Mutex<SessionAnalytics>>
         a.mark_feature("test_iterations", config.engine.test_iterations > 0 && args.export);
         a.mark_feature("information_sufficiency", args.tests);
         a.mark_feature("enciphered_export", config.engine.enciphered_export_enable);
+        a.mark_feature("r_candidate_accuracy", config.engine.analysis_batch_enable);
         a.mark_feature(
             "r_use_list",
             config.engine.r_use_list_enable && !config.engine.r_use_list.is_empty(),
@@ -629,6 +632,37 @@ fn run_demo(args: Args, config: Config, analytics: &Arc<Mutex<SessionAnalytics>>
                 "information_sufficiency",
                 "analysis_iterations",
                 json!(config.engine.analysis_tests_iterations),
+            );
+        });
+    }
+
+    if config.engine.analysis_batch_enable {
+        let batch_start = Instant::now();
+        if let Err(err) =
+            run_r_candidate_accuracy_batches(&ctx, &config.engine, &mut rng, analytics, args.shift)
+        {
+            with_analytics(analytics, |a| {
+                a.add_feature_note("r_candidate_accuracy", &format!("failed: {}", err));
+                a.record_feature_duration("r_candidate_accuracy", batch_start.elapsed());
+            });
+            return Err(err);
+        }
+        with_analytics(analytics, |a| {
+            a.record_feature_duration("r_candidate_accuracy", batch_start.elapsed());
+            a.set_feature_stat(
+                "r_candidate_accuracy",
+                "messages_per_batch",
+                json!(config.engine.analysis_batch_messages),
+            );
+            a.set_feature_stat(
+                "r_candidate_accuracy",
+                "candidates_per_batch",
+                json!(config.engine.analysis_batch_candidates),
+            );
+            a.set_feature_stat(
+                "r_candidate_accuracy",
+                "batch_count",
+                json!(config.engine.analysis_batch_batches),
             );
         });
     }
@@ -1189,8 +1223,18 @@ fn collect_speculative_oracle_bits(
     let shifted = maybe_shift_ciphertext(ctx, &ciphertext, shift);
     let result_default = get_larger_number(&shifted, &ctx.n, y, true, false);
 
+    record_r_candidate_trace_batch_from_factors(
+        ctx,
+        engine,
+        message,
+        &candidates,
+        analytics,
+        "combiner_oracles",
+        shift,
+    );
+
     let mut oracles = Vec::with_capacity(k_oracles.min(candidates.len()));
-    for (r, factors) in candidates {
+    for (r, factors) in candidates.iter() {
         if oracles.len() >= k_oracles {
             break;
         }
@@ -2191,6 +2235,15 @@ fn run_information_sufficiency_tests(
 
     println!("\nRunning analysis sufficiency tests...");
     let candidates = build_oracle_candidates(ctx, engine, rng, analytics)?;
+    record_r_candidate_trace_batch_from_prepared(
+        ctx,
+        engine,
+        message,
+        &candidates,
+        analytics,
+        "analysis_oracle_candidates",
+        shift,
+    );
     let Some(best) = select_best_candidate(ctx, engine, &candidates, message, shift) else {
         return Err("failed to select a best r candidate for tests".into());
     };
@@ -3812,6 +3865,352 @@ fn maybe_shift_ciphertext(ctx: &RSAContext, ciphertext: &BigUint, shift: bool) -
     }
     let enc_two = BigUint::from(2u8).modpow(&ctx.e, &ctx.n);
     (ciphertext * enc_two) % &ctx.n
+}
+
+/// Records per-candidate trace data for a raw r-candidate batch.
+///
+/// # Parameters
+/// - `ctx`: RSA context containing key material.
+/// - `engine`: Engine configuration controlling HBC behavior.
+/// - `message`: Plaintext message used to derive the ciphertext.
+/// - `candidates`: Raw r candidates and factor lists.
+/// - `analytics`: Session analytics accumulator to receive the trace batch.
+/// - `context`: Label matching the candidate batch context.
+/// - `shift`: Whether to shift ciphertext by encrypted 2 before conversion.
+///
+/// # Returns
+/// - `()`: This function returns nothing.
+///
+/// # Expected Output
+/// - Appends a trace batch to the analytics session; no stdout/stderr output.
+fn record_r_candidate_trace_batch_from_factors(
+    ctx: &RSAContext,
+    engine: &EngineConfig,
+    message: &BigUint,
+    candidates: &[(BigUint, Vec<(BigUint, u64)>)],
+    analytics: &Arc<Mutex<SessionAnalytics>>,
+    context: &str,
+    shift: bool,
+) {
+    if candidates.is_empty() {
+        return;
+    }
+
+    let y = engine.rabin_exponent as u32;
+    let n_pow_y = ctx.n.pow(y);
+    let ciphertext = message.modpow(&ctx.e, &ctx.n);
+    let shifted = maybe_shift_ciphertext(ctx, &ciphertext, shift);
+    let result_default = get_larger_number(&shifted, &ctx.n, y, true, false);
+
+    let mut entries = Vec::with_capacity(candidates.len());
+    for (r, factors) in candidates {
+        let phi_new = compute_totient(factors);
+        let Some(d_new) = mod_inverse(&ctx.e, &phi_new) else {
+            continue;
+        };
+        let r_pow_y = r.pow(y);
+        let hbc_result = hbc(&result_default, r, &n_pow_y, engine);
+        let dm = derive_candidate_message_from_result(
+            ctx,
+            engine,
+            &result_default,
+            r,
+            &d_new,
+            &n_pow_y,
+            &r_pow_y,
+            y,
+            false,
+        );
+        entries.push(RCandidateTraceEntry {
+            r: r.to_string(),
+            r_bits: r.bits(),
+            hbc_ciphertext_r: hbc_result.to_string(),
+            candidate_decryption: dm.to_string(),
+        });
+    }
+
+    if entries.is_empty() {
+        return;
+    }
+
+    with_analytics(analytics, |a| {
+        a.push_r_candidate_trace_batch(RCandidateTraceBatch {
+            context: context.to_string(),
+            message: message.to_string(),
+            ciphertext: ciphertext.to_string(),
+            shifted_ciphertext: shifted.to_string(),
+            rabin_exponent: y,
+            tonelli_shanks_modulus: n_pow_y.to_string(),
+            tonelli_shanks_ciphertext: result_default.to_string(),
+            candidates: entries,
+        });
+    });
+}
+
+/// Records per-candidate trace data for prepared oracle candidates.
+///
+/// # Parameters
+/// - `ctx`: RSA context containing key material.
+/// - `engine`: Engine configuration controlling HBC behavior.
+/// - `message`: Plaintext message used to derive the ciphertext.
+/// - `candidates`: Prepared r candidates with precomputed exponents.
+/// - `analytics`: Session analytics accumulator to receive the trace batch.
+/// - `context`: Label matching the candidate batch context.
+/// - `shift`: Whether to shift ciphertext by encrypted 2 before conversion.
+///
+/// # Returns
+/// - `()`: This function returns nothing.
+///
+/// # Expected Output
+/// - Appends a trace batch to the analytics session; no stdout/stderr output.
+fn record_r_candidate_trace_batch_from_prepared(
+    ctx: &RSAContext,
+    engine: &EngineConfig,
+    message: &BigUint,
+    candidates: &[OracleCandidate],
+    analytics: &Arc<Mutex<SessionAnalytics>>,
+    context: &str,
+    shift: bool,
+) {
+    if candidates.is_empty() {
+        return;
+    }
+
+    let y = engine.rabin_exponent as u32;
+    let n_pow_y = ctx.n.pow(y);
+    let ciphertext = message.modpow(&ctx.e, &ctx.n);
+    let shifted = maybe_shift_ciphertext(ctx, &ciphertext, shift);
+    let result_default = get_larger_number(&shifted, &ctx.n, y, true, false);
+
+    let mut entries = Vec::with_capacity(candidates.len());
+    for candidate in candidates {
+        let hbc_result = hbc(&result_default, &candidate.r, &n_pow_y, engine);
+        let dm = derive_candidate_message_from_result(
+            ctx,
+            engine,
+            &result_default,
+            &candidate.r,
+            &candidate.d_new,
+            &n_pow_y,
+            &candidate.r_pow_y,
+            y,
+            false,
+        );
+        entries.push(RCandidateTraceEntry {
+            r: candidate.r.to_string(),
+            r_bits: candidate.r.bits(),
+            hbc_ciphertext_r: hbc_result.to_string(),
+            candidate_decryption: dm.to_string(),
+        });
+    }
+
+    if entries.is_empty() {
+        return;
+    }
+
+    with_analytics(analytics, |a| {
+        a.push_r_candidate_trace_batch(RCandidateTraceBatch {
+            context: context.to_string(),
+            message: message.to_string(),
+            ciphertext: ciphertext.to_string(),
+            shifted_ciphertext: shifted.to_string(),
+            rabin_exponent: y,
+            tonelli_shanks_modulus: n_pow_y.to_string(),
+            tonelli_shanks_ciphertext: result_default.to_string(),
+            candidates: entries,
+        });
+    });
+}
+
+#[derive(Debug, Clone)]
+struct AccuracyCandidate {
+    r: BigUint,
+    factors: Vec<(BigUint, u64)>,
+    d_new: BigUint,
+    r_pow_y: BigUint,
+}
+
+/// Runs r-candidate accuracy batches over shared message sets.
+///
+/// # Parameters
+/// - `ctx`: RSA context containing key material.
+/// - `engine`: Engine configuration controlling candidate and message settings.
+/// - `rng`: Random number generator for candidate and message sampling.
+/// - `analytics`: Session analytics accumulator receiving batch data.
+/// - `shift`: Whether to shift ciphertext by encrypted 2 before conversion.
+///
+/// # Returns
+/// - `Result<(), Box<dyn Error>>`: `Ok(())` on success or an error on invalid configuration.
+///
+/// # Expected Output
+/// - Appends accuracy batches to the session analytics; no stdout/stderr output.
+fn run_r_candidate_accuracy_batches(
+    ctx: &RSAContext,
+    engine: &EngineConfig,
+    rng: &mut RngChoice,
+    analytics: &Arc<Mutex<SessionAnalytics>>,
+    shift: bool,
+) -> Result<(), Box<dyn Error>> {
+    if !engine.analysis_batch_enable {
+        return Ok(());
+    }
+
+    let message_count_raw = engine.analysis_batch_messages;
+    let candidates_per_batch_raw = engine.analysis_batch_candidates;
+    let batch_count_raw = engine.analysis_batch_batches;
+    if message_count_raw == 0 || candidates_per_batch_raw == 0 {
+        return Err("analysis_batch_messages and analysis_batch_candidates must be >= 1".into());
+    }
+    if batch_count_raw == 0 {
+        return Err("analysis_batch_batches must be >= 1".into());
+    }
+
+    let message_count = message_count_raw as usize;
+    let candidates_per_batch = candidates_per_batch_raw as usize;
+    let batch_count = batch_count_raw as usize;
+
+    let total_candidates = candidates_per_batch * batch_count;
+    let settings = build_r_candidate_settings(engine);
+    let mut candidates = generate_r_candidates_with_analytics(
+        "analysis_batch_accuracy",
+        &ctx.n,
+        &settings,
+        rng,
+        total_candidates,
+        analytics,
+    );
+    if candidates.is_empty() {
+        return Err("no r candidates generated for accuracy batches".into());
+    }
+
+    let y = engine.rabin_exponent as u32;
+    let mut prepared = Vec::with_capacity(candidates.len());
+    for (r, factors) in candidates.drain(..) {
+        let phi_new = compute_totient(&factors);
+        let Some(d_new) = mod_inverse(&ctx.e, &phi_new) else {
+            continue;
+        };
+        let r_pow_y = r.pow(y);
+        prepared.push(AccuracyCandidate {
+            r,
+            factors,
+            d_new,
+            r_pow_y,
+        });
+    }
+
+    if prepared.len() < total_candidates {
+        return Err(format!(
+            "only {} valid r candidates available for accuracy batches (need {})",
+            prepared.len(),
+            total_candidates
+        )
+        .into());
+    }
+
+    let n_pow_y = ctx.n.pow(y);
+    let mut candidate_offset = 0usize;
+    for batch_idx in 0..batch_count {
+        let start = candidate_offset;
+        let end = candidate_offset + candidates_per_batch;
+        let batch_candidates = &prepared[start..end];
+        candidate_offset = end;
+
+        let mut messages = Vec::with_capacity(message_count);
+        if engine.message.is_random {
+            for _ in 0..message_count {
+                messages.push(random_message_under_n(engine, &ctx.n, rng));
+            }
+        } else {
+            let msg = BigUint::from_bytes_be(engine.message.fixed_message.as_bytes());
+            if msg.is_zero() {
+                return Err("analysis_batch fixed_message cannot be empty".into());
+            }
+            if msg >= ctx.n {
+                return Err("analysis_batch fixed_message must be smaller than modulus n".into());
+            }
+            messages.resize(message_count, msg);
+        }
+
+        let mut ciphertexts = Vec::with_capacity(message_count);
+        let mut shifted_ciphertexts = Vec::with_capacity(message_count);
+        let mut tonelli_ciphertexts = Vec::with_capacity(message_count);
+        for msg in &messages {
+            let ciphertext = msg.modpow(&ctx.e, &ctx.n);
+            let shifted = maybe_shift_ciphertext(ctx, &ciphertext, shift);
+            let result_default = get_larger_number(&shifted, &ctx.n, y, true, false);
+            ciphertexts.push(ciphertext);
+            shifted_ciphertexts.push(shifted);
+            tonelli_ciphertexts.push(result_default);
+        }
+
+        let mut entries = Vec::with_capacity(batch_candidates.len());
+        for candidate in batch_candidates {
+            let mut hbc_ciphertexts_r = Vec::with_capacity(message_count);
+            let mut candidate_decryptions = Vec::with_capacity(message_count);
+            let mut total_accuracy = 0.0f64;
+
+            for (idx, msg) in messages.iter().enumerate() {
+                let result_default = &tonelli_ciphertexts[idx];
+                let hbc_result = hbc(result_default, &candidate.r, &n_pow_y, engine);
+                let dm = derive_candidate_message_from_result(
+                    ctx,
+                    engine,
+                    result_default,
+                    &candidate.r,
+                    &candidate.d_new,
+                    &n_pow_y,
+                    &candidate.r_pow_y,
+                    y,
+                    false,
+                );
+                let message_bits = msg.bits().max(1) as f64;
+                let (_, matching_total) = count_matching_bits(&dm, msg);
+                let match_pct = (matching_total as f64 / message_bits) * 100.0;
+                total_accuracy += match_pct;
+
+                hbc_ciphertexts_r.push(hbc_result.to_string());
+                candidate_decryptions.push(dm.to_string());
+            }
+
+            let accuracy_pct = total_accuracy / message_count as f64;
+            let entry = RCandidateAccuracyEntry {
+                r: candidate.r.to_string(),
+                r_bits: candidate.r.bits(),
+                factors: candidate
+                    .factors
+                    .iter()
+                    .map(|(p, e)| RCandidateFactor {
+                        prime: p.to_string(),
+                        exponent: *e,
+                        prime_bits: p.bits(),
+                    })
+                    .collect(),
+                accuracy_pct,
+                hbc_ciphertexts_r,
+                candidate_decryptions,
+            };
+            entries.push(entry);
+        }
+
+        with_analytics(analytics, |a| {
+            a.push_r_candidate_accuracy_batch(RCandidateAccuracyBatch {
+                context: format!("analysis_batch_accuracy_{}", batch_idx + 1),
+                messages: messages.iter().map(|m| m.to_string()).collect(),
+                ciphertexts: ciphertexts.iter().map(|c| c.to_string()).collect(),
+                shifted_ciphertexts: shifted_ciphertexts.iter().map(|c| c.to_string()).collect(),
+                rabin_exponent: y,
+                tonelli_shanks_modulus: n_pow_y.to_string(),
+                tonelli_shanks_ciphertexts: tonelli_ciphertexts
+                    .iter()
+                    .map(|c| c.to_string())
+                    .collect(),
+                candidates: entries,
+            });
+        });
+    }
+
+    Ok(())
 }
 
 #[allow(dead_code)]

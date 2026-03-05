@@ -98,6 +98,14 @@ pub struct EngineConfig {
     /// Number of homomorphic left-shift multiplications by 2 to compare per candidate.
     #[serde(default = "default_analysis_shift_multiplications")]
     pub analysis_shift_multiplications: usize,
+    #[serde(default = "default_analysis_batch_enable")]
+    pub analysis_batch_enable: bool,
+    #[serde(default = "default_analysis_batch_messages")]
+    pub analysis_batch_messages: u64,
+    #[serde(default = "default_analysis_batch_candidates")]
+    pub analysis_batch_candidates: u64,
+    #[serde(default = "default_analysis_batch_batches")]
+    pub analysis_batch_batches: u64,
     #[serde(default = "default_oracle_accuracy_threshold")]
     pub oracle_accuracy_threshold: f64,
     #[serde(default = "default_r_use_list_enable")]
@@ -234,6 +242,10 @@ impl Default for EngineConfig {
             analysis_tests_window: default_analysis_tests_window(),
             analysis_tests_stride: default_analysis_tests_stride(),
             analysis_shift_multiplications: default_analysis_shift_multiplications(),
+            analysis_batch_enable: default_analysis_batch_enable(),
+            analysis_batch_messages: default_analysis_batch_messages(),
+            analysis_batch_candidates: default_analysis_batch_candidates(),
+            analysis_batch_batches: default_analysis_batch_batches(),
             oracle_accuracy_threshold: default_oracle_accuracy_threshold(),
             r_use_list_enable: default_r_use_list_enable(),
             r_use_list: Vec::new(),
@@ -696,6 +708,62 @@ fn default_analysis_tests_stride() -> usize {
 /// - Returns a constant default value; no side effects.
 fn default_analysis_shift_multiplications() -> usize {
     32
+}
+
+/// Default flag for r-candidate accuracy batching.
+///
+/// # Parameters
+/// - None.
+///
+/// # Returns
+/// - `bool`: Default enable setting.
+///
+/// # Expected Output
+/// - Returns a constant default value; no side effects.
+fn default_analysis_batch_enable() -> bool {
+    false
+}
+
+/// Default number of messages per r-candidate accuracy batch.
+///
+/// # Parameters
+/// - None.
+///
+/// # Returns
+/// - `u64`: Default message count per batch.
+///
+/// # Expected Output
+/// - Returns a constant default value; no side effects.
+fn default_analysis_batch_messages() -> u64 {
+    0
+}
+
+/// Default number of r candidates per accuracy batch.
+///
+/// # Parameters
+/// - None.
+///
+/// # Returns
+/// - `u64`: Default candidate count per batch.
+///
+/// # Expected Output
+/// - Returns a constant default value; no side effects.
+fn default_analysis_batch_candidates() -> u64 {
+    0
+}
+
+/// Default number of r-candidate accuracy batches to evaluate.
+///
+/// # Parameters
+/// - None.
+///
+/// # Returns
+/// - `u64`: Default batch count.
+///
+/// # Expected Output
+/// - Returns a constant default value; no side effects.
+fn default_analysis_batch_batches() -> u64 {
+    1
 }
 
 /// Default oracle accuracy threshold for sufficiency tests.

@@ -1,16 +1,24 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-RUNS=${RUNS:-100}
+RUNS=${RUNS:-1}
 SEED_START=${SEED_START:-1}
-CONFIG=${CONFIG:-"config/rsa_config_small.json"}
+CONFIG=${CONFIG:-"config/rsa_config_small_batch.json"}
 ANALYSIS_LOG=${ANALYSIS_LOG:-"logs_current.log"}
 SCRIPT_LOG=${SCRIPT_LOG:-"logs_current_script.log"}
 RESUME=${RESUME:-0}
 ANALYSIS_EXTRA_ARGS=${ANALYSIS_EXTRA_ARGS:-}
 LOG_DIR=${LOG_DIR:-"logs"}
+RUN_TESTS=${RUN_TESTS:-0}
+RUN_PCA=${RUN_PCA:-0}
+PCA_OUTPUT=${PCA_OUTPUT:-"pca_clusters.png"}
 
 read -r -a EXTRA_ARGS <<< "${ANALYSIS_EXTRA_ARGS}"
+
+TEST_ARGS=()
+if [[ "${RUN_TESTS}" == "1" ]]; then
+  TEST_ARGS=(--tests)
+fi
 
 RED=$'\033[0;31m'
 GREEN=$'\033[0;32m'
@@ -61,7 +69,7 @@ for i in $(seq 1 "${RUNS}"); do
   echo ""
   echo "===== RUN ${i} (seed ${seed}) ====="
   set +e
-  cargo run --bin analysis -- --bits 56 --seed "${seed}" -c "${CONFIG}" --tests --crypto-rng --session-json "${session_path}" "${EXTRA_ARGS[@]}" \
+  cargo run --bin analysis -- --bits 56 --seed "${seed}" -c "${CONFIG}" --tests --crypto-rng --session-json "${session_path}" "${TEST_ARGS[@]}" "${EXTRA_ARGS[@]}" \
     2>&1 | tee -a "${ANALYSIS_LOG}" | tee "${run_output}" > /dev/null
   status=$?
   set -e
@@ -137,3 +145,10 @@ echo "===== SUMMARY ====="
 echo "Match % stats: mean ${mean}, std dev ${stddev}, min ${min}, max ${max}, n ${count}"
 echo "Verdicts: PASS ${pass_count}, FAIL ${fail_count}"
 echo "Average duration per run: ${avg_time_s}s"
+
+if [[ "${RUN_PCA}" == "1" && -n "${session_path:-}" ]]; then
+  echo ""
+  echo "Running PCA clustering via PyTorch script..."
+  python3 scripts/r_candidate_cnn.py --session "${session_path}" --config "${CONFIG}" --output "${PCA_OUTPUT}"
+  echo "PCA output written to ${PCA_OUTPUT}"
+fi
