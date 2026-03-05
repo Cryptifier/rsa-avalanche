@@ -6,6 +6,26 @@
         "q" : "4262327550688715209573"
     },
     "padding" : "PKCS1v15",
+    "polynomial_fields" : {
+        "fields" : [
+            { "prime" : 251, "seed" : 1 },
+            { "prime" : 257, "seed" : 2 },
+            { "prime" : 263, "seed" : 3 },
+            { "prime" : 269, "seed" : 4 },
+            { "prime" : 271, "seed" : 5 },
+            { "prime" : 277, "seed" : 6 },
+            { "prime" : 281, "seed" : 7 },
+            { "prime" : 283, "seed" : 8 },
+            { "prime" : 293, "seed" : 9 },
+            { "prime" : 307, "seed" : 10 },
+            { "prime" : 311, "seed" : 11 },
+            { "prime" : 313, "seed" : 12 },
+            { "prime" : 317, "seed" : 13 },
+            { "prime" : 331, "seed" : 14 },
+            { "prime" : 337, "seed" : 15 },
+            { "prime" : 349, "seed" : 16 }
+        ]
+    },
     "engine" : {
         "r_stress_test_enable" : false,
         "r_use_list_enable" : false,
