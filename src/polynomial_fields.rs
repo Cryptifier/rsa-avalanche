@@ -26,6 +26,17 @@ pub struct PolynomialCoordinate {
     pub value: f64,
 }
 
+#[cfg(feature = "pca")]
+use linfa::DatasetBase;
+#[cfg(feature = "pca")]
+use linfa_reduction::Pca;
+#[cfg(feature = "pca")]
+use ndarray::Array2;
+#[cfg(feature = "pca")]
+use plotters::prelude::*;
+#[cfg(feature = "pca")]
+use std::{error::Error, path::Path};
+
 /// Builds polynomial fields from configuration.
 ///
 /// # Parameters
@@ -77,6 +88,91 @@ pub fn coordinates_for_ciphertext(
             value: field.score_normalized(ciphertext),
         })
         .collect()
+}
+
+/// Projects coordinate vectors into lower dimensions using PCA.
+///
+/// # Parameters
+/// - `coordinates`: Input coordinate vectors (each vector length must match field count).
+/// - `components`: Number of PCA components to compute.
+///
+/// # Returns
+/// - `Result<Array2<f64>, String>`: PCA-transformed coordinates or an error message.
+///
+/// # Expected Output
+/// - Returns projected coordinates; no stdout/stderr output.
+#[cfg(feature = "pca")]
+pub fn pca_project_coordinates(
+    coordinates: &[Vec<f64>],
+    components: usize,
+) -> Result<Array2<f64>, String> {
+    if coordinates.is_empty() {
+        return Err("no coordinate vectors provided".to_string());
+    }
+    if components == 0 {
+        return Err("components must be >= 1".to_string());
+    }
+
+    let rows = coordinates.len();
+    let cols = coordinates[0].len();
+    if cols == 0 {
+        return Err("coordinate vectors must not be empty".to_string());
+    }
+    if coordinates.iter().any(|row| row.len() != cols) {
+        return Err("coordinate vectors have inconsistent lengths".to_string());
+    }
+
+    let flat: Vec<f64> = coordinates.iter().flat_map(|row| row.iter().copied()).collect();
+    let matrix = Array2::from_shape_vec((rows, cols), flat)
+        .map_err(|err| format!("invalid coordinate matrix: {err}"))?;
+
+    let dataset = DatasetBase::from(matrix);
+    let model = Pca::params(components)
+        .fit(&dataset)
+        .map_err(|err| format!("pca fit failed: {err}"))?;
+    let projected = model.transform(dataset);
+    Ok(projected.records)
+}
+
+/// Writes a PNG scatter plot for PCA coordinates using the first two components.
+///
+/// # Parameters
+/// - `points`: PCA-projected coordinates with at least two columns.
+/// - `path`: Output PNG path.
+///
+/// # Returns
+/// - `Result<(), Box<dyn Error>>`: `Ok(())` on success or an error on failure.
+///
+/// # Expected Output
+/// - Writes a PNG to `path`; no stdout/stderr output.
+#[cfg(feature = "pca")]
+pub fn plot_pca_png(points: &Array2<f64>, path: &Path) -> Result<(), Box<dyn Error>> {
+    if points.ncols() < 2 || points.nrows() == 0 {
+        return Ok(());
+    }
+
+    let xs: Vec<f64> = points.column(0).iter().copied().collect();
+    let ys: Vec<f64> = points.column(1).iter().copied().collect();
+    let (min_x, max_x) = min_max_range(&xs);
+    let (min_y, max_y) = min_max_range(&ys);
+
+    let root = BitMapBackend::new(path, (1000, 800)).into_drawing_area();
+    root.fill(&WHITE)?;
+    let mut chart = ChartBuilder::on(&root)
+        .caption("PCA Projection", ("sans-serif", 30).into_font())
+        .margin(20)
+        .x_label_area_size(40)
+        .y_label_area_size(40)
+        .build_cartesian_2d(min_x..max_x, min_y..max_y)?;
+
+    chart.configure_mesh().x_desc("PC1").y_desc("PC2").draw()?;
+
+    chart.draw_series(xs.iter().zip(ys.iter()).map(|(x, y)| {
+        Circle::new((*x, *y), 3, BLUE.mix(0.7).filled())
+    }))?;
+
+    root.present()?;
+    Ok(())
 }
 
 impl PolynomialField {
@@ -223,6 +319,39 @@ fn coordinate_label(index: usize) -> String {
     }
 }
 
+#[cfg(feature = "pca")]
+/// Computes an inclusive min/max range for plotting.
+///
+/// # Parameters
+/// - `values`: Input slice of values.
+///
+/// # Returns
+/// - `(f64, f64)`: Min and max values (with padding if constant).
+///
+/// # Expected Output
+/// - Returns a range tuple; no stdout/stderr output.
+#[cfg(feature = "pca")]
+fn min_max_range(values: &[f64]) -> (f64, f64) {
+    if values.is_empty() {
+        return (0.0, 1.0);
+    }
+    let mut min = values[0];
+    let mut max = values[0];
+    for val in values.iter().copied() {
+        if val < min {
+            min = val;
+        }
+        if val > max {
+            max = val;
+        }
+    }
+    if (max - min).abs() < f64::EPSILON {
+        (min - 1.0, max + 1.0)
+    } else {
+        (min, max)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -328,5 +457,37 @@ mod tests {
             &[1, 2, 3, 4, 5, 6, 7, 8, 9, 10],
         );
         assert_yaml_snapshot!(out);
+    }
+
+    #[cfg(feature = "pca")]
+    #[test]
+    fn test_pca_projection_with_large_vectors() {
+        let primes: Vec<u64> = vec![
+            251, 257, 263, 269, 271, 277, 281, 283, 293, 307, 311, 313, 317, 331, 337, 349,
+        ];
+        let seeds: Vec<u64> = (1..=16).collect();
+        let config = make_config(&primes, &seeds);
+        let fields = build_polynomial_fields(&config).expect("fields");
+
+        let base = BigUint::one() << 120;
+        let step = BigUint::from(1_234_567u64);
+        let mut vectors = Vec::with_capacity(100);
+        for idx in 0..100u64 {
+            let ciphertext = &base + &step * BigUint::from(idx);
+            let coords = coordinates_for_ciphertext(&ciphertext, &fields);
+            vectors.push(coords.into_iter().map(|c| c.value).collect::<Vec<_>>());
+        }
+
+        let projected = pca_project_coordinates(&vectors, 2).expect("pca");
+        assert_eq!(projected.nrows(), 100);
+        assert_eq!(projected.ncols(), 2);
+        assert!(projected.iter().all(|v| v.is_finite()));
+
+        let mut path = std::env::temp_dir();
+        path.push("rsademo_pca_projection.png");
+        plot_pca_png(&projected, &path).expect("plot");
+        let meta = std::fs::metadata(&path).expect("metadata");
+        assert!(meta.len() > 0);
+        let _ = std::fs::remove_file(&path);
     }
 }

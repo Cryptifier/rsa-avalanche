@@ -18,6 +18,9 @@ serde_json = "1.0"
 json5 = "0.4"
 rayon = "1.10"
 plotters = { version = "0.3.6", optional = true }
+linfa = { version = "0.7.0", optional = true }
+linfa-reduction = { version = "0.7.0", optional = true }
+ndarray = { version = "0.15.6", optional = true }
 ctrlc = "3.4.5"
 
 [dev-dependencies]
@@ -26,3 +29,4 @@ insta = { version = "1.38.0", features = ["yaml"] }
 [features]
 default = []
 plots = ["plotters"]
+pca = ["plots", "linfa", "linfa-reduction", "ndarray"]
