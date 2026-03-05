@@ -20,6 +20,9 @@ rayon = "1.10"
 plotters = { version = "0.3.6", optional = true }
 ctrlc = "3.4.5"
 
+[dev-dependencies]
+insta = "1.38.0"
+
 [features]
 default = []
 plots = ["plotters"]

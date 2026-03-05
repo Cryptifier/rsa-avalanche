@@ -16,6 +16,9 @@ pub struct Config {
     /// Engine configuration for r candidate and analysis behavior.
     #[serde(default)]
     pub engine: EngineConfig,
+    /// Polynomial field configuration for coordinate generation.
+    #[serde(default)]
+    pub polynomial_fields: PolynomialFieldsConfig,
     /// Verification configuration for demo inputs.
     #[serde(default)]
     pub verify: VerifyConfig,
@@ -157,6 +160,25 @@ pub struct EngineConfig {
     pub enciphered_export_ramp_csv: String,
 }
 
+/// Polynomial field configuration for coordinate generation.
+#[derive(Debug, Deserialize, Clone, Default)]
+pub struct PolynomialFieldsConfig {
+    /// List of polynomial field definitions.
+    #[serde(default)]
+    pub fields: Vec<PolynomialFieldConfig>,
+}
+
+/// Single polynomial field definition.
+#[derive(Debug, Deserialize, Clone)]
+pub struct PolynomialFieldConfig {
+    /// Prime modulus defining the field (8..=64 bits).
+    #[serde(deserialize_with = "deserialize_biguint")]
+    pub prime: BigUint,
+    /// Seed used to derive polynomial coefficients.
+    #[serde(default)]
+    pub seed: u64,
+}
+
 /// Verification inputs for demo workflows.
 #[derive(Debug, Deserialize, Clone, Default)]
 pub struct VerifyConfig {
@@ -173,6 +195,7 @@ impl Default for Config {
         Self {
             rsa_keypair: KeyConfig::default(),
             engine: EngineConfig::default(),
+            polynomial_fields: PolynomialFieldsConfig::default(),
             verify: VerifyConfig::default(),
         }
     }
@@ -307,6 +330,35 @@ where
             "expected string or number for big integer, got {other}"
         ))),
         None => Ok(None),
+    }
+}
+
+/// Deserializes a `BigUint` from a string or number JSON value.
+///
+/// # Parameters
+/// - `deserializer`: Serde deserializer provided by the caller.
+///
+/// # Returns
+/// - `Result<BigUint, D::Error>`: Parsed value or an error when invalid.
+///
+/// # Expected Output
+/// - Returns a parse error if the value is not a string/number or is invalid.
+fn deserialize_biguint<'de, D>(deserializer: D) -> Result<BigUint, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::de::Error as DeError;
+
+    let value = serde_json::Value::deserialize(deserializer)?;
+    match value {
+        serde_json::Value::String(s) => s.parse::<BigUint>().map_err(DeError::custom),
+        serde_json::Value::Number(num) => num
+            .to_string()
+            .parse::<BigUint>()
+            .map_err(DeError::custom),
+        other => Err(DeError::custom(format!(
+            "expected string or number for big integer, got {other}"
+        ))),
     }
 }
 
