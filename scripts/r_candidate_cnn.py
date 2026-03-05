@@ -2,7 +2,7 @@
 import argparse
 import json
 import random
-from typing import List, Tuple
+from typing import Dict, List, Tuple
 
 
 def parse_args() -> argparse.Namespace:
@@ -21,6 +21,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--no-magnitude", action="store_true", help="Disable magnitude feature.")
     parser.add_argument("--fc-layers", default="128,64", help="Comma-separated FC layer sizes.")
     parser.add_argument("--embedding-dim", type=int, default=16, help="Embedding size.")
+    parser.add_argument(
+        "--target-dim",
+        type=int,
+        default=0,
+        help="Target vector size (defaults to embedding-dim when 0).",
+    )
     parser.add_argument("--epochs", type=int, default=10, help="Training epochs.")
     parser.add_argument("--batch-size", type=int, default=256, help="Training batch size.")
     parser.add_argument("--lr", type=float, default=1e-3, help="Learning rate.")
@@ -57,7 +63,9 @@ def parse_primes(args: argparse.Namespace) -> List[int]:
     raise RuntimeError("No primes provided; use --primes or --config with polynomial_fields.")
 
 
-def collect_samples(session: dict, batch_index: int, all_batches: bool) -> Tuple[List[int], List[int], List[float]]:
+def collect_samples(
+    session: dict, batch_index: int, all_batches: bool
+) -> Tuple[List[int], List[int], List[float], List[int]]:
     batches = session.get("r_candidate_accuracy_batches", [])
     if not batches:
         raise RuntimeError("Session JSON missing r_candidate_accuracy_batches.")
@@ -72,6 +80,9 @@ def collect_samples(session: dict, batch_index: int, all_batches: bool) -> Tuple
     values: List[int] = []
     labels: List[int] = []
     accuracy: List[float] = []
+    message_ids: List[int] = []
+    candidate_offset = 0
+    message_offset = 0
 
     for batch in selected_batches:
         messages = batch.get("messages", [])
@@ -84,11 +95,15 @@ def collect_samples(session: dict, batch_index: int, all_batches: bool) -> Tuple
             if len(decryptions) != len(messages):
                 raise RuntimeError("candidate_decryptions length does not match messages.")
             accuracy.append(float(cand.get("accuracy_pct", 0.0)))
-            for dec in decryptions:
+            for msg_idx, dec in enumerate(decryptions):
                 values.append(int(dec))
-                labels.append(cand_idx)
+                labels.append(candidate_offset + cand_idx)
+                message_ids.append(message_offset + msg_idx)
 
-    return values, labels, accuracy
+        candidate_offset += len(candidates)
+        message_offset += len(messages)
+
+    return values, labels, accuracy, message_ids
 
 
 def build_features(values: List[int], primes: List[int], degree: int, include_magnitude: bool) -> List[List[float]]:
@@ -110,6 +125,56 @@ def build_features(values: List[int], primes: List[int], degree: int, include_ma
             row.append(x / float(max_val))
         features.append(row)
     return features
+
+
+def encode_targets(values: List[int], target_dim: int) -> List[List[float]]:
+    if target_dim <= 0:
+        raise RuntimeError("target_dim must be >= 1")
+
+    targets: List[List[float]] = []
+    for value in values:
+        if value == 0:
+            targets.append([0.0] * target_dim)
+            continue
+
+        byte_len = max(1, (value.bit_length() + 7) // 8)
+        data = value.to_bytes(byte_len, byteorder="big", signed=False)
+
+        if len(data) >= target_dim:
+            buckets = [[] for _ in range(target_dim)]
+            for idx, byte in enumerate(data):
+                buckets[idx % target_dim].append(byte)
+            row = [sum(bucket) / (len(bucket) * 255.0) for bucket in buckets]
+        else:
+            row = [0.0] * target_dim
+            for idx, byte in enumerate(data):
+                row[idx] = byte / 255.0
+
+        targets.append(row)
+    return targets
+
+
+def build_centroid_targets(
+    encoded: List[List[float]], message_ids: List[int], target_dim: int
+) -> List[List[float]]:
+    if len(encoded) != len(message_ids):
+        raise RuntimeError("encoded vectors do not match message ids length")
+
+    centers: Dict[int, List[float]] = {}
+    counts: Dict[int, int] = {}
+    for vec, msg_id in zip(encoded, message_ids):
+        if msg_id not in centers:
+            centers[msg_id] = [0.0] * target_dim
+            counts[msg_id] = 0
+        counts[msg_id] += 1
+        for idx in range(target_dim):
+            centers[msg_id][idx] += vec[idx]
+
+    for msg_id, total in centers.items():
+        count = max(1, counts.get(msg_id, 1))
+        centers[msg_id] = [value / count for value in total]
+
+    return [centers[msg_id] for msg_id in message_ids]
 
 
 def build_fc_layers(arg: str) -> List[int]:
@@ -142,21 +207,22 @@ def main() -> None:
 
     session = load_jsonish(args.session)
     primes = parse_primes(args)
-    values, labels, accuracy = collect_samples(session, args.batch_index, args.all_batches)
+    values, labels, accuracy, message_ids = collect_samples(
+        session, args.batch_index, args.all_batches
+    )
 
     features = build_features(values, primes, args.poly_degree, not args.no_magnitude)
     x = torch.tensor(features, dtype=torch.float32)
-    y = torch.tensor(labels, dtype=torch.long)
-
-    num_classes = int(max(labels) + 1) if labels else 0
-    if num_classes <= 1:
-        raise RuntimeError("Need at least two r candidates for classification.")
+    target_dim = args.target_dim if args.target_dim > 0 else args.embedding_dim
+    encoded_targets = encode_targets(values, target_dim)
+    targets = build_centroid_targets(encoded_targets, message_ids, target_dim)
+    y = torch.tensor(targets, dtype=torch.float32)
 
     dataset = TensorDataset(x, y)
     loader = DataLoader(dataset, batch_size=args.batch_size, shuffle=True)
 
     class ResidueCNN(nn.Module):
-        def __init__(self, input_len: int, classes: int, fc_layers: List[int], embedding_dim: int):
+        def __init__(self, input_len: int, fc_layers: List[int], embedding_dim: int, target_dim: int):
             super().__init__()
             self.conv1 = nn.Conv1d(1, 16, kernel_size=3, padding=1)
             self.conv2 = nn.Conv1d(16, 32, kernel_size=3, padding=1)
@@ -173,7 +239,7 @@ def main() -> None:
             self.fc = nn.Sequential(*fc_blocks)
             final_dim = fc_layers[-1] if fc_layers else conv_out
             self.embedding = nn.Linear(final_dim, embedding_dim)
-            self.classifier = nn.Linear(embedding_dim, classes)
+            self.head = nn.Linear(embedding_dim, target_dim)
 
         def forward(self, inputs):
             x_local = inputs.unsqueeze(1)
@@ -183,42 +249,43 @@ def main() -> None:
             x_local = x_local.view(x_local.size(0), -1)
             x_local = self.fc(x_local)
             emb = self.embedding(x_local)
-            logits = self.classifier(emb)
-            return logits, emb
+            outputs = self.head(emb)
+            return outputs, emb
 
     device = torch.device(args.device)
-    model = ResidueCNN(x.shape[1], num_classes, build_fc_layers(args.fc_layers), args.embedding_dim)
+    model = ResidueCNN(x.shape[1], build_fc_layers(args.fc_layers), args.embedding_dim, target_dim)
     model.to(device)
 
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
-    criterion = nn.CrossEntropyLoss()
+    criterion = nn.MSELoss()
 
     for epoch in range(args.epochs):
         model.train()
         total_loss = 0.0
-        correct = 0
+        mse_total = 0.0
         total = 0
         for batch_x, batch_y in loader:
             batch_x = batch_x.to(device)
             batch_y = batch_y.to(device)
             optimizer.zero_grad()
-            logits, _ = model(batch_x)
-            loss = criterion(logits, batch_y)
+            outputs, _ = model(batch_x)
+            loss = criterion(outputs, batch_y)
             loss.backward()
             optimizer.step()
 
             total_loss += loss.item() * batch_x.size(0)
-            preds = torch.argmax(logits, dim=1)
-            correct += (preds == batch_y).sum().item()
+            batch_mse = torch.mean((outputs - batch_y) ** 2).item()
+            mse_total += batch_mse * batch_x.size(0)
             total += batch_x.size(0)
 
         avg_loss = total_loss / max(total, 1)
-        acc = 100.0 * correct / max(total, 1)
+        avg_mse = mse_total / max(total, 1)
+        acc = max(0.0, 100.0 * (1.0 - avg_mse))
         print(f"Epoch {epoch+1}/{args.epochs} - loss {avg_loss:.4f} - acc {acc:.2f}%")
 
     model.eval()
     with torch.no_grad():
-        logits, embeddings = model(x.to(device))
+        outputs, embeddings = model(x.to(device))
         embeddings = embeddings.cpu().numpy()
 
     pca = PCA(n_components=2)
