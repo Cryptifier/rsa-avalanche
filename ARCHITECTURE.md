@@ -82,3 +82,6 @@ python3 scripts/enciphered_bins_video.py \
   --window 60 \
   --parallel
 ```
+
+**RSA Homomorphic Base Conversion Method**
+![RSA Homomorphic Base Conversion](./docs/diagrams/HBC-Methods.drawio.png)

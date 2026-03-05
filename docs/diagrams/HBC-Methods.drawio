@@ -1,0 +1,112 @@
+<mxfile host="Electron" agent="Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) draw.io/29.5.2 Chrome/142.0.7444.265 Electron/39.5.2 Safari/537.36" version="29.5.2">
+  <diagram name="Page-1" id="ggLrDlchEhElL8SYhcMk">
+    <mxGraphModel dx="1185" dy="719" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="850" pageHeight="1100" math="0" shadow="0">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+        <mxCell id="9AXvwbju8TrX0Z-SPXj9-1" parent="1" style="text;html=1;whiteSpace=wrap;overflow=hidden;rounded=0;" value="&lt;h1 style=&quot;margin-top: 0px;&quot;&gt;RSA Homomorphic Base Conversion&lt;/h1&gt;" vertex="1">
+          <mxGeometry height="50" width="440" x="180" y="50" as="geometry" />
+        </mxCell>
+        <mxCell id="9AXvwbju8TrX0Z-SPXj9-4" edge="1" parent="1" source="9AXvwbju8TrX0Z-SPXj9-2" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;" value="">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="400" y="220" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="9AXvwbju8TrX0Z-SPXj9-2" parent="1" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;" value="Ciphertext Mod N" vertex="1">
+          <mxGeometry height="40" width="120" x="340" y="120" as="geometry" />
+        </mxCell>
+        <mxCell id="9AXvwbju8TrX0Z-SPXj9-10" edge="1" parent="1" source="9AXvwbju8TrX0Z-SPXj9-3" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;" value="">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="400" y="320" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="9AXvwbju8TrX0Z-SPXj9-3" parent="1" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;" value="Ciphertext Mod N&lt;sup&gt;k&lt;/sup&gt;" vertex="1">
+          <mxGeometry height="40" width="120" x="340" y="220" as="geometry" />
+        </mxCell>
+        <mxCell id="9AXvwbju8TrX0Z-SPXj9-5" parent="1" style="text;html=1;whiteSpace=wrap;strokeColor=none;fillColor=none;align=left;verticalAlign=middle;rounded=0;" value="Raise Congruence by&amp;nbsp;&lt;div&gt;Rabin / Tonelli-Shanks&lt;/div&gt;" vertex="1">
+          <mxGeometry height="30" width="165" x="420" y="175" as="geometry" />
+        </mxCell>
+        <mxCell id="9AXvwbju8TrX0Z-SPXj9-8" edge="1" parent="1" source="9AXvwbju8TrX0Z-SPXj9-7" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;exitX=1;exitY=0.5;exitDx=0;exitDy=0;exitPerimeter=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="320" y="340" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="9AXvwbju8TrX0Z-SPXj9-7" parent="1" style="shape=cylinder3;whiteSpace=wrap;html=1;boundedLbl=1;backgroundOutline=1;size=15;" value="CSV Database" vertex="1">
+          <mxGeometry height="80" width="60" x="200" y="300" as="geometry" />
+        </mxCell>
+        <mxCell id="9AXvwbju8TrX0Z-SPXj9-9" edge="1" parent="1" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;entryX=0.5;entryY=0;entryDx=0;entryDy=0;" value="">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="400" y="260" as="sourcePoint" />
+            <mxPoint x="400" y="320" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="9AXvwbju8TrX0Z-SPXj9-14" edge="1" parent="1" source="9AXvwbju8TrX0Z-SPXj9-11" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;" target="9AXvwbju8TrX0Z-SPXj9-13">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="9AXvwbju8TrX0Z-SPXj9-11" parent="1" style="shape=process;whiteSpace=wrap;html=1;backgroundOutline=1;fillColor=#fff2cc;strokeColor=#d6b656;" value="Select R Candidates" vertex="1">
+          <mxGeometry height="40" width="160" x="320" y="320" as="geometry" />
+        </mxCell>
+        <mxCell id="9AXvwbju8TrX0Z-SPXj9-12" parent="1" style="text;html=1;whiteSpace=wrap;strokeColor=none;fillColor=none;align=left;verticalAlign=middle;rounded=0;" value="Use Homomorphic Rescaling to change modulus to smaller modulus R&lt;sub&gt;i&lt;/sub&gt;" vertex="1">
+          <mxGeometry height="30" width="165" x="420" y="374" as="geometry" />
+        </mxCell>
+        <mxCell id="9AXvwbju8TrX0Z-SPXj9-13" parent="1" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;" value="Ciphertext Mod R&lt;sub&gt;i&lt;/sub&gt;" vertex="1">
+          <mxGeometry height="40" width="120" x="340" y="420" as="geometry" />
+        </mxCell>
+        <mxCell id="9AXvwbju8TrX0Z-SPXj9-15" parent="1" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;" value="Ciphertext Mod R&lt;sub&gt;i&lt;/sub&gt;" vertex="1">
+          <mxGeometry height="40" width="120" x="350" y="430" as="geometry" />
+        </mxCell>
+        <mxCell id="9AXvwbju8TrX0Z-SPXj9-20" edge="1" parent="1" source="9AXvwbju8TrX0Z-SPXj9-16" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;" target="9AXvwbju8TrX0Z-SPXj9-19" value="">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="9AXvwbju8TrX0Z-SPXj9-16" parent="1" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;" value="Ciphertext Mod R&lt;sub&gt;i&lt;/sub&gt;" vertex="1">
+          <mxGeometry height="40" width="120" x="360" y="440" as="geometry" />
+        </mxCell>
+        <mxCell id="9AXvwbju8TrX0Z-SPXj9-18" edge="1" parent="1" source="9AXvwbju8TrX0Z-SPXj9-17" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;entryX=0.334;entryY=1.015;entryDx=0;entryDy=0;entryPerimeter=0;startArrow=classic;startFill=1;endArrow=none;endFill=0;" target="9AXvwbju8TrX0Z-SPXj9-16" value="">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="9AXvwbju8TrX0Z-SPXj9-23" edge="1" parent="1" source="9AXvwbju8TrX0Z-SPXj9-17" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;" target="9AXvwbju8TrX0Z-SPXj9-22">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="9AXvwbju8TrX0Z-SPXj9-17" parent="1" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;" value="Ciphertext&lt;sup&gt;d&amp;nbsp;&lt;/sup&gt;Mod R&lt;sub&gt;i&lt;/sub&gt;" vertex="1">
+          <mxGeometry height="40" width="120" x="340" y="520" as="geometry" />
+        </mxCell>
+        <mxCell id="9AXvwbju8TrX0Z-SPXj9-19" parent="1" style="shape=process;whiteSpace=wrap;html=1;backgroundOutline=1;fillColor=#fff2cc;strokeColor=#d6b656;" value="Calculate Decryption&lt;div&gt;Exponent d&lt;sub&gt;i&lt;/sub&gt;&lt;/div&gt;" vertex="1">
+          <mxGeometry height="40" width="160" x="520" y="440" as="geometry" />
+        </mxCell>
+        <mxCell id="9AXvwbju8TrX0Z-SPXj9-21" parent="1" style="text;html=1;whiteSpace=wrap;strokeColor=none;fillColor=none;align=left;verticalAlign=middle;rounded=0;" value="Raise Congruence by&amp;nbsp;&lt;div&gt;Rabin / Tonelli-Shanks&lt;/div&gt;" vertex="1">
+          <mxGeometry height="30" width="165" x="420" y="570" as="geometry" />
+        </mxCell>
+        <mxCell id="9AXvwbju8TrX0Z-SPXj9-25" edge="1" parent="1" source="9AXvwbju8TrX0Z-SPXj9-22" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;" target="9AXvwbju8TrX0Z-SPXj9-24" value="">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="9AXvwbju8TrX0Z-SPXj9-22" parent="1" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;" value="Ciphertext&lt;sup&gt;d&amp;nbsp;&lt;/sup&gt;Mod R&lt;sup&gt;k&lt;/sup&gt;" vertex="1">
+          <mxGeometry height="40" width="120" x="340" y="620" as="geometry" />
+        </mxCell>
+        <mxCell id="9AXvwbju8TrX0Z-SPXj9-28" edge="1" parent="1" source="9AXvwbju8TrX0Z-SPXj9-24" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;" target="9AXvwbju8TrX0Z-SPXj9-27" value="">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="9AXvwbju8TrX0Z-SPXj9-24" parent="1" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;" value="Ciphertext&lt;sup&gt;d&amp;nbsp;&lt;/sup&gt;Mod N" vertex="1">
+          <mxGeometry height="40" width="120" x="340" y="720" as="geometry" />
+        </mxCell>
+        <mxCell id="9AXvwbju8TrX0Z-SPXj9-26" parent="1" style="text;html=1;whiteSpace=wrap;strokeColor=none;fillColor=none;align=left;verticalAlign=middle;rounded=0;" value="Use Homomorphic Rescaling to change modulus to smaller modulus N &amp;lt; R&lt;sup&gt;k&lt;/sup&gt;" vertex="1">
+          <mxGeometry height="30" width="165" x="420" y="675" as="geometry" />
+        </mxCell>
+        <mxCell id="9AXvwbju8TrX0Z-SPXj9-32" edge="1" parent="1" source="9AXvwbju8TrX0Z-SPXj9-27" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;" target="9AXvwbju8TrX0Z-SPXj9-31" value="">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="9AXvwbju8TrX0Z-SPXj9-27" parent="1" style="shape=process;whiteSpace=wrap;html=1;backgroundOutline=1;fillColor=#fff2cc;strokeColor=#d6b656;" value="Calculate Matching&lt;div&gt;Bits&lt;/div&gt;" vertex="1">
+          <mxGeometry height="40" width="160" x="320" y="800" as="geometry" />
+        </mxCell>
+        <mxCell id="9AXvwbju8TrX0Z-SPXj9-33" edge="1" parent="1" source="9AXvwbju8TrX0Z-SPXj9-29" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;" target="9AXvwbju8TrX0Z-SPXj9-27" value="">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="9AXvwbju8TrX0Z-SPXj9-29" parent="1" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d79b00;" value="Oracle&lt;sub&gt;i&lt;/sub&gt; Message Bits" vertex="1">
+          <mxGeometry height="40" width="120" x="160" y="800" as="geometry" />
+        </mxCell>
+        <mxCell id="9AXvwbju8TrX0Z-SPXj9-31" parent="1" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#666666;fontColor=#333333;" value="Unknown True Message Bits" vertex="1">
+          <mxGeometry height="40" width="120" x="520" y="800" as="geometry" />
+        </mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>
