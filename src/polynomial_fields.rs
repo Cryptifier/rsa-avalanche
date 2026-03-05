@@ -27,7 +27,7 @@ pub struct PolynomialCoordinate {
 }
 
 #[cfg(feature = "pca")]
-use linfa::DatasetBase;
+use linfa::{DatasetBase, prelude::{Fit, Transformer}};
 #[cfg(feature = "pca")]
 use linfa_reduction::Pca;
 #[cfg(feature = "pca")]
@@ -469,11 +469,13 @@ mod tests {
         let config = make_config(&primes, &seeds);
         let fields = build_polynomial_fields(&config).expect("fields");
 
-        let base = BigUint::one() << 120;
-        let step = BigUint::from(1_234_567u64);
+        let base: BigUint = BigUint::one() << 120;
+        let step: BigUint = BigUint::from(1_234_567u64);
         let mut vectors = Vec::with_capacity(100);
         for idx in 0..100u64 {
-            let ciphertext = &base + &step * BigUint::from(idx);
+            let addend = &step * BigUint::from(idx);
+            let mut ciphertext = base.clone();
+            ciphertext += addend;
             let coords = coordinates_for_ciphertext(&ciphertext, &fields);
             vectors.push(coords.into_iter().map(|c| c.value).collect::<Vec<_>>());
         }
