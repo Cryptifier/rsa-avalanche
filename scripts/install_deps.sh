@@ -82,4 +82,9 @@ detect_os() {
 
 detect_os
 
-echo "Dependency installation complete."
+echo "Dependency installation complete. Running cargo build..."
+if command -v cargo >/dev/null 2>&1; then
+  cargo build
+else
+  echo "cargo not found after installation; skipping build." >&2
+fi
