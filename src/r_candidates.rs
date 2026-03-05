@@ -104,6 +104,56 @@ pub fn generate_r_candidates_batch(
     generate_r_candidates(n, &batch_settings, rng)
 }
 
+/// Generates `r` candidates from a ciphertext stream using `r = c^x mod n`.
+///
+/// # Parameters
+/// - `ciphertext`: Ciphertext value reduced modulo `n`.
+/// - `n`: RSA modulus used for modular exponentiation.
+/// - `count`: Number of `r` candidates to produce.
+/// - `start_exponent`: Initial exponent `x` (increments by one per candidate).
+///
+/// # Returns
+/// - `Vec<(BigUint, Vec<(BigUint, u64)>)>`: List of `(r, factors)` pairs with empty factor lists.
+///
+/// # Expected Output
+/// - Returns a deterministic sequence; no stdout/stderr output.
+pub fn generate_r_candidates_from_ciphertext_stream(
+    ciphertext: &BigUint,
+    n: &BigUint,
+    count: usize,
+    start_exponent: u64,
+) -> Vec<(BigUint, Vec<(BigUint, u64)>)> {
+    if count == 0 || n.is_zero() {
+        return Vec::new();
+    }
+
+    let mut exponent = start_exponent;
+    let mut results = Vec::with_capacity(count);
+    for _ in 0..count {
+        let r = ciphertext_stream_next(ciphertext, n, &mut exponent);
+        results.push((r, Vec::new()));
+    }
+    results
+}
+
+/// Computes the next ciphertext-derived `r` using `r = c^x mod n`.
+///
+/// # Parameters
+/// - `ciphertext`: Ciphertext value reduced modulo `n`.
+/// - `n`: RSA modulus for modular exponentiation.
+/// - `exponent`: Mutable exponent counter, incremented after each use.
+///
+/// # Returns
+/// - `BigUint`: Next `r` value in the sequence.
+///
+/// # Expected Output
+/// - Increments `exponent` by one; no stdout/stderr output.
+fn ciphertext_stream_next(ciphertext: &BigUint, n: &BigUint, exponent: &mut u64) -> BigUint {
+    let exp = BigUint::from(*exponent);
+    *exponent = exponent.saturating_add(1);
+    ciphertext.modpow(&exp, n)
+}
+
 /// Builds `r` candidates by combining small primes with generated larger primes.
 ///
 /// # Parameters
@@ -932,6 +982,38 @@ mod tests {
         };
         let mut rng = RngChoice::from_seed(RngMode::Standard, 47);
         let candidates = generate_r_candidates_via_factoring(&BigUint::from(100u8), &settings, &mut rng);
+        assert!(candidates.is_empty());
+    }
+
+    #[test]
+    fn test_ciphertext_stream_sequence() {
+        let n = BigUint::from(97u32);
+        let c = BigUint::from(5u32);
+        let candidates = generate_r_candidates_from_ciphertext_stream(&c, &n, 3, 1);
+        assert_eq!(candidates.len(), 3);
+        assert_eq!(candidates[0].0, BigUint::from(5u32));
+        assert_eq!(candidates[1].0, BigUint::from(25u32));
+        assert_eq!(candidates[2].0, BigUint::from(28u32));
+        assert!(candidates.iter().all(|(_, factors)| factors.is_empty()));
+    }
+
+    #[test]
+    fn test_ciphertext_stream_exponent_increments() {
+        let n = BigUint::from(101u32);
+        let c = BigUint::from(3u32);
+        let mut exponent = 0u64;
+        let first = ciphertext_stream_next(&c, &n, &mut exponent);
+        let second = ciphertext_stream_next(&c, &n, &mut exponent);
+        assert_eq!(exponent, 2);
+        assert_eq!(first, BigUint::one());
+        assert_eq!(second, BigUint::from(3u32));
+    }
+
+    #[test]
+    fn test_ciphertext_stream_empty_on_zero_modulus() {
+        let n = BigUint::zero();
+        let c = BigUint::from(7u32);
+        let candidates = generate_r_candidates_from_ciphertext_stream(&c, &n, 2, 0);
         assert!(candidates.is_empty());
     }
 }
