@@ -12,3 +12,4 @@ enciphered_bins2_frames/
 *frames/
 *.json
 *.zip
+snapshots/*
