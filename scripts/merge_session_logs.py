@@ -108,7 +108,8 @@ def main() -> None:
     input_dir = args.input
     output_path = args.output
     if not output_path:
-        output_path = os.path.join(input_dir, "combined_session.json")
+        stamp = time.strftime("%Y%m%d_%H%M%S")
+        output_path = os.path.join(input_dir, f"combined_session_{stamp}.json")
 
     paths = list_session_paths(input_dir, args.glob)
     sessions = load_sessions(paths)
