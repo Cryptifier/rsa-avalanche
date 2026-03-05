@@ -13,7 +13,7 @@ const MAX_FIELDS: usize = 16;
 #[derive(Debug, Clone)]
 pub struct PolynomialField {
     prime: BigUint,
-    seed: u64,
+    _seed: u64,
     coefficients: Vec<BigUint>,
 }
 
@@ -108,14 +108,18 @@ impl PolynomialField {
         let coefficients = generate_coefficients(config.seed, &config.prime, POLY_DEGREE);
         Ok(Self {
             prime: config.prime.clone(),
-            seed: config.seed,
+            _seed: config.seed,
             coefficients,
         })
     }
 
     fn score_normalized(&self, ciphertext: &BigUint) -> f64 {
         let value = self.score(ciphertext);
-        let max_value = self.prime.clone().saturating_sub(BigUint::one());
+        let max_value = if self.prime > BigUint::one() {
+            &self.prime - BigUint::one()
+        } else {
+            BigUint::zero()
+        };
         if max_value.is_zero() {
             return 0.0;
         }

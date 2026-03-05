@@ -1,5 +1,6 @@
 ---
 source: src/polynomial_fields.rs
+assertion_line: 310
 expression: out
 ---
 - "X:0.10000000"
