@@ -197,7 +197,7 @@ def main() -> None:
         import numpy as np
         import torch
         from torch import nn
-        from torch.utils.data import DataLoader, TensorDataset
+        from torch.utils.data import DataLoader, Dataset, TensorDataset
         from sklearn.decomposition import PCA
         import matplotlib.pyplot as plt
     except ImportError as exc:
@@ -218,8 +218,24 @@ def main() -> None:
     targets = build_centroid_targets(encoded_targets, message_ids, target_dim)
     y = torch.tensor(targets, dtype=torch.float32)
 
-    dataset = TensorDataset(x, y)
-    loader = DataLoader(dataset, batch_size=args.batch_size, shuffle=True)
+    class MessageGroupDataset(Dataset):
+        def __init__(self, features: torch.Tensor, targets: torch.Tensor, msg_ids: List[int]):
+            self.features = features
+            self.targets = targets
+            groups: Dict[int, List[int]] = {}
+            for idx, msg_id in enumerate(msg_ids):
+                groups.setdefault(msg_id, []).append(idx)
+            self.groups = list(groups.values())
+
+        def __len__(self) -> int:
+            return len(self.groups)
+
+        def __getitem__(self, idx: int):
+            indices = self.groups[idx]
+            return self.features[indices], self.targets[indices]
+
+    dataset = MessageGroupDataset(x, y, message_ids)
+    loader = DataLoader(dataset, batch_size=1, shuffle=True)
 
     class ResidueCNN(nn.Module):
         def __init__(self, input_len: int, fc_layers: List[int], embedding_dim: int, target_dim: int):
@@ -265,8 +281,8 @@ def main() -> None:
         mse_total = 0.0
         total = 0
         for batch_x, batch_y in loader:
-            batch_x = batch_x.to(device)
-            batch_y = batch_y.to(device)
+            batch_x = batch_x.squeeze(0).to(device)
+            batch_y = batch_y.squeeze(0).to(device)
             optimizer.zero_grad()
             outputs, _ = model(batch_x)
             loss = criterion(outputs, batch_y)
