@@ -37,6 +37,7 @@ if [[ -z "${OUT_ZIP}" ]]; then
   timestamp=$(date +"%Y%m%d_%H%M%S")
   OUT_ZIP="${ROOT_DIR}/rsa-poc-${timestamp}.zip"
 fi
+bundle_name="rsa-poc-$(date +"%Y%m%d_%H%M%S")"
 
 TMP_DIR=$(mktemp -d)
 cleanup() {
@@ -60,7 +61,7 @@ rsync -a --prune-empty-dirs \
   --exclude '/target/***' \
   --exclude '/*.json' \
   --exclude '*' \
-  "${ROOT_DIR}/" "${TMP_DIR}/"
+  "${ROOT_DIR}/" "${TMP_DIR}/${bundle_name}/"
 
 (
   cd "${TMP_DIR}"
