@@ -210,7 +210,7 @@ where
         let frames = socket
             .recv_multipart(0)
             .map_err(|err| format!("router recv error: {err}"))?;
-        if frames.len() < 3 {
+        if frames.len() < 2 {
             continue;
         }
         let body = frames.last().unwrap();
