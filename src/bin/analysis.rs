@@ -6,7 +6,6 @@ use std::{
     error::Error,
     fs::{self, OpenOptions},
     io::Write,
-    path::Path,
     sync::{
         atomic::{AtomicU64, Ordering},
         Arc, Mutex,
@@ -19,19 +18,20 @@ use rayon::prelude::*;
 use plotters::prelude::*;
 #[cfg(feature = "plots")]
 use std::sync::atomic::AtomicUsize;
+#[cfg(feature = "plots")]
+use std::path::Path;
 
 #[cfg(not(feature = "plots"))]
-#[derive(Clone, Copy, Debug)]
-struct RGBColor(u8, u8, u8);
+type RGBColor = (u8, u8, u8);
 
 #[cfg(not(feature = "plots"))]
-const RED: RGBColor = RGBColor(220, 20, 60);
+const RED: RGBColor = (220, 20, 60);
 #[cfg(not(feature = "plots"))]
-const GREEN: RGBColor = RGBColor(46, 139, 87);
+const GREEN: RGBColor = (46, 139, 87);
 #[cfg(not(feature = "plots"))]
-const BLUE: RGBColor = RGBColor(30, 144, 255);
+const BLUE: RGBColor = (30, 144, 255);
 #[cfg(not(feature = "plots"))]
-const BLACK: RGBColor = RGBColor(0, 0, 0);
+const BLACK: RGBColor = (0, 0, 0);
 
 use clap::Parser;
 use num_bigint::BigUint;
@@ -2063,6 +2063,7 @@ fn colorize_hex_matches(value: &str, reference: &str) -> String {
 ///
 /// # Expected Output
 /// - Returns a sanitized string; no side effects.
+#[cfg(feature = "plots")]
 fn sanitize_label(label: &str) -> String {
     label
         .chars()
