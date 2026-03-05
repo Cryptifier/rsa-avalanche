@@ -9,7 +9,9 @@ enciphered_*.csv
 enciphered_bins2_frames/
 *.pyc
 *.pyo
+*.png
 *frames/
 *.json
 *.zip
 snapshots/*
+old-logs/
