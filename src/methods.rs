@@ -928,6 +928,7 @@ fn mean_f64(values: &[f64]) -> f64 {
 struct OracleCandidate {
     r: BigUint,
     d_new: BigUint,
+    phi_new: BigUint,
     r_pow_y: BigUint,
 }
 
@@ -1280,7 +1281,12 @@ fn build_oracle_candidates(
         let phi_new = compute_totient(&factors);
         if let Some(d_new) = mod_inverse(&ctx.e, &phi_new) {
             let r_pow_y = r.pow(y);
-            prepared.push(OracleCandidate { r, d_new, r_pow_y });
+            prepared.push(OracleCandidate {
+                r,
+                d_new,
+                phi_new,
+                r_pow_y,
+            });
         }
     }
 
@@ -1754,6 +1760,7 @@ fn screen_oracles_per_bit(
 /// - `candidates`: Prepared r candidates to use as oracles.
 /// - `per_bit_oracles`: Per-bit oracle selection ranked by screening.
 /// - `message`: Reference message to compare against.
+/// - `batch_size`: Number of ciphertext exponent variants in the batch.
 /// - `shift`: Whether to shift ciphertext by encrypted 2 before conversion.
 ///
 /// # Returns
@@ -1767,19 +1774,22 @@ fn run_bitwise_speculative_oracle_attempt(
     candidates: &[OracleCandidate],
     per_bit_oracles: &[Vec<OracleBitSelection>],
     message: &BigUint,
+    batch_size: usize,
     shift: bool,
 ) -> Result<SpeculativeOracleReport, Box<dyn Error>> {
     if per_bit_oracles.is_empty() {
         return Err("per-bit oracle selection is empty".into());
+    }
+    if batch_size == 0 {
+        return Err("analysis batch size must be >= 1".into());
     }
     let bit_width = message.bits().max(1) as usize;
     let oracles_per_bit = per_bit_oracles[0].len().max(1);
 
     let y = engine.rabin_exponent as u32;
     let n_pow_y = ctx.n.pow(y);
-    let ciphertext = message.modpow(&ctx.e, &ctx.n);
-    let shifted = maybe_shift_ciphertext(ctx, &ciphertext, shift);
-    let result_default = get_larger_number(&shifted, &ctx.n, y, true, false);
+    let e_big = ctx.e.clone();
+    let base_ciphertext = message.modpow(&ctx.e, &ctx.n);
 
     let mut unique_oracle_indices = std::collections::HashSet::new();
     for selections in per_bit_oracles {
@@ -1788,21 +1798,36 @@ fn run_bitwise_speculative_oracle_attempt(
         }
     }
 
-    let mut oracle_bits: Vec<Option<Vec<bool>>> = vec![None; candidates.len()];
-    for oracle_idx in unique_oracle_indices.iter().copied() {
-        let candidate = &candidates[oracle_idx];
-        let dm = derive_candidate_message_from_result(
-            ctx,
-            engine,
-            &result_default,
-            &candidate.r,
-            &candidate.d_new,
-            &n_pow_y,
-            &candidate.r_pow_y,
-            y,
-            false,
-        );
-        oracle_bits[oracle_idx] = Some(biguint_to_bits_le(&dm, bit_width));
+    let mut oracle_bits_by_instance = Vec::with_capacity(batch_size);
+    for instance_idx in 0..batch_size {
+        let x_value = u64::try_from(instance_idx + 1)
+            .map_err(|_| "analysis batch message index exceeds u64 range")?;
+        let x_big = BigUint::from(x_value);
+        let ciphertext = base_ciphertext.modpow(&x_big, &ctx.n);
+        let shifted = maybe_shift_ciphertext(ctx, &ciphertext, shift);
+        let result_default = get_larger_number(&shifted, &ctx.n, y, true, false);
+
+        let mut oracle_bits: Vec<Option<Vec<bool>>> = vec![None; candidates.len()];
+        for oracle_idx in unique_oracle_indices.iter().copied() {
+            let candidate = &candidates[oracle_idx];
+            let e_x = &e_big * &x_big;
+            let Some(d_new) = mod_inverse(&e_x, &candidate.phi_new) else {
+                continue;
+            };
+            let dm = derive_candidate_message_from_result(
+                ctx,
+                engine,
+                &result_default,
+                &candidate.r,
+                &d_new,
+                &n_pow_y,
+                &candidate.r_pow_y,
+                y,
+                false,
+            );
+            oracle_bits[oracle_idx] = Some(biguint_to_bits_le(&dm, bit_width));
+        }
+        oracle_bits_by_instance.push(oracle_bits);
     }
 
     let mut recovered_bits = vec![false; bit_width];
@@ -1810,15 +1835,17 @@ fn run_bitwise_speculative_oracle_attempt(
         let mut ones = 0usize;
         let mut zeros = 0usize;
         for selection in selections {
-            if let Some(bits) = oracle_bits
-                .get(selection.oracle_idx)
-                .and_then(|entry| entry.as_ref())
-            {
-                let bit = if selection.invert { !bits[bit_idx] } else { bits[bit_idx] };
-                if bit {
-                    ones += 1;
-                } else {
-                    zeros += 1;
+            for oracle_bits in &oracle_bits_by_instance {
+                if let Some(bits) = oracle_bits
+                    .get(selection.oracle_idx)
+                    .and_then(|entry| entry.as_ref())
+                {
+                    let bit = if selection.invert { !bits[bit_idx] } else { bits[bit_idx] };
+                    if bit {
+                        ones += 1;
+                    } else {
+                        zeros += 1;
+                    }
                 }
             }
         }
@@ -2439,12 +2466,17 @@ fn run_information_sufficiency_tests(
         );
     });
 
+    let batch_size = engine.analysis_batch_messages as usize;
+    if batch_size == 0 {
+        return Err("analysis_batch_messages must be >= 1 for speculative batch".into());
+    }
     let speculative_report = run_bitwise_speculative_oracle_attempt(
         ctx,
         engine,
         &candidates,
         &per_bit_oracles,
         message,
+        batch_size,
         shift,
     )?;
     
