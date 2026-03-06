@@ -2146,6 +2146,18 @@ fn build_avalanche_nodes_unique_d(
             .collect();
     }
 
+    if !nodes.is_empty() {
+        let mut sorted_with_value: Vec<(BigUint, AvalancheNode)> = nodes
+            .into_iter()
+            .map(|node| (bits_le_to_biguint(&node.message_bits), node))
+            .collect();
+        sorted_with_value.sort_by(|a, b| a.0.cmp(&b.0));
+        return Ok(sorted_with_value
+            .into_iter()
+            .map(|(_, node)| node)
+            .collect());
+    }
+
     Ok(nodes)
 }
 
@@ -2170,6 +2182,24 @@ fn normalize_avalanche_biases(biases: &[f64]) -> Vec<f64> {
         .iter()
         .map(|bias| (bias.abs() / max_abs).clamp(0.0, 1.0))
         .collect()
+}
+
+const BEAM_SCORE_DECIMALS: usize = 8;
+const BEAM_PCT_DECIMALS: usize = 8;
+
+/// Formats a floating-point value for beam search output.
+///
+/// # Parameters
+/// - `value`: Value to format.
+/// - `precision`: Number of decimal places to include.
+///
+/// # Returns
+/// - `String`: Formatted string with the requested precision.
+///
+/// # Expected Output
+/// - Returns a formatted string; no stdout/stderr output.
+fn format_beam_float(value: f64, precision: usize) -> String {
+    format!("{:.precision$}", value, precision = precision)
 }
 
 /// Runs the avalanche tree search for unique `(e*x)^{-1} mod phi(r)` decryptions.
@@ -2209,6 +2239,10 @@ fn run_avalanche_search(
         return Ok(());
     }
 
+    println!(
+        "Avalanche tree instances: {}",
+        avalanche_nodes.len()
+    );
     let avalanche_count = avalanche_nodes.len();
     let avalanche_result = search_avalanche_tree(avalanche_nodes)?;
     // dbg!(&avalanche_result);
@@ -2285,13 +2319,18 @@ fn run_avalanche_search(
             candidate_hex = format!("{}{}", padding, candidate_hex);
         }
         println!(
-            "Beam {} score {:.4} match {:.2}% ones-match {:.2}% hex {}",
+            "Beam {} score {} match {}% ones-match {}% hex {}",
             idx + 1,
-            candidate.score,
-            match_pct,
-            ones_match_pct,
+            format_beam_float(candidate.score, BEAM_SCORE_DECIMALS),
+            format_beam_float(match_pct, BEAM_PCT_DECIMALS),
+            format_beam_float(ones_match_pct, BEAM_PCT_DECIMALS),
             candidate_hex
         );
+    }
+    if let Some(top) = beam_result.beam.first() {
+        let top_bits: Vec<bool> = top.vector.iter().map(|value| *value >= 0.5).collect();
+        let msb = top_bits.last().copied().unwrap_or(false);
+        println!("Avalanche beam top MSB: {}", if msb { 1 } else { 0 });
     }
 
     Ok(())
@@ -4475,6 +4514,10 @@ fn beam_max_candidate_from_avalanche(
     if avalanche_nodes.is_empty() {
         return Ok(None);
     }
+    println!(
+        "Avalanche tree instances: {}",
+        avalanche_nodes.len()
+    );
     let avalanche_result = search_avalanche_tree(avalanche_nodes)?;
     let bit_width = avalanche_result.message_bits.len().max(1);
     let normalized_biases = normalize_avalanche_biases(&avalanche_result.biases);
@@ -4768,13 +4811,18 @@ fn run_r_candidate_accuracy_batches(
                     matched_ones as f64 / candidate_ones as f64 * 100.0
                 };
                 println!(
-                    "Avalanche beam max after {} batches: score {:.4} batch {} match {:.2}% ones-match {:.2}% hex {}",
+                    "Avalanche beam max after {} batches: score {} batch {} match {}% ones-match {}% hex {}",
                     batch_count,
-                    max.score,
+                    format_beam_float(max.score, BEAM_SCORE_DECIMALS),
                     max.batch_number,
-                    match_pct,
-                    ones_match_pct,
+                    format_beam_float(match_pct, BEAM_PCT_DECIMALS),
+                    format_beam_float(ones_match_pct, BEAM_PCT_DECIMALS),
                     hex
+                );
+                let msb = max.bits.last().copied().unwrap_or(false);
+                println!(
+                    "Avalanche beam max MSB: {}",
+                    if msb { 1 } else { 0 }
                 );
             } else {
                 println!(

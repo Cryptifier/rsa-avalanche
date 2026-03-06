@@ -123,19 +123,71 @@ fn main() -> Result<(), Box<dyn Error>> {
     let ciphertext = resolve_ciphertext(&args, &config)?;
     let batch_size = resolve_demo_batch_size(&config.engine, &args)?;
     let batch_runs = args.batches.unwrap_or(1) as usize;
+    let mut aggregate_max: Option<(BeamCandidateBits, usize)> = None;
     for batch_idx in 0..batch_runs {
         if batch_runs > 1 {
             println!("\n===== DEMO BATCH {} / {} =====", batch_idx + 1, batch_runs);
         }
-        let recovered = run_speculative_decrypt(
+        let start = std::time::Instant::now();
+        let recovered = match run_speculative_decrypt(
             &ctx,
             &config,
             &ciphertext,
             args.shift,
             batch_size,
-        )?;
+        ) {
+            Ok(result) => result,
+            Err(err) => {
+                eprintln!(
+                    "Demo batch {} failed: {}",
+                    batch_idx + 1,
+                    err
+                );
+                continue;
+            }
+        };
         println!("Recovered (best-case) hex: {}", to_hex(&recovered.best_case));
         println!("Recovered (majority) hex: {}", to_hex(&recovered.majority));
+        if let Some(candidate) = recovered.beam_top.clone() {
+            let replace = match aggregate_max {
+                Some((ref current, _)) => candidate.score > current.score,
+                None => true,
+            };
+            if replace {
+                aggregate_max = Some((candidate, batch_idx + 1));
+            }
+        }
+        let duration_s = start.elapsed().as_secs_f64();
+        println!(
+            "Demo batch {} completed in {:.3}s",
+            batch_idx + 1,
+            duration_s
+        );
+    }
+    if let Some((candidate, batch_number)) = aggregate_max {
+        let mut hex = to_hex(&bits_le_to_biguint(&candidate.bits));
+        let hex_len = (candidate.bits.len() + 3) / 4;
+        if hex.len() < hex_len {
+            let padding = "0".repeat(hex_len - hex.len());
+            hex = format!("{}{}", padding, hex);
+        }
+        println!(
+            "Avalanche beam aggregate max after {} batches: score {} batch {} hex {}",
+            batch_runs,
+            format_beam_float(candidate.score, BEAM_SCORE_DECIMALS),
+            batch_number,
+            hex
+        );
+        let msb = candidate.bits.last().copied().unwrap_or(false);
+        println!(
+            "Avalanche beam aggregate max MSB: {}",
+            if msb { 1 } else { 0 }
+        );
+    } else if batch_runs > 1 {
+        println!(
+            "Avalanche beam aggregate max after {} batches: N/A",
+            batch_runs
+        );
     }
 
     Ok(())
@@ -145,6 +197,13 @@ fn main() -> Result<(), Box<dyn Error>> {
 struct RecoveryResult {
     best_case: BigUint,
     majority: BigUint,
+    beam_top: Option<BeamCandidateBits>,
+}
+
+#[derive(Debug, Clone)]
+struct BeamCandidateBits {
+    score: f64,
+    bits: Vec<bool>,
 }
 
 /// Builds the demo RSA context from configuration.
@@ -373,7 +432,7 @@ fn run_speculative_decrypt(
         bit_width,
         batch_size,
     )?;
-    run_avalanche_beam_search(
+    let beam_top = run_avalanche_beam_search(
         ctx,
         engine,
         &prepared,
@@ -387,6 +446,7 @@ fn run_speculative_decrypt(
     Ok(RecoveryResult {
         best_case: bits_le_to_biguint(&best_case_bits),
         majority: bits_le_to_biguint(&majority_bits),
+        beam_top,
     })
 }
 
@@ -429,6 +489,23 @@ fn normalize_avalanche_biases(biases: &[f64]) -> Vec<f64> {
         .iter()
         .map(|bias| (bias.abs() / max_abs).clamp(0.0, 1.0))
         .collect()
+}
+
+const BEAM_SCORE_DECIMALS: usize = 8;
+
+/// Formats a floating-point value for beam search output.
+///
+/// # Parameters
+/// - `value`: Value to format.
+/// - `precision`: Number of decimal places to include.
+///
+/// # Returns
+/// - `String`: Formatted string with the requested precision.
+///
+/// # Expected Output
+/// - Returns a formatted string; no stdout/stderr output.
+fn format_beam_float(value: f64, precision: usize) -> String {
+    format!("{:.precision$}", value, precision = precision)
 }
 
 /// Builds avalanche candidates from unique `(e * x)^{-1} mod phi(r)` decryptions.
@@ -504,39 +581,55 @@ fn build_avalanche_nodes_unique_d_demo(
                 message_bits,
             };
             let message_value = bits_le_to_biguint(&node.message_bits);
-            if engine.use_hamming_distance {
-                if let Some(reference) = reference_bits {
-                    let distance = hamming_distance_bits(&node.message_bits, reference);
-                    nodes_with_distance.push((distance, message_value, node));
-                } else {
-                    nodes_with_value.push((message_value, node));
-                }
-            } else {
-                nodes_with_value.push((message_value, node));
-            }
+    if engine.use_hamming_distance {
+        if let Some(reference) = reference_bits {
+            let distance = hamming_distance_bits(&node.message_bits, reference);
+            nodes_with_distance.push((distance, message_value, node));
+        } else {
+            nodes_with_value.push((message_value, node));
+        }
+    } else {
+        nodes_with_value.push((message_value, node));
+    }
         }
     }
 
-    if engine.use_hamming_distance {
+    let mut nodes: Vec<AvalancheNode> = if engine.use_hamming_distance {
         if !nodes_with_distance.is_empty() {
             nodes_with_distance.sort_by(|a, b| {
                 a.0.cmp(&b.0)
                     .then_with(|| a.1.cmp(&b.1))
             });
-            return Ok(nodes_with_distance
+            nodes_with_distance
                 .into_iter()
                 .map(|(_, _, node)| node)
-                .collect());
+                .collect()
+        } else {
+            Vec::new()
         }
     } else if !nodes_with_value.is_empty() {
         nodes_with_value.sort_by(|a, b| a.0.cmp(&b.0));
-        return Ok(nodes_with_value
+        nodes_with_value
             .into_iter()
             .map(|(_, node)| node)
-            .collect());
+            .collect()
+    } else {
+        Vec::new()
+    };
+
+    if !nodes.is_empty() {
+        let mut sorted_with_value: Vec<(BigUint, AvalancheNode)> = nodes
+            .into_iter()
+            .map(|node| (bits_le_to_biguint(&node.message_bits), node))
+            .collect();
+        sorted_with_value.sort_by(|a, b| a.0.cmp(&b.0));
+        nodes = sorted_with_value
+            .into_iter()
+            .map(|(_, node)| node)
+            .collect();
     }
 
-    Ok(Vec::new())
+    Ok(nodes)
 }
 
 /// Runs avalanche tree and beam search for demo candidates.
@@ -552,7 +645,7 @@ fn build_avalanche_nodes_unique_d_demo(
 /// - `reference_bits`: Optional reference bits for Hamming-distance sorting.
 ///
 /// # Returns
-/// - `Result<(), Box<dyn Error>>`: `Ok(())` when search runs or is skipped.
+/// - `Result<Option<BeamCandidateBits>, Box<dyn Error>>`: Top candidate or `None` if unavailable.
 ///
 /// # Expected Output
 /// - Prints avalanche beam search results; no other side effects.
@@ -565,7 +658,7 @@ fn run_avalanche_beam_search(
     bit_width: usize,
     batch_size: usize,
     reference_bits: Option<&[bool]>,
-) -> Result<(), Box<dyn Error>> {
+) -> Result<Option<BeamCandidateBits>, Box<dyn Error>> {
     let avalanche_nodes = build_avalanche_nodes_unique_d_demo(
         ctx,
         engine,
@@ -578,9 +671,13 @@ fn run_avalanche_beam_search(
     )?;
     if avalanche_nodes.is_empty() {
         println!("Avalanche tree skipped: no unique decryptions");
-        return Ok(());
+        return Ok(None);
     }
 
+    println!(
+        "Avalanche tree instances: {}",
+        avalanche_nodes.len()
+    );
     let avalanche_result = search_avalanche_tree(avalanche_nodes)?;
     let normalized_biases = normalize_avalanche_biases(&avalanche_result.biases);
     let beam_result = beam_search_top_k(
@@ -626,14 +723,23 @@ fn run_avalanche_beam_search(
             candidate_hex = format!("{}{}", padding, candidate_hex);
         }
         println!(
-            "Beam {} score {:.4} hex {}",
+            "Beam {} score {} hex {}",
             idx + 1,
-            candidate.score,
+            format_beam_float(candidate.score, BEAM_SCORE_DECIMALS),
             candidate_hex
         );
     }
+    if let Some(top) = beam_result.beam.first() {
+        let top_bits: Vec<bool> = top.vector.iter().map(|value| *value >= 0.5).collect();
+        let msb = top_bits.last().copied().unwrap_or(false);
+        println!("Avalanche beam top MSB: {}", if msb { 1 } else { 0 });
+    }
 
-    Ok(())
+    let top = beam_result.beam.first().cloned().map(|candidate| BeamCandidateBits {
+        score: candidate.score,
+        bits: candidate.vector.iter().map(|value| *value >= 0.5).collect(),
+    });
+    Ok(top)
 }
 
 #[derive(Debug, Clone, Copy)]
