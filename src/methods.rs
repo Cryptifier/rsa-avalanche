@@ -2149,22 +2149,26 @@ fn build_avalanche_nodes_unique_d(
     Ok(nodes)
 }
 
-/// Normalizes avalanche biases into the [0.0, 1.0] range using a threshold.
+/// Normalizes avalanche biases into the [0.0, 1.0] range using max-abs scaling.
 ///
 /// # Parameters
 /// - `biases`: Raw avalanche bias values.
-/// - `threshold`: Normalization threshold (values >= threshold map to 1.0).
 ///
 /// # Returns
 /// - `Vec<f64>`: Normalized bias values.
 ///
 /// # Expected Output
 /// - Returns normalized biases; no stdout/stderr output.
-fn normalize_avalanche_biases(biases: &[f64], threshold: f64) -> Vec<f64> {
-    let denom = if threshold <= 0.0 { 1.0 } else { threshold };
+fn normalize_avalanche_biases(biases: &[f64]) -> Vec<f64> {
+    let max_abs = biases
+        .iter()
+        .fold(0.0_f64, |acc, value| acc.max(value.abs()));
+    if max_abs == 0.0 {
+        return vec![0.0; biases.len()];
+    }
     biases
         .iter()
-        .map(|bias| (bias / denom).clamp(0.0, 1.0))
+        .map(|bias| (bias.abs() / max_abs).clamp(0.0, 1.0))
         .collect()
 }
 
@@ -2223,8 +2227,7 @@ fn run_avalanche_search(
     });
 
     let bit_width = avalanche_result.message_bits.len().max(1);
-    let normalized_biases =
-        normalize_avalanche_biases(&avalanche_result.biases, engine.avalanche_bias_threshold);
+    let normalized_biases = normalize_avalanche_biases(&avalanche_result.biases);
     let beam_result = beam_search_top_k(
         vec![Vec::new()],
         5,
