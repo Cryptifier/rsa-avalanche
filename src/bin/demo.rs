@@ -71,7 +71,6 @@ struct DemoContext {
 #[derive(Clone, Debug)]
 struct OracleCandidate {
     r: BigUint,
-    d_new: BigUint,
     phi_new: BigUint,
     r_pow_y: BigUint,
 }
@@ -356,11 +355,10 @@ fn run_speculative_decrypt(
     let mut prepared = Vec::with_capacity(candidates.len());
     for (r, factors) in candidates {
         let phi_new = compute_totient(&factors);
-        if let Some(d_new) = mod_inverse(&ctx.e, &phi_new) {
+        if mod_inverse(&ctx.e, &phi_new).is_some() {
             let r_pow_y = r.pow(y);
             prepared.push(OracleCandidate {
                 r,
-                d_new,
                 phi_new,
                 r_pow_y,
             });
@@ -387,6 +385,7 @@ fn run_speculative_decrypt(
         top_k,
         &mut rng,
         shift,
+        batch_size,
     )?;
 
     if let Some(stats) = compute_stats(&top_match_pct) {
@@ -1100,6 +1099,7 @@ fn maybe_shift_ciphertext(ctx: &DemoContext, ciphertext: &BigUint, shift: bool) 
 /// - `top_k`: Number of top oracles to select per bit.
 /// - `rng`: Random number generator for message sampling.
 /// - `shift`: Whether to shift ciphertext by encrypted 2 before conversion.
+/// - `batch_size`: Number of ciphertext exponent variants to include.
 ///
 /// # Returns
 /// - `Result<(Vec<Vec<OracleBitSelection>>, Vec<f64>), Box<dyn Error>>`: Per-bit oracle selection and top match %.
@@ -1114,9 +1114,13 @@ fn screen_oracles_per_bit(
     top_k: usize,
     rng: &mut RngChoice,
     shift: bool,
+    batch_size: usize,
 ) -> Result<(Vec<Vec<OracleBitSelection>>, Vec<f64>), Box<dyn Error>> {
     if iterations == 0 {
         return Err("oracle_screen_iterations must be >= 1".into());
+    }
+    if batch_size == 0 {
+        return Err("demo batch size must be >= 1".into());
     }
     if candidates.is_empty() {
         return Err("no r candidates available for oracle screening".into());
@@ -1126,16 +1130,33 @@ fn screen_oracles_per_bit(
     let bit_width = analysis_bit_width(engine, &ctx.n);
     let y = engine.rabin_exponent as u32;
     let n_pow_y = ctx.n.pow(y);
+    let x_values: Vec<BigUint> = (0..batch_size)
+        .map(|instance_idx| odd_ciphertext_exponent(&ctx.e, instance_idx))
+        .collect::<Result<_, _>>()?;
+    let e_x_values: Vec<BigUint> = x_values.iter().map(|x| &ctx.e * x).collect();
 
-    let mut samples: Vec<(BigUint, Vec<bool>)> = Vec::with_capacity(iterations);
+    struct ScreeningSample {
+        result_defaults: Vec<BigUint>,
+        message_bits: Vec<bool>,
+    }
+
+    let mut samples: Vec<ScreeningSample> = Vec::with_capacity(iterations);
     let mut next_pct = 10u64;
     for idx in 0..iterations {
         let msg = random_message_under_n(engine, &ctx.n, rng);
         let ciphertext = msg.modpow(&ctx.e, &ctx.n);
-        let shifted = maybe_shift_ciphertext(ctx, &ciphertext, shift);
-        let result_default = get_larger_number(&shifted, &ctx.n, y, true, false);
         let message_bits = biguint_to_bits_le(&msg, bit_width);
-        samples.push((result_default, message_bits));
+        let mut result_defaults = Vec::with_capacity(batch_size);
+        for x in &x_values {
+            let ciphertext_x = ciphertext.modpow(x, &ctx.n);
+            let shifted = maybe_shift_ciphertext(ctx, &ciphertext_x, shift);
+            let result_default = get_larger_number(&shifted, &ctx.n, y, true, false);
+            result_defaults.push(result_default);
+        }
+        samples.push(ScreeningSample {
+            result_defaults,
+            message_bits,
+        });
 
         log_progress_every_ten_percent(
             (idx + 1) as u64,
@@ -1151,21 +1172,27 @@ fn screen_oracles_per_bit(
         .map(|candidate| {
             let mut match_counts = vec![0u32; bit_width];
             for sample in samples.iter() {
-                let dm = derive_candidate_message_from_result(
-                    ctx,
-                    engine,
-                    &sample.0,
-                    &candidate.r,
-                    &candidate.d_new,
-                    &n_pow_y,
-                    &candidate.r_pow_y,
-                    y,
-                    false,
-                );
-                let dm_bits = biguint_to_bits_le(&dm, bit_width);
-                for (bit_idx, bit) in dm_bits.iter().enumerate() {
-                    if *bit == sample.1[bit_idx] {
-                        match_counts[bit_idx] = match_counts[bit_idx].saturating_add(1);
+                for (instance_idx, result_default) in sample.result_defaults.iter().enumerate() {
+                    let e_x = &e_x_values[instance_idx];
+                    let Some(d_new) = mod_inverse(e_x, &candidate.phi_new) else {
+                        continue;
+                    };
+                    let dm = derive_candidate_message_from_result(
+                        ctx,
+                        engine,
+                        result_default,
+                        &candidate.r,
+                        &d_new,
+                        &n_pow_y,
+                        &candidate.r_pow_y,
+                        y,
+                        false,
+                    );
+                    let dm_bits = biguint_to_bits_le(&dm, bit_width);
+                    for (bit_idx, bit) in dm_bits.iter().enumerate() {
+                        if *bit == sample.message_bits[bit_idx] {
+                            match_counts[bit_idx] = match_counts[bit_idx].saturating_add(1);
+                        }
                     }
                 }
             }
@@ -1175,12 +1202,13 @@ fn screen_oracles_per_bit(
 
     let mut per_bit_oracles = vec![Vec::with_capacity(top_k); bit_width];
     let mut top_match_pct = vec![0.0; bit_width];
+    let total_samples = (iterations * batch_size) as f64;
     for bit_idx in 0..bit_width {
         let mut ranked: Vec<(usize, f64, bool)> = counts
             .iter()
             .enumerate()
             .map(|(oracle_idx, counts)| {
-                let match_pct = counts[bit_idx] as f64 / iterations as f64 * 100.0;
+                let match_pct = counts[bit_idx] as f64 / total_samples * 100.0;
                 if match_pct < 50.0 {
                     (oracle_idx, 100.0 - match_pct, true)                    
                 } else {
