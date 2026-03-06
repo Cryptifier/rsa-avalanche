@@ -74,6 +74,10 @@ struct Args {
     /// Reuse a single r candidate across each batch
     #[arg(long)]
     same_r_batch: bool,
+
+    /// Sort avalanche candidates by Hamming distance
+    #[arg(long = "use-hamming-distance")]
+    use_hamming_distance: bool,
 }
 
 /// Entry point for the RSA round-trip demo CLI.
@@ -105,6 +109,9 @@ fn main() -> Result<(), Box<dyn Error>> {
     if args.same_r_batch {
         config.engine.same_r_batch = true;
     }
+    if args.use_hamming_distance {
+        config.engine.use_hamming_distance = true;
+    }
     let analytics = Arc::new(Mutex::new(SessionAnalytics::new(AnalyticsCliArgs {
         bits: args.bits,
         message_override: args.message.clone(),
@@ -117,6 +124,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         session_json: args.session_json.clone(),
         shift: args.shift,
         ciphertext_modify: args.ciphertext_modify,
+        use_hamming_distance: args.use_hamming_distance,
     })));
 
     let analytics_for_handler = Arc::clone(&analytics);

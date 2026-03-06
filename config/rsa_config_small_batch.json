@@ -43,7 +43,8 @@
         "overlap_report_threshold" : 49.0,
         "entropy_report_threshold" : 0.99,
         "oracle_accuracy_threshold" : 51.0,
-        "avalanche_bias_threshold" : 100.0,
+        "avalanche_bias_threshold" : 150.0,
+        "use_hamming_distance" : false,
         "reuse_r_candidates" : true,
         "reuse_r_candidates_path" : "data/rgen_grid/rgen_grid_pct_40.csv",
         "reuse_r_candidates_append_only" : false,
@@ -58,16 +59,16 @@
         "invert_bits" : false,
         "use_rs_decrypt" : true,
         "analysis_batch_enable" : true,
-        "analysis_batch_messages" : 10000,
+        "analysis_batch_messages" : 100000,
         "analysis_batch_candidates" : 50,
         "analysis_batch_batches" : 1,
         "same_r_batch" : true,
         "ciphertext_modify" : true,
         "enciphered_export_enable" : false,
         "message" : {
-            "is_random" : true,
+            "is_random" : false,
             "bits" : 128,
-            "fixed_message" : "HeloWrld1234"
+            "fixed_message" : "HeloWrld12345678"
         }
     }
 }

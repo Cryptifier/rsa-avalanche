@@ -115,6 +115,9 @@ pub struct EngineConfig {
     /// Bias normalization threshold for avalanche beam search.
     #[serde(default = "default_avalanche_bias_threshold")]
     pub avalanche_bias_threshold: f64,
+    /// Whether to sort avalanche candidates by Hamming distance.
+    #[serde(default = "default_use_hamming_distance")]
+    pub use_hamming_distance: bool,
     #[serde(default = "default_r_use_list_enable")]
     pub r_use_list_enable: bool,
     #[serde(default)]
@@ -257,6 +260,7 @@ impl Default for EngineConfig {
             ciphertext_modify: default_ciphertext_modify(),
             oracle_accuracy_threshold: default_oracle_accuracy_threshold(),
             avalanche_bias_threshold: default_avalanche_bias_threshold(),
+            use_hamming_distance: default_use_hamming_distance(),
             r_use_list_enable: default_r_use_list_enable(),
             r_use_list: Vec::new(),
             r_stress_test_enable: default_r_stress_test_enable(),
@@ -830,6 +834,20 @@ fn default_oracle_accuracy_threshold() -> f64 {
 /// - Returns a constant default value; no side effects.
 fn default_avalanche_bias_threshold() -> f64 {
     20.0
+}
+
+/// Default toggle for Hamming-distance sorting in avalanche candidate ordering.
+///
+/// # Parameters
+/// - None.
+///
+/// # Returns
+/// - `bool`: Default enable setting.
+///
+/// # Expected Output
+/// - Returns a constant default value; no side effects.
+fn default_use_hamming_distance() -> bool {
+    false
 }
 
 /// Default flag for r_use_list stress tests.
