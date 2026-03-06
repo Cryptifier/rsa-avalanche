@@ -7,4 +7,5 @@ pub mod methods;
 pub mod polynomial_fields;
 pub mod r_candidates;
 pub mod rng;
+pub mod search;
 pub mod zmq_status;
