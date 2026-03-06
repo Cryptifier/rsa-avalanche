@@ -55,6 +55,10 @@ struct Args {
     #[arg(long)]
     shift: bool,
 
+    /// Report true match percentage without inversion adjustment
+    #[arg(long = "true")]
+    true_match: bool,
+
     /// Number of r-candidate accuracy batches to run
     #[arg(long, value_parser = clap::value_parser!(u64).range(1..))]
     batches: Option<u64>,
@@ -129,6 +133,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         tests: args.tests,
         export: args.export,
         shift: args.shift,
+        true_match: args.true_match,
     };
 
     let result = run_demo(demo_args, config, &analytics);

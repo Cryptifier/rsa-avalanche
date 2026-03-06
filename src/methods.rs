@@ -63,6 +63,7 @@ pub struct DemoArgs {
     pub tests: bool,
     pub export: bool,
     pub shift: bool,
+    pub true_match: bool,
 }
 
 /// Executes an analytics update inside a shared session lock.
@@ -533,6 +534,7 @@ pub fn run_demo(
             args.export,
             analytics,
             args.shift,
+            args.true_match,
         ) {
             Ok(()) => {
                 with_analytics(analytics, |a| {
@@ -718,6 +720,7 @@ fn compute_stats(values: &[f64]) -> Option<StatSummary> {
 /// - `candidates`: Prepared r candidates to evaluate.
 /// - `message`: Reference message used for bit comparisons.
 /// - `shift`: Whether to shift ciphertext by encrypted 2 before conversion.
+/// - `true_match`: Whether to report the true match percentage without inversion.
 /// - `shift_levels`: Number of left-shift multiplications to compare per candidate.
 ///
 /// # Returns
@@ -1776,6 +1779,7 @@ fn run_bitwise_speculative_oracle_attempt(
     message: &BigUint,
     batch_size: usize,
     shift: bool,
+    true_match: bool,
 ) -> Result<SpeculativeOracleReport, Box<dyn Error>> {
     if per_bit_oracles.is_empty() {
         return Err("per-bit oracle selection is empty".into());
@@ -1860,9 +1864,9 @@ fn run_bitwise_speculative_oracle_attempt(
     let message_bits = biguint_to_bits_le(message, bit_width);
     let (matching_lsb, matching_total) = count_matching_bits_le(&recovered_bits, &message_bits);
     let mut match_pct = matching_total as f64 / bit_width.max(1) as f64 * 100.0;
-    let match_pct_inverted = match_pct.max(100.0 - match_pct);
-    let match_pct_reported = if match_pct < match_pct_inverted {match_pct_inverted} else {match_pct};
-    match_pct = match_pct_reported;
+    if !true_match {
+        match_pct = match_pct.max(100.0 - match_pct);
+    }
 
     Ok(SpeculativeOracleReport {
         recovered,
@@ -2157,6 +2161,7 @@ fn plot_timeline_series(
 /// - `export`: Whether to emit oracle entropy timeline charts.
 /// - `analytics`: Session analytics accumulator for timing and candidate metadata.
 /// - `shift`: Whether to shift ciphertext by encrypted 2 before conversion.
+/// - `true_match`: Whether to report the true match percentage without inversion.
 ///
 /// # Returns
 /// - `Result<(), Box<dyn Error>>`: `Ok(())` if sufficient, otherwise an error.
@@ -2171,6 +2176,7 @@ fn run_information_sufficiency_tests(
     export: bool,
     analytics: &Arc<Mutex<SessionAnalytics>>,
     shift: bool,
+    true_match: bool,
 ) -> Result<(), Box<dyn Error>> {
     let engine = &config.engine;
     let iterations = engine.analysis_tests_iterations as usize;
@@ -2478,6 +2484,7 @@ fn run_information_sufficiency_tests(
         message,
         batch_size,
         shift,
+        true_match,
     )?;
     
     println!(
