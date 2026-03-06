@@ -8,6 +8,7 @@ use clap::Parser;
 use num_bigint::BigUint;
 use num_integer::Integer;
 use num_traits::{One, Zero};
+use rand::RngCore;
 use rayon::prelude::*;
 
 use rsademo::config::{load_config, Config, EngineConfig};
@@ -297,6 +298,12 @@ fn run_speculative_decrypt(
 
     if prepared.is_empty() {
         return Err("no valid r candidates for demo".into());
+    }
+    if engine.same_r_batch && prepared.len() > 1 {
+        let idx = (rng.next_u64() as usize) % prepared.len();
+        let selected = prepared.swap_remove(idx);
+        prepared.clear();
+        prepared.push(selected);
     }
 
     let screen_iterations = engine.oracle_screen_iterations.max(1) as usize;

@@ -44,6 +44,7 @@
         "analysis_batch_messages" : 50,
         "analysis_batch_candidates" : 50,
         "analysis_batch_batches" : 10,
+        "same_r_batch" : false,
         "ciphertext_modify" : false,
         "process_min_count" : 25,
         "process_count" : 25,

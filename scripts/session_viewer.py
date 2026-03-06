@@ -300,10 +300,17 @@ class BitSimilarityCanvas(QtWidgets.QAbstractScrollArea):
             r_value = row.get("r", "")
             match_pct = row.get("base_match_pct", 0.0)
             matching_bits = row.get("base_matching_bits", 0)
+            e_value = row.get("e")
+            x_value = row.get("x")
+            ex_suffix = (
+                f" | e={e_value} | x={x_value}"
+                if e_value is not None and x_value is not None
+                else ""
+            )
             painter.drawText(
                 self._margin - x_offset,
                 header_y,
-                f"#{display_idx} | r={r_value} | match={match_pct:.2f}% | matching bits={matching_bits}",
+                f"#{display_idx} | r={r_value} | match={match_pct:.2f}% | matching bits={matching_bits}{ex_suffix}",
             )
 
             label_x = self._margin - x_offset
@@ -348,6 +355,10 @@ class BitSimilarityCanvas(QtWidgets.QAbstractScrollArea):
                 shift = int(entry.get("shift", 0) or 0)
                 masked_bits = int(entry.get("masked_bits", max(0, shift)) or 0)
                 row_label = "Candidate" if shift == 0 else f"Candidate << {shift}"
+                entry_e = entry.get("e")
+                entry_x = entry.get("x")
+                if entry_e is not None and entry_x is not None:
+                    row_label = f"{row_label} | e={entry_e} | x={entry_x}"
                 adjusted_match_pct = entry.get("adjusted_match_pct", entry.get("match_pct", 0.0))
                 adjusted_matching_bits = entry.get(
                     "adjusted_matching_bits", entry.get("matching_bits", 0)
@@ -639,6 +650,8 @@ class BitSimilarityTab(QtWidgets.QWidget):
                 {
                     "index": idx,
                     "r": base_entry.get("r", ""),
+                    "e": base_entry.get("e"),
+                    "x": base_entry.get("x"),
                     "base_match_pct": base_entry.get(
                         "base_match_pct", base_entry.get("match_pct", 0.0)
                     ),

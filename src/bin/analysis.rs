@@ -70,6 +70,10 @@ struct Args {
     /// Raise ciphertext to a monotonically increasing exponent per batch
     #[arg(long)]
     ciphertext_modify: bool,
+
+    /// Reuse a single r candidate across each batch
+    #[arg(long)]
+    same_r_batch: bool,
 }
 
 /// Entry point for the RSA round-trip demo CLI.
@@ -97,6 +101,9 @@ fn main() -> Result<(), Box<dyn Error>> {
     config.engine.analysis_batch_enable = batch_enable;
     if args.ciphertext_modify {
         config.engine.ciphertext_modify = true;
+    }
+    if args.same_r_batch {
+        config.engine.same_r_batch = true;
     }
     let analytics = Arc::new(Mutex::new(SessionAnalytics::new(AnalyticsCliArgs {
         bits: args.bits,

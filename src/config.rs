@@ -106,6 +106,8 @@ pub struct EngineConfig {
     pub analysis_batch_candidates: u64,
     #[serde(default = "default_analysis_batch_batches")]
     pub analysis_batch_batches: u64,
+    #[serde(default = "default_same_r_batch")]
+    pub same_r_batch: bool,
     #[serde(default = "default_ciphertext_modify")]
     pub ciphertext_modify: bool,
     #[serde(default = "default_oracle_accuracy_threshold")]
@@ -248,6 +250,7 @@ impl Default for EngineConfig {
             analysis_batch_messages: default_analysis_batch_messages(),
             analysis_batch_candidates: default_analysis_batch_candidates(),
             analysis_batch_batches: default_analysis_batch_batches(),
+            same_r_batch: default_same_r_batch(),
             ciphertext_modify: default_ciphertext_modify(),
             oracle_accuracy_threshold: default_oracle_accuracy_threshold(),
             r_use_list_enable: default_r_use_list_enable(),
@@ -767,6 +770,20 @@ fn default_analysis_batch_candidates() -> u64 {
 /// - Returns a constant default value; no side effects.
 fn default_analysis_batch_batches() -> u64 {
     1
+}
+
+/// Default flag for using the same r candidate across a batch.
+///
+/// # Parameters
+/// - None.
+///
+/// # Returns
+/// - `bool`: Default batch r-candidate reuse setting.
+///
+/// # Expected Output
+/// - Returns a constant default value; no side effects.
+fn default_same_r_batch() -> bool {
+    false
 }
 
 /// Default flag for ciphertext exponent modification in analysis batches.
