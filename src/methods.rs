@@ -3,6 +3,7 @@
 /// Copyright (c) 2025 Nicholas LaRoche <nlaroche@cryptifier.dev>
 
 use std::{
+    collections::HashSet,
     error::Error,
     fs::{self, OpenOptions},
     io::Write,
@@ -43,6 +44,7 @@ use crate::analytics::{
     generate_r_candidates_with_analytics, RCandidateAccuracyBatch, RCandidateAccuracyEntry,
     RCandidateFactor, RCandidateTraceBatch, RCandidateTraceEntry, SessionAnalytics,
 };
+use crate::avalanche::{search_avalanche_tree, AvalancheNode};
 use crate::combiner::majority_vote_with_distribution;
 use crate::config::{Config, EngineConfig};
 use crate::dsp::{find_ramp_signals_f64, ramp_signal_strength_f64};
@@ -2036,6 +2038,82 @@ fn run_bitwise_speculative_oracle_attempt(
     })
 }
 
+/// Builds avalanche candidates from unique `(e * x)^{-1} mod phi(r)` decryptions.
+///
+/// # Parameters
+/// - `ctx`: RSA context containing key material.
+/// - `engine`: Engine configuration controlling HBC behavior.
+/// - `candidates`: Prepared r candidates to use as oracles.
+/// - `message`: Reference message used for bit width sizing.
+/// - `batch_size`: Number of ciphertext exponent variants in the batch.
+/// - `shift`: Whether to shift ciphertext by encrypted 2 before conversion.
+///
+/// # Returns
+/// - `Result<Vec<AvalancheNode>, Box<dyn Error>>`: Avalanche nodes for tree search.
+///
+/// # Expected Output
+/// - Returns candidate nodes; no stdout/stderr output.
+fn build_avalanche_nodes_unique_d(
+    ctx: &RSAContext,
+    engine: &EngineConfig,
+    candidates: &[OracleCandidate],
+    message: &BigUint,
+    batch_size: usize,
+    shift: bool,
+) -> Result<Vec<AvalancheNode>, Box<dyn Error>> {
+    if batch_size == 0 {
+        return Err("analysis batch size must be >= 1".into());
+    }
+    if candidates.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let bit_width = message.bits().max(1) as usize;
+    let y = engine.rabin_exponent as u32;
+    let n_pow_y = ctx.n.pow(y);
+    let e_big = ctx.e.clone();
+    let base_ciphertext = message.modpow(&ctx.e, &ctx.n);
+
+    let mut seen: Vec<HashSet<BigUint>> = vec![HashSet::new(); candidates.len()];
+    let mut nodes = Vec::new();
+
+    for instance_idx in 0..batch_size {
+        let x_big = odd_ciphertext_exponent(&e_big, instance_idx, "analysis avalanche")?;
+        let ciphertext = base_ciphertext.modpow(&x_big, &ctx.n);
+        let shifted = maybe_shift_ciphertext(ctx, &ciphertext, shift);
+        let result_default = get_larger_number(&shifted, &ctx.n, y, true, false);
+        let e_x = &e_big * &x_big;
+
+        for (candidate_idx, candidate) in candidates.iter().enumerate() {
+            let Some(d_new) = mod_inverse(&e_x, &candidate.phi_new) else {
+                continue;
+            };
+            let seen_set = &mut seen[candidate_idx];
+            if !seen_set.insert(d_new.clone()) {
+                continue;
+            }
+            let dm = derive_candidate_message_from_result(
+                ctx,
+                engine,
+                &result_default,
+                &candidate.r,
+                &d_new,
+                &n_pow_y,
+                &candidate.r_pow_y,
+                y,
+                false,
+            );
+            let message_bits = biguint_to_bits_le(&dm, bit_width);
+            nodes.push(AvalancheNode {
+                biases: vec![0.0; bit_width],
+                message_bits,
+            });
+        }
+    }
+
+    Ok(nodes)
+}
+
 /// Computes per-bit best-case match percentages for a target message.
 ///
 /// # Parameters
@@ -2650,6 +2728,39 @@ fn run_information_sufficiency_tests(
         true_match,
         selected_candidate,
     )?;
+
+    let avalanche_nodes = build_avalanche_nodes_unique_d(
+        ctx,
+        engine,
+        &candidates,
+        message,
+        batch_size,
+        shift,
+    )?;
+    if avalanche_nodes.is_empty() {
+        with_analytics(analytics, |a| {
+            a.add_feature_note(
+                "information_sufficiency",
+                "avalanche tree skipped: no unique decryptions",
+            );
+        });
+    } else {
+        let avalanche_count = avalanche_nodes.len();
+        let avalanche_result = search_avalanche_tree(avalanche_nodes)?;
+        with_analytics(analytics, |a| {
+            a.set_feature_stat(
+                "information_sufficiency",
+                "avalanche_tree",
+                json!({
+                    "bit_order": "lsb0",
+                    "bit_width": avalanche_result.message_bits.len(),
+                    "unique_messages": avalanche_count,
+                    "biases": avalanche_result.biases,
+                    "message_bits": avalanche_result.message_bits,
+                }),
+            );
+        });
+    }
     
     println!(
         "Bitwise speculative oracle recovered (hex): {}",
