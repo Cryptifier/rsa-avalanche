@@ -126,9 +126,9 @@ for i in $(seq 1 "${RUNS}"); do
   fi
 
   beam_block=$(awk '
-    /Avalanche beam search top/ {print; in=1; next}
-    in && /^Beam [0-9]+/ {print; next}
-    in {exit}
+    /Avalanche beam search top/ {print; capture=1; next}
+    capture && /^Beam [0-9]+/ {print; next}
+    capture {exit}
   ' "${run_output}")
   if [[ -n "${beam_block}" ]]; then
     echo "${beam_block}"
