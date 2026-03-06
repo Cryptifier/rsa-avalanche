@@ -2241,7 +2241,12 @@ fn run_avalanche_search(
         } else {
             matched_ones as f64 / candidate_ones as f64 * 100.0
         };
-        let candidate_hex = to_hex(&bits_le_to_biguint(&candidate_bits));
+        let mut candidate_hex = to_hex(&bits_le_to_biguint(&candidate_bits));
+        let hex_len = (bit_width + 3) / 4;
+        if candidate_hex.len() < hex_len {
+            let padding = "0".repeat(hex_len - candidate_hex.len());
+            candidate_hex = format!("{}{}", padding, candidate_hex);
+        }
         println!(
             "Beam {} score {:.4} match {:.2}% ones-match {:.2}% hex {}",
             idx + 1,
