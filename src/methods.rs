@@ -1804,8 +1804,12 @@ fn run_bitwise_speculative_oracle_attempt(
 
     let mut oracle_bits_by_instance = Vec::with_capacity(batch_size);
     for instance_idx in 0..batch_size {
-        let x_value = u64::try_from(instance_idx + 1)
+        let x_index = u64::try_from(instance_idx)
             .map_err(|_| "analysis batch message index exceeds u64 range")?;
+        let x_value = x_index
+            .checked_mul(2)
+            .and_then(|value| value.checked_add(1))
+            .ok_or("analysis batch message index exceeds u64 range")?;
         let x_big = BigUint::from(x_value);
         let ciphertext = base_ciphertext.modpow(&x_big, &ctx.n);
         let shifted = maybe_shift_ciphertext(ctx, &ciphertext, shift);
@@ -4101,8 +4105,11 @@ fn run_r_candidate_accuracy_batches(
 
         for msg_idx in 0..message_count {
             let x_value = if engine.ciphertext_modify {
-                let idx = msg_idx + 1;
-                u64::try_from(idx).map_err(|_| "analysis_batch message index exceeds u64 range")?
+                let idx = u64::try_from(msg_idx)
+                    .map_err(|_| "analysis_batch message index exceeds u64 range")?;
+                idx.checked_mul(2)
+                    .and_then(|value| value.checked_add(1))
+                    .ok_or("analysis_batch message index exceeds u64 range")?
             } else {
                 1
             };

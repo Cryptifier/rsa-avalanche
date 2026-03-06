@@ -844,8 +844,12 @@ fn build_oracle_bits_by_instance(
 
     let mut oracle_bits_by_instance = Vec::with_capacity(batch_size);
     for instance_idx in 0..batch_size {
-        let x_value = u64::try_from(instance_idx + 1)
-            .map_err(|_| "demo batch message index exceeds u64 range")?;
+        let x_index =
+            u64::try_from(instance_idx).map_err(|_| "demo batch message index exceeds u64 range")?;
+        let x_value = x_index
+            .checked_mul(2)
+            .and_then(|value| value.checked_add(1))
+            .ok_or("demo batch message index exceeds u64 range")?;
         let x_big = BigUint::from(x_value);
         let ciphertext_x = ciphertext.modpow(&x_big, &ctx.n);
         let shifted = maybe_shift_ciphertext(ctx, &ciphertext_x, shift);
