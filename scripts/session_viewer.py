@@ -965,6 +965,205 @@ class BitTrueTimelineTab(QtWidgets.QWidget):
         )
         self._canvas.set_data(self._frames, self._bit_width, self._window, self._stride)
 
+
+class AvgTreeCanvas(QtWidgets.QAbstractScrollArea):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._levels = [16, 8, 4, 2, 1]
+        self._positions = []
+        self._edges = []
+
+        self._margin = 16
+        self._box_size = 14
+        self._box_gap = 6
+        self._col_gap = 70
+        self._text_color = QtGui.QColor(255, 255, 255)
+        self._line_color = QtGui.QColor(40, 40, 40)
+
+        self.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        self.setVerticalScrollBarPolicy(QtCore.Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+
+        self._rebuild_layout()
+
+    def set_levels(self, levels):
+        levels = [int(value) for value in (levels or []) if int(value) > 0]
+        if not levels:
+            levels = [16, 8, 4, 2, 1]
+        self._levels = levels
+        self._rebuild_layout()
+        self._update_scrollbars()
+        self.viewport().update()
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._update_scrollbars()
+
+    def _content_width(self):
+        if not self._levels:
+            return 0
+        cols = len(self._levels)
+        return (
+            self._margin * 2
+            + cols * self._box_size
+            + (cols - 1) * self._col_gap
+        )
+
+    def _content_height(self):
+        if not self._levels:
+            return 0
+        max_count = max(self._levels)
+        return (
+            self._margin * 2
+            + max_count * self._box_size
+            + (max_count - 1) * self._box_gap
+        )
+
+    def _update_scrollbars(self):
+        viewport = self.viewport().size()
+        content_width = self._content_width()
+        content_height = self._content_height()
+
+        h_bar = self.horizontalScrollBar()
+        v_bar = self.verticalScrollBar()
+
+        h_max = max(0, content_width - viewport.width())
+        v_max = max(0, content_height - viewport.height())
+
+        h_bar.setRange(0, h_max)
+        h_bar.setPageStep(viewport.width())
+        v_bar.setRange(0, v_max)
+        v_bar.setPageStep(viewport.height())
+
+    def _color_for_column(self, idx):
+        palette = [
+            QtGui.QColor(255, 99, 71),
+            QtGui.QColor(46, 204, 113),
+            QtGui.QColor(52, 152, 219),
+            QtGui.QColor(255, 193, 7),
+            QtGui.QColor(155, 89, 182),
+        ]
+        color = palette[idx % len(palette)]
+        if idx % 2 == 1:
+            color = color.lighter(115)
+        return color
+
+    def _rebuild_layout(self):
+        self._positions = []
+        self._edges = []
+        if not self._levels:
+            return
+
+        x_base = self._margin
+        prev_positions = []
+        prev_count = 0
+
+        for col_idx, count in enumerate(self._levels):
+            col_positions = []
+            x = x_base + col_idx * (self._box_size + self._col_gap)
+            if col_idx == 0:
+                for idx in range(count):
+                    y = self._margin + idx * (self._box_size + self._box_gap)
+                    col_positions.append((x, y))
+            else:
+                for parent_idx in range(count):
+                    start = int(round(parent_idx * prev_count / count))
+                    end = int(round((parent_idx + 1) * prev_count / count))
+                    if end <= start:
+                        end = min(prev_count, start + 1)
+                    group = prev_positions[start:end]
+                    if not group:
+                        continue
+                    y_values = [pos[1] for pos in group]
+                    y = sum(y_values) / len(y_values)
+                    col_positions.append((x, y))
+                    for child_idx in range(start, end):
+                        child_x, child_y = prev_positions[child_idx]
+                        self._edges.append(
+                            (
+                                child_x + self._box_size,
+                                child_y + self._box_size * 0.5,
+                                x,
+                                y + self._box_size * 0.5,
+                            )
+                        )
+
+            self._positions.append(col_positions)
+            prev_positions = col_positions
+            prev_count = len(col_positions)
+
+    def paintEvent(self, event):
+        super().paintEvent(event)
+        painter = QtGui.QPainter(self.viewport())
+        painter.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing, True)
+        painter.fillRect(self.viewport().rect(), self.palette().base())
+
+        if not self._levels or not self._positions:
+            painter.setPen(QtGui.QColor(60, 60, 60))
+            painter.drawText(self._margin, self._margin + 16, "No Avg tree data.")
+            painter.end()
+            return
+
+        x_offset = self.horizontalScrollBar().value()
+        y_offset = self.verticalScrollBar().value()
+
+        pen = QtGui.QPen(self._line_color)
+        pen.setWidth(2)
+        painter.setPen(pen)
+        for x1, y1, x2, y2 in self._edges:
+            painter.drawLine(
+                QtCore.QPointF(x1 - x_offset, y1 - y_offset),
+                QtCore.QPointF(x2 - x_offset, y2 - y_offset),
+            )
+
+        base_font = painter.font()
+        font = QtGui.QFont(base_font)
+        font.setPixelSize(max(8, int(self._box_size * 0.7)))
+        painter.setFont(font)
+
+        for col_idx, col_positions in enumerate(self._positions):
+            fill_color = self._color_for_column(col_idx)
+            border_color = fill_color.darker(140)
+            painter.setPen(QtGui.QPen(border_color, 1))
+            for x, y in col_positions:
+                rect = QtCore.QRectF(
+                    x - x_offset,
+                    y - y_offset,
+                    self._box_size,
+                    self._box_size,
+                )
+                painter.fillRect(rect, fill_color)
+                painter.drawRect(rect)
+                painter.setPen(self._text_color)
+                painter.drawText(
+                    rect,
+                    QtCore.Qt.AlignmentFlag.AlignCenter,
+                    "0",
+                )
+                painter.setPen(QtGui.QPen(border_color, 1))
+
+        painter.end()
+
+
+class AvgTab(QtWidgets.QWidget):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._levels = [16, 8, 4, 2, 1]
+
+        layout = QtWidgets.QVBoxLayout(self)
+        header = QtWidgets.QLabel("Avg tree view (levels controlled by data structure).")
+        header.setStyleSheet("color: #555;")
+        layout.addWidget(header)
+
+        self._canvas = AvgTreeCanvas()
+        self._canvas.set_levels(self._levels)
+        layout.addWidget(self._canvas, 1)
+
+        levels_label = QtWidgets.QLabel(
+            "Levels: " + " → ".join(str(value) for value in self._levels)
+        )
+        levels_label.setStyleSheet("color: #555;")
+        layout.addWidget(levels_label)
+
 class SessionFileWatcher(QtCore.QObject):
     session_updated = QtCore.Signal(dict)
     error = QtCore.Signal(str)
@@ -1111,6 +1310,7 @@ class SessionViewer(QtWidgets.QMainWindow):
         self._tabs.addTab(self._build_candidates_tab(session), "Candidates")
         self._tabs.addTab(self._build_bit_similarity_tab(session), "Bit Similarity")
         self._tabs.addTab(self._build_bit_true_timeline_tab(session), "Bit True Timeline")
+        self._tabs.addTab(self._build_avg_tab(session), "Avg.")
         if self._tabs.count():
             self._tabs.setCurrentIndex(min(current_index, self._tabs.count() - 1))
         if self._current_session_path:
@@ -1248,6 +1448,9 @@ class SessionViewer(QtWidgets.QMainWindow):
             return widget
 
         return BitTrueTimelineTab(timeline)
+
+    def _build_avg_tab(self, _session):
+        return AvgTab()
 
     def _capture_bit_similarity_settings(self):
         for idx in range(self._tabs.count()):
