@@ -112,6 +112,9 @@ pub struct EngineConfig {
     pub ciphertext_modify: bool,
     #[serde(default = "default_oracle_accuracy_threshold")]
     pub oracle_accuracy_threshold: f64,
+    /// Bias normalization threshold for avalanche beam search.
+    #[serde(default = "default_avalanche_bias_threshold")]
+    pub avalanche_bias_threshold: f64,
     #[serde(default = "default_r_use_list_enable")]
     pub r_use_list_enable: bool,
     #[serde(default)]
@@ -253,6 +256,7 @@ impl Default for EngineConfig {
             same_r_batch: default_same_r_batch(),
             ciphertext_modify: default_ciphertext_modify(),
             oracle_accuracy_threshold: default_oracle_accuracy_threshold(),
+            avalanche_bias_threshold: default_avalanche_bias_threshold(),
             r_use_list_enable: default_r_use_list_enable(),
             r_use_list: Vec::new(),
             r_stress_test_enable: default_r_stress_test_enable(),
@@ -812,6 +816,20 @@ fn default_ciphertext_modify() -> bool {
 /// - Returns a constant default value; no side effects.
 fn default_oracle_accuracy_threshold() -> f64 {
     55.0
+}
+
+/// Default avalanche bias threshold for beam search normalization.
+///
+/// # Parameters
+/// - None.
+///
+/// # Returns
+/// - `f64`: Default avalanche bias normalization threshold.
+///
+/// # Expected Output
+/// - Returns a constant default value; no side effects.
+fn default_avalanche_bias_threshold() -> f64 {
+    20.0
 }
 
 /// Default flag for r_use_list stress tests.

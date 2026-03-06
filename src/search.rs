@@ -6,11 +6,38 @@ pub enum BeamSearchError {
     ZeroMaxSteps,
 }
 
+impl std::fmt::Display for BeamSearchError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            BeamSearchError::EmptyInitial => write!(f, "initial beam cannot be empty"),
+            BeamSearchError::ZeroBeamWidth => write!(f, "beam width must be >= 1"),
+            BeamSearchError::ZeroMaxSteps => write!(f, "max steps must be >= 1"),
+        }
+    }
+}
+
+impl std::error::Error for BeamSearchError {}
+
 /// Summary statistics for a completed beam search.
 #[derive(Debug, Clone)]
 pub struct BeamSearchResult {
     pub best_vector: Vec<f64>,
     pub best_score: f64,
+    pub steps: usize,
+    pub evaluated: usize,
+}
+
+/// Scored candidate returned by beam search.
+#[derive(Debug, Clone)]
+pub struct BeamSearchCandidate {
+    pub vector: Vec<f64>,
+    pub score: f64,
+}
+
+/// Summary statistics plus top candidates for a beam search run.
+#[derive(Debug, Clone)]
+pub struct BeamSearchBeamResult {
+    pub beam: Vec<BeamSearchCandidate>,
     pub steps: usize,
     pub evaluated: usize,
 }
@@ -90,6 +117,82 @@ where
     Ok(BeamSearchResult {
         best_vector: best.vector,
         best_score: best.score,
+        steps,
+        evaluated,
+    })
+}
+
+/// Performs beam search and returns the final beam of top candidates.
+///
+/// # Parameters
+/// - `initial`: Starting candidate vectors for the first beam.
+/// - `beam_width`: Maximum number of candidates retained per step.
+/// - `max_steps`: Maximum number of expansion steps to run.
+/// - `expand`: Function that generates successor vectors for a candidate.
+/// - `score`: Function that assigns a score to a candidate (higher is better).
+///
+/// # Returns
+/// - `Result<BeamSearchBeamResult, BeamSearchError>`: Final beam plus search statistics.
+///
+/// # Expected Output
+/// - Returns search results; no stdout/stderr output.
+pub fn beam_search_top_k<FExpand, FScore>(
+    initial: Vec<Vec<f64>>,
+    beam_width: usize,
+    max_steps: usize,
+    expand: FExpand,
+    score: FScore,
+) -> Result<BeamSearchBeamResult, BeamSearchError>
+where
+    FExpand: Fn(&[f64]) -> Vec<Vec<f64>>,
+    FScore: Fn(&[f64]) -> f64,
+{
+    if initial.is_empty() {
+        return Err(BeamSearchError::EmptyInitial);
+    }
+    if beam_width == 0 {
+        return Err(BeamSearchError::ZeroBeamWidth);
+    }
+    if max_steps == 0 {
+        return Err(BeamSearchError::ZeroMaxSteps);
+    }
+
+    let mut beam = score_candidates(initial, &score);
+    let mut evaluated = beam.len();
+    select_top_k(&mut beam, beam_width);
+    let mut steps = 0usize;
+
+    for _ in 0..max_steps {
+        let mut expanded = Vec::new();
+        for candidate in &beam {
+            let successors = expand(&candidate.vector);
+            for successor in successors {
+                let score_value = sanitize_score(score(&successor));
+                expanded.push(ScoredCandidate {
+                    vector: successor,
+                    score: score_value,
+                });
+            }
+        }
+        steps += 1;
+        evaluated += expanded.len();
+        if expanded.is_empty() {
+            break;
+        }
+        select_top_k(&mut expanded, beam_width);
+        beam = expanded;
+    }
+
+    let beam = beam
+        .into_iter()
+        .map(|candidate| BeamSearchCandidate {
+            vector: candidate.vector,
+            score: candidate.score,
+        })
+        .collect();
+
+    Ok(BeamSearchBeamResult {
+        beam,
         steps,
         evaluated,
     })

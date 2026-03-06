@@ -55,6 +55,7 @@ use crate::math::{
 };
 use crate::r_candidates::RCandidateSettings;
 use crate::rng::{RngChoice, RngMode};
+use crate::search::beam_search_top_k;
 
 /// Input arguments for the RSA demo and analysis pipeline.
 pub struct DemoArgs {
@@ -2114,6 +2115,25 @@ fn build_avalanche_nodes_unique_d(
     Ok(nodes)
 }
 
+/// Normalizes avalanche biases into the [0.0, 1.0] range using a threshold.
+///
+/// # Parameters
+/// - `biases`: Raw avalanche bias values.
+/// - `threshold`: Normalization threshold (values >= threshold map to 1.0).
+///
+/// # Returns
+/// - `Vec<f64>`: Normalized bias values.
+///
+/// # Expected Output
+/// - Returns normalized biases; no stdout/stderr output.
+fn normalize_avalanche_biases(biases: &[f64], threshold: f64) -> Vec<f64> {
+    let denom = if threshold <= 0.0 { 1.0 } else { threshold };
+    biases
+        .iter()
+        .map(|bias| (bias / denom).clamp(0.0, 1.0))
+        .collect()
+}
+
 /// Runs the avalanche tree search for unique `(e*x)^{-1} mod phi(r)` decryptions.
 ///
 /// # Parameters
@@ -2167,6 +2187,70 @@ fn run_avalanche_search(
             }),
         );
     });
+
+    let bit_width = avalanche_result.message_bits.len().max(1);
+    let normalized_biases =
+        normalize_avalanche_biases(&avalanche_result.biases, engine.avalanche_bias_threshold);
+    let beam_result = beam_search_top_k(
+        vec![Vec::new()],
+        5,
+        bit_width,
+        |candidate| {
+            if candidate.len() >= bit_width {
+                return Vec::new();
+            }
+            let mut zero = candidate.to_vec();
+            let mut one = candidate.to_vec();
+            zero.push(0.0);
+            one.push(1.0);
+            vec![zero, one]
+        },
+        |candidate| {
+            candidate
+                .iter()
+                .enumerate()
+                .map(|(idx, bit)| {
+                    let bias = normalized_biases
+                        .get(idx)
+                        .copied()
+                        .unwrap_or(0.0);
+                    if *bit >= 0.5 { bias } else { 1.0 - bias }
+                })
+                .sum()
+        },
+    )?;
+
+    let message_bits = biguint_to_bits_le(message, bit_width);
+    println!(
+        "Avalanche beam search top {} candidates (lsb0 order):",
+        beam_result.beam.len()
+    );
+    for (idx, candidate) in beam_result.beam.iter().enumerate() {
+        let candidate_bits: Vec<bool> =
+            candidate.vector.iter().map(|value| *value >= 0.5).collect();
+        let (_, matching_total) = count_matching_bits_le(&candidate_bits, &message_bits);
+        let match_pct = matching_total as f64 / bit_width as f64 * 100.0;
+        let candidate_ones = candidate_bits.iter().filter(|bit| **bit).count();
+        let matched_ones = candidate_bits
+            .iter()
+            .zip(message_bits.iter())
+            .filter(|(cand, msg)| **cand && **msg)
+            .count();
+        let ones_match_pct = if candidate_ones == 0 {
+            0.0
+        } else {
+            matched_ones as f64 / candidate_ones as f64 * 100.0
+        };
+        let candidate_hex = to_hex(&bits_le_to_biguint(&candidate_bits));
+        println!(
+            "Beam {} score {:.4} match {:.2}% ones-match {:.2}% hex {}",
+            idx + 1,
+            candidate.score,
+            match_pct,
+            ones_match_pct,
+            candidate_hex
+        );
+    }
 
     Ok(())
 }

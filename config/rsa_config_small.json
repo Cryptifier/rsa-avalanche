@@ -49,6 +49,7 @@
         "overlap_report_threshold" : 49.0,
         "entropy_report_threshold" : 0.99,
         "oracle_accuracy_threshold" : 51.0,
+        "avalanche_bias_threshold" : 20.0,
         "reuse_r_candidates" : true,
         "reuse_r_candidates_path" : "data/rgen_output_smaller.csv",
         "reuse_r_candidates_append_only" : false,
