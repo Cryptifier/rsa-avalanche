@@ -4433,6 +4433,86 @@ struct AccuracyCandidate {
     r_pow_y: BigUint,
 }
 
+#[derive(Clone, Debug)]
+struct BeamMaxCandidate {
+    score: f64,
+    bits: Vec<bool>,
+    message_bits: Vec<bool>,
+    batch_number: usize,
+}
+
+#[derive(Clone, Debug)]
+struct BeamCandidateBits {
+    score: f64,
+    bits: Vec<bool>,
+}
+
+/// Runs avalanche tree + beam search and returns the best candidate bits.
+///
+/// # Parameters
+/// - `ctx`: RSA context containing key material.
+/// - `engine`: Engine configuration controlling HBC behavior.
+/// - `candidates`: Prepared r candidates to use as oracles.
+/// - `message`: Reference message used for bit width sizing.
+/// - `batch_size`: Number of ciphertext exponent variants to include.
+/// - `shift`: Whether to shift ciphertext by encrypted 2 before conversion.
+///
+/// # Returns
+/// - `Result<Option<BeamCandidateBits>, Box<dyn Error>>`: Best candidate or `None` if unavailable.
+///
+/// # Expected Output
+/// - Returns candidate info; no stdout/stderr output.
+fn beam_max_candidate_from_avalanche(
+    ctx: &RSAContext,
+    engine: &EngineConfig,
+    candidates: &[OracleCandidate],
+    message: &BigUint,
+    batch_size: usize,
+    shift: bool,
+) -> Result<Option<BeamCandidateBits>, Box<dyn Error>> {
+    let avalanche_nodes =
+        build_avalanche_nodes_unique_d(ctx, engine, candidates, message, batch_size, shift)?;
+    if avalanche_nodes.is_empty() {
+        return Ok(None);
+    }
+    let avalanche_result = search_avalanche_tree(avalanche_nodes)?;
+    let bit_width = avalanche_result.message_bits.len().max(1);
+    let normalized_biases = normalize_avalanche_biases(&avalanche_result.biases);
+    let beam_result = beam_search_top_k(
+        vec![Vec::new()],
+        5,
+        bit_width,
+        |candidate| {
+            if candidate.len() >= bit_width {
+                return Vec::new();
+            }
+            let mut zero = candidate.to_vec();
+            let mut one = candidate.to_vec();
+            zero.push(0.0);
+            one.push(1.0);
+            vec![zero, one]
+        },
+        |candidate| {
+            candidate
+                .iter()
+                .enumerate()
+                .map(|(idx, bit)| {
+                    let bias = normalized_biases
+                        .get(idx)
+                        .copied()
+                        .unwrap_or(0.0);
+                    if *bit >= 0.5 { bias } else { 1.0 - bias }
+                })
+                .sum()
+        },
+    )?;
+    let best = beam_result.beam.first().cloned();
+    Ok(best.map(|candidate| BeamCandidateBits {
+        score: candidate.score,
+        bits: candidate.vector.iter().map(|value| *value >= 0.5).collect(),
+    }))
+}
+
 /// Runs r-candidate accuracy batches with one random message per batch.
 ///
 /// # Parameters
@@ -4519,6 +4599,7 @@ fn run_r_candidate_accuracy_batches(
 
     let n_pow_y = ctx.n.pow(y);
     let mut candidate_offset = 0usize;
+    let mut beam_max: Option<BeamMaxCandidate> = None;
     for batch_idx in 0..batch_count {
         let batch_number = batch_idx + 1;
         let start = candidate_offset;
@@ -4628,6 +4709,79 @@ fn run_r_candidate_accuracy_batches(
                 candidate_decryptions,
             };
             entries.push(entry);
+        }
+
+        let oracle_candidates: Vec<OracleCandidate> = batch_candidates
+            .iter()
+            .map(|candidate| OracleCandidate {
+                r: candidate.r.clone(),
+                d_new: candidate.d_new.clone(),
+                phi_new: candidate.phi_new.clone(),
+                r_pow_y: candidate.r_pow_y.clone(),
+                x: BigUint::one(),
+            })
+            .collect();
+        if let Some(candidate) = beam_max_candidate_from_avalanche(
+            ctx,
+            engine,
+            &oracle_candidates,
+            &message,
+            message_count,
+            shift,
+        )? {
+            let replace = match beam_max {
+                Some(ref current) => candidate.score > current.score,
+                None => true,
+            };
+            if replace {
+                let message_bits = biguint_to_bits_le(&message, candidate.bits.len());
+                beam_max = Some(BeamMaxCandidate {
+                    score: candidate.score,
+                    bits: candidate.bits,
+                    message_bits,
+                    batch_number,
+                });
+            }
+        }
+        if batch_number == batch_count {
+            if let Some(ref max) = beam_max {
+                let mut hex = to_hex(&bits_le_to_biguint(&max.bits));
+                let hex_len = (max.bits.len() + 3) / 4;
+                if hex.len() < hex_len {
+                    let padding = "0".repeat(hex_len - hex.len());
+                    hex = format!("{}{}", padding, hex);
+                }
+                let (_, matching_total) =
+                    count_matching_bits_le(&max.bits, &max.message_bits);
+                let match_pct =
+                    matching_total as f64 / max.bits.len().max(1) as f64 * 100.0;
+                let candidate_ones = max.bits.iter().filter(|bit| **bit).count();
+                let matched_ones = max
+                    .bits
+                    .iter()
+                    .zip(max.message_bits.iter())
+                    .filter(|(cand, msg)| **cand && **msg)
+                    .count();
+                let ones_match_pct = if candidate_ones == 0 {
+                    0.0
+                } else {
+                    matched_ones as f64 / candidate_ones as f64 * 100.0
+                };
+                println!(
+                    "Avalanche beam max after {} batches: score {:.4} batch {} match {:.2}% ones-match {:.2}% hex {}",
+                    batch_count,
+                    max.score,
+                    max.batch_number,
+                    match_pct,
+                    ones_match_pct,
+                    hex
+                );
+            } else {
+                println!(
+                    "Avalanche beam max after {} batches: N/A",
+                    batch_count
+                );
+            }
         }
 
         with_analytics(analytics, |a| {

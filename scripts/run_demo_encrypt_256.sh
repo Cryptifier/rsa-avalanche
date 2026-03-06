@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-RUNS=${RUNS:-100}
+RUNS=${RUNS:-1}
 CONFIG=${CONFIG:-"config/rsa_config_demo.json"}
 SCRIPT_LOG=${SCRIPT_LOG:-"logs_demo_script.log"}
 RESUME=${RESUME:-0}
@@ -63,7 +63,7 @@ for i in $(seq 1 "${RUNS}"); do
   encrypt_output="$(mktemp)"
   decrypt_output="$(mktemp)"
 
-  cargo run --bin demo -- --config "${CONFIG}" --encrypt --plaintext-hex "0x${PLAINTEXT_HEX}" | tee "${encrypt_output}"
+  cargo run --bin demo -- --batch-size 1000 --batches 10 --config "${CONFIG}" --encrypt --plaintext-hex "0x${PLAINTEXT_HEX}" | tee "${encrypt_output}"
   ciphertext_hex=$(grep -m1 "Ciphertext (hex):" "${encrypt_output}" | awk '{print $3}')
   if [[ -z "${ciphertext_hex}" ]]; then
     echo "Failed to capture ciphertext from demo output." >&2
