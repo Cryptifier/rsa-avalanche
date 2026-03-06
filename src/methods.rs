@@ -573,7 +573,7 @@ pub fn run_demo(
             a.set_feature_stat(
                 "r_candidate_accuracy",
                 "messages_per_batch",
-                json!(1u64),
+                json!(config.engine.analysis_batch_messages),
             );
             a.set_feature_stat(
                 "r_candidate_accuracy",
@@ -3947,6 +3947,7 @@ fn record_r_candidate_trace_batch_from_prepared(
 struct AccuracyCandidate {
     r: BigUint,
     factors: Vec<(BigUint, u64)>,
+    phi_new: BigUint,
     d_new: BigUint,
     r_pow_y: BigUint,
 }
@@ -3976,15 +3977,17 @@ fn run_r_candidate_accuracy_batches(
         return Ok(());
     }
 
+    let message_count_raw = engine.analysis_batch_messages;
     let candidates_per_batch_raw = engine.analysis_batch_candidates;
     let batch_count_raw = engine.analysis_batch_batches;
-    if candidates_per_batch_raw == 0 {
-        return Err("analysis_batch_candidates must be >= 1".into());
+    if message_count_raw == 0 || candidates_per_batch_raw == 0 {
+        return Err("analysis_batch_messages and analysis_batch_candidates must be >= 1".into());
     }
     if batch_count_raw == 0 {
         return Err("analysis_batch_batches must be >= 1".into());
     }
 
+    let message_count = message_count_raw as usize;
     let candidates_per_batch = candidates_per_batch_raw as usize;
     let batch_count = batch_count_raw as usize;
 
@@ -4003,16 +4006,18 @@ fn run_r_candidate_accuracy_batches(
     }
 
     let y = engine.rabin_exponent as u32;
+    let e_big = BigUint::from(ctx.e);
     let mut prepared = Vec::with_capacity(candidates.len());
     for (r, factors) in candidates.drain(..) {
         let phi_new = compute_totient(&factors);
-        let Some(d_new) = mod_inverse(&ctx.e, &phi_new) else {
+        let Some(d_new) = mod_inverse(&e_big, &phi_new) else {
             continue;
         };
         let r_pow_y = r.pow(y);
         prepared.push(AccuracyCandidate {
             r,
             factors,
+            phi_new,
             d_new,
             r_pow_y,
         });
@@ -4030,37 +4035,99 @@ fn run_r_candidate_accuracy_batches(
     let n_pow_y = ctx.n.pow(y);
     let mut candidate_offset = 0usize;
     for batch_idx in 0..batch_count {
+        let batch_number = batch_idx + 1;
         let start = candidate_offset;
         let end = candidate_offset + candidates_per_batch;
         let batch_candidates = &prepared[start..end];
         candidate_offset = end;
 
-        let message = random_message_under_n(engine, &ctx.n, rng);
-        let messages = vec![message.clone()];
-        let ciphertext = message.modpow(&ctx.e, &ctx.n);
-        let shifted = maybe_shift_ciphertext(ctx, &ciphertext, shift);
-        let result_default = get_larger_number(&shifted, &ctx.n, y, true, false);
-        let ciphertexts = vec![ciphertext];
-        let shifted_ciphertexts = vec![shifted];
-        let tonelli_ciphertexts = vec![result_default.clone()];
+        let message = if engine.message.is_random {
+            random_message_under_n(engine, &ctx.n, rng)
+        } else {
+            let msg = BigUint::from_bytes_be(engine.message.fixed_message.as_bytes());
+            if msg.is_zero() {
+                return Err("analysis_batch fixed_message cannot be empty".into());
+            }
+            if msg >= ctx.n {
+                return Err("analysis_batch fixed_message must be smaller than modulus n".into());
+            }
+            msg
+        };
+        let messages = vec![message.clone(); message_count];
+        let base_ciphertext = message.modpow(&ctx.e, &ctx.n);
+        let mut ciphertexts = Vec::with_capacity(message_count);
+        let mut shifted_ciphertexts = Vec::with_capacity(message_count);
+        let mut tonelli_ciphertexts = Vec::with_capacity(message_count);
+        let mut e_x_values = Vec::with_capacity(message_count);
+
+        for msg_idx in 0..message_count {
+            let x_value = if engine.ciphertext_modify {
+                let idx = msg_idx + 1;
+                u64::try_from(idx).map_err(|_| "analysis_batch message index exceeds u64 range")?
+            } else {
+                1
+            };
+            let x_big = BigUint::from(x_value);
+            let ciphertext = if engine.ciphertext_modify {
+                base_ciphertext.modpow(&x_big, &ctx.n)
+            } else {
+                base_ciphertext.clone()
+            };
+            let shifted = maybe_shift_ciphertext(ctx, &ciphertext, shift);
+            let result_default = get_larger_number(&shifted, &ctx.n, y, true, false);
+
+            if engine.ciphertext_modify {
+                e_x_values.push(&e_big * &x_big);
+            }
+            ciphertexts.push(ciphertext);
+            shifted_ciphertexts.push(shifted);
+            tonelli_ciphertexts.push(result_default);
+        }
 
         let mut entries = Vec::with_capacity(batch_candidates.len());
         for candidate in batch_candidates {
-            let hbc_result = hbc(&result_default, &candidate.r, &n_pow_y, engine);
-            let dm = derive_candidate_message_from_result(
-                ctx,
-                engine,
-                &result_default,
-                &candidate.r,
-                &candidate.d_new,
-                &n_pow_y,
-                &candidate.r_pow_y,
-                y,
-                false,
-            );
-            let message_bits = message.bits().max(1) as f64;
-            let (_, matching_total) = count_matching_bits(&dm, &message);
-            let accuracy_pct = (matching_total as f64 / message_bits) * 100.0;
+            let mut hbc_ciphertexts_r = Vec::with_capacity(message_count);
+            let mut candidate_decryptions = Vec::with_capacity(message_count);
+            let mut total_accuracy = 0.0f64;
+
+            for (idx, msg) in messages.iter().enumerate() {
+                let result_default = &tonelli_ciphertexts[idx];
+                let hbc_result = hbc(result_default, &candidate.r, &n_pow_y, engine);
+                let d_new = if engine.ciphertext_modify {
+                    let e_x = e_x_values
+                        .get(idx)
+                        .ok_or_else(|| "missing ciphertext exponent for message index".into())?;
+                    mod_inverse(e_x, &candidate.phi_new)
+                } else {
+                    Some(candidate.d_new.clone())
+                };
+
+                if let Some(d_new) = d_new {
+                    let dm = derive_candidate_message_from_result(
+                        ctx,
+                        engine,
+                        result_default,
+                        &candidate.r,
+                        &d_new,
+                        &n_pow_y,
+                        &candidate.r_pow_y,
+                        y,
+                        false,
+                    );
+                    let message_bits = msg.bits().max(1) as f64;
+                    let (_, matching_total) = count_matching_bits(&dm, msg);
+                    let match_pct = (matching_total as f64 / message_bits) * 100.0;
+                    total_accuracy += match_pct;
+
+                    hbc_ciphertexts_r.push(hbc_result.to_string());
+                    candidate_decryptions.push(dm.to_string());
+                } else {
+                    hbc_ciphertexts_r.push(hbc_result.to_string());
+                    candidate_decryptions.push("0".to_string());
+                }
+            }
+
+            let accuracy_pct = total_accuracy / message_count as f64;
             let entry = RCandidateAccuracyEntry {
                 r: candidate.r.to_string(),
                 r_bits: candidate.r.bits(),
@@ -4074,15 +4141,15 @@ fn run_r_candidate_accuracy_batches(
                     })
                     .collect(),
                 accuracy_pct,
-                hbc_ciphertexts_r: vec![hbc_result.to_string()],
-                candidate_decryptions: vec![dm.to_string()],
+                hbc_ciphertexts_r,
+                candidate_decryptions,
             };
             entries.push(entry);
         }
 
         with_analytics(analytics, |a| {
             a.push_r_candidate_accuracy_batch(RCandidateAccuracyBatch {
-                context: format!("analysis_batch_accuracy_{}", batch_idx + 1),
+                context: format!("analysis_batch_accuracy_{}", batch_number),
                 messages: messages.iter().map(|m| m.to_string()).collect(),
                 ciphertexts: ciphertexts.iter().map(|c| c.to_string()).collect(),
                 shifted_ciphertexts: shifted_ciphertexts.iter().map(|c| c.to_string()).collect(),
@@ -4216,6 +4283,7 @@ mod tests {
             export: false,
             session_json: "session.json".to_string(),
             shift: false,
+            ciphertext_modify: false,
         })));
         let result = run_message_trial(
             &ctx,
@@ -4276,6 +4344,7 @@ mod tests {
             export: false,
             session_json: "session.json".to_string(),
             shift: false,
+            ciphertext_modify: false,
         })));
         let result = run_message_trial(
             &ctx,

@@ -100,10 +100,14 @@ pub struct EngineConfig {
     pub analysis_shift_multiplications: usize,
     #[serde(default = "default_analysis_batch_enable")]
     pub analysis_batch_enable: bool,
+    #[serde(default = "default_analysis_batch_messages")]
+    pub analysis_batch_messages: u64,
     #[serde(default = "default_analysis_batch_candidates")]
     pub analysis_batch_candidates: u64,
     #[serde(default = "default_analysis_batch_batches")]
     pub analysis_batch_batches: u64,
+    #[serde(default = "default_ciphertext_modify")]
+    pub ciphertext_modify: bool,
     #[serde(default = "default_oracle_accuracy_threshold")]
     pub oracle_accuracy_threshold: f64,
     #[serde(default = "default_r_use_list_enable")]
@@ -241,8 +245,10 @@ impl Default for EngineConfig {
             analysis_tests_stride: default_analysis_tests_stride(),
             analysis_shift_multiplications: default_analysis_shift_multiplications(),
             analysis_batch_enable: default_analysis_batch_enable(),
+            analysis_batch_messages: default_analysis_batch_messages(),
             analysis_batch_candidates: default_analysis_batch_candidates(),
             analysis_batch_batches: default_analysis_batch_batches(),
+            ciphertext_modify: default_ciphertext_modify(),
             oracle_accuracy_threshold: default_oracle_accuracy_threshold(),
             r_use_list_enable: default_r_use_list_enable(),
             r_use_list: Vec::new(),
@@ -721,6 +727,20 @@ fn default_analysis_batch_enable() -> bool {
     false
 }
 
+/// Default number of messages per r-candidate accuracy batch.
+///
+/// # Parameters
+/// - None.
+///
+/// # Returns
+/// - `u64`: Default message count per batch.
+///
+/// # Expected Output
+/// - Returns a constant default value; no side effects.
+fn default_analysis_batch_messages() -> u64 {
+    1
+}
+
 /// Default number of r candidates per accuracy batch.
 ///
 /// # Parameters
@@ -747,6 +767,20 @@ fn default_analysis_batch_candidates() -> u64 {
 /// - Returns a constant default value; no side effects.
 fn default_analysis_batch_batches() -> u64 {
     1
+}
+
+/// Default flag for ciphertext exponent modification in analysis batches.
+///
+/// # Parameters
+/// - None.
+///
+/// # Returns
+/// - `bool`: Default ciphertext modification setting.
+///
+/// # Expected Output
+/// - Returns a constant default value; no side effects.
+fn default_ciphertext_modify() -> bool {
+    false
 }
 
 /// Default oracle accuracy threshold for sufficiency tests.

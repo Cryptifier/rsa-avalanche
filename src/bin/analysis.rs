@@ -59,9 +59,13 @@ struct Args {
     #[arg(long, value_parser = clap::value_parser!(u64).range(1..))]
     batches: Option<u64>,
 
-    /// Number of r candidates per accuracy batch
+    /// Number of messages per accuracy batch
     #[arg(long = "batch-size", value_parser = clap::value_parser!(u64).range(1..))]
     batch_size: Option<u64>,
+
+    /// Raise ciphertext to a monotonically increasing exponent per batch
+    #[arg(long)]
+    ciphertext_modify: bool,
 }
 
 /// Entry point for the RSA round-trip demo CLI.
@@ -79,7 +83,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let mut config = load_config(&args.config)?;
     let mut batch_enable = config.engine.analysis_batch_enable;
     if let Some(batch_size) = args.batch_size {
-        config.engine.analysis_batch_candidates = batch_size;
+        config.engine.analysis_batch_messages = batch_size;
         batch_enable = true;
     }
     if let Some(batch_count) = args.batches {
@@ -87,6 +91,9 @@ fn main() -> Result<(), Box<dyn Error>> {
         batch_enable = true;
     }
     config.engine.analysis_batch_enable = batch_enable;
+    if args.ciphertext_modify {
+        config.engine.ciphertext_modify = true;
+    }
     let analytics = Arc::new(Mutex::new(SessionAnalytics::new(AnalyticsCliArgs {
         bits: args.bits,
         message_override: args.message.clone(),
@@ -98,6 +105,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         export: args.export,
         session_json: args.session_json.clone(),
         shift: args.shift,
+        ciphertext_modify: args.ciphertext_modify,
     })));
 
     let analytics_for_handler = Arc::clone(&analytics);

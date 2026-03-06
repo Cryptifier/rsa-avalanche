@@ -57,8 +57,10 @@
         "invert_bits" : false,
         "use_rs_decrypt" : true,
         "analysis_batch_enable" : true,
+        "analysis_batch_messages" : 50,
         "analysis_batch_candidates" : 50,
         "analysis_batch_batches" : 10,
+        "ciphertext_modify" : true,
         "enciphered_export_enable" : false,
         "message" : {
             "is_random" : true,
