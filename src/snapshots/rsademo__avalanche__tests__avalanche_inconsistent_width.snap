@@ -1,0 +1,6 @@
+---
+source: src/avalanche.rs
+assertion_line: 210
+expression: snapshot
+---
+error: avalanche bit widths are inconsistent

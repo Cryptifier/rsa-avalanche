@@ -1310,7 +1310,7 @@ class SessionViewer(QtWidgets.QMainWindow):
         self._tabs.addTab(self._build_candidates_tab(session), "Candidates")
         self._tabs.addTab(self._build_bit_similarity_tab(session), "Bit Similarity")
         self._tabs.addTab(self._build_bit_true_timeline_tab(session), "Bit True Timeline")
-        self._tabs.addTab(self._build_avg_tab(session), "Avg.")
+        self._tabs.addTab(self._build_avalanche_tab(session), "Avalanche")
         if self._tabs.count():
             self._tabs.setCurrentIndex(min(current_index, self._tabs.count() - 1))
         if self._current_session_path:
@@ -1449,8 +1449,59 @@ class SessionViewer(QtWidgets.QMainWindow):
 
         return BitTrueTimelineTab(timeline)
 
-    def _build_avg_tab(self, _session):
-        return AvgTab()
+    def _build_avalanche_tab(self, session):
+        feature = get_feature(session, "information_sufficiency")
+        avalanche = None
+        if feature:
+            stats = feature.get("stats", {})
+            avalanche = stats.get("avalanche_tree")
+
+        widget = QtWidgets.QWidget()
+        layout = QtWidgets.QVBoxLayout(widget)
+
+        if not avalanche:
+            layout.addWidget(
+                QtWidgets.QLabel(
+                    "Avalanche data not found. Run analysis with --tests to populate it."
+                )
+            )
+            return widget
+
+        biases = avalanche.get("biases") or []
+        message_bits = avalanche.get("message_bits") or []
+        bit_width = avalanche.get("bit_width", len(message_bits))
+        unique_messages = avalanche.get("unique_messages", 0)
+        ones_count = sum(1 for bit in message_bits if bit)
+
+        if biases:
+            bias_min = min(biases)
+            bias_max = max(biases)
+            bias_mean = sum(biases) / len(biases)
+        else:
+            bias_min = ""
+            bias_max = ""
+            bias_mean = ""
+
+        rows = [
+            ("Bit Width", str(bit_width)),
+            ("Unique Messages", str(unique_messages)),
+            ("Ones Count", str(ones_count)),
+            ("Bias Min", f"{bias_min:.4f}" if isinstance(bias_min, float) else ""),
+            ("Bias Mean", f"{bias_mean:.4f}" if isinstance(bias_mean, float) else ""),
+            ("Bias Max", f"{bias_max:.4f}" if isinstance(bias_max, float) else ""),
+        ]
+
+        table = QtWidgets.QTableWidget(len(rows), 2)
+        table.setHorizontalHeaderLabels(["Metric", "Value"])
+        table.verticalHeader().setVisible(False)
+        table.setEditTriggers(QtWidgets.QAbstractItemView.EditTrigger.NoEditTriggers)
+        for row_idx, (key, value) in enumerate(rows):
+            table.setItem(row_idx, 0, QtWidgets.QTableWidgetItem(key))
+            table.setItem(row_idx, 1, QtWidgets.QTableWidgetItem(value))
+        table.resizeColumnsToContents()
+        layout.addWidget(table)
+
+        return widget
 
     def _capture_bit_similarity_settings(self):
         for idx in range(self._tabs.count()):

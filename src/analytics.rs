@@ -33,6 +33,8 @@ pub struct AnalyticsCliArgs {
     pub shift: bool,
     /// Whether ciphertext exponent modification is enabled.
     pub ciphertext_modify: bool,
+    /// Whether avalanche candidates are sorted by Hamming distance.
+    pub use_hamming_distance: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -48,6 +50,7 @@ struct AnalyticsCliInfo {
     session_json: String,
     shift: bool,
     ciphertext_modify: bool,
+    use_hamming_distance: bool,
 }
 
 /// Timing entry for a named step.
@@ -245,6 +248,7 @@ impl SessionAnalytics {
                 session_json: args.session_json,
                 shift: args.shift,
                 ciphertext_modify: args.ciphertext_modify,
+                use_hamming_distance: args.use_hamming_distance,
             },
             steps: Vec::new(),
             step_summaries: Vec::new(),

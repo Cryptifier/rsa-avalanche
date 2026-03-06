@@ -1,0 +1,11 @@
+---
+source: src/avalanche.rs
+assertion_line: 202
+expression: snapshot
+---
+biases:
+  - 4
+  - 4
+message_bits:
+  - false
+  - false

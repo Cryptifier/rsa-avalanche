@@ -3,6 +3,7 @@
 /// Copyright (c) 2025 Nicholas LaRoche <nlaroche@cryptifier.dev>
 
 use std::{
+    collections::HashSet,
     error::Error,
     fs::{self, OpenOptions},
     io::Write,
@@ -43,6 +44,7 @@ use crate::analytics::{
     generate_r_candidates_with_analytics, RCandidateAccuracyBatch, RCandidateAccuracyEntry,
     RCandidateFactor, RCandidateTraceBatch, RCandidateTraceEntry, SessionAnalytics,
 };
+use crate::avalanche::{search_avalanche_tree, AvalancheNode};
 use crate::combiner::majority_vote_with_distribution;
 use crate::config::{Config, EngineConfig};
 use crate::dsp::{find_ramp_signals_f64, ramp_signal_strength_f64};
@@ -53,6 +55,7 @@ use crate::math::{
 };
 use crate::r_candidates::RCandidateSettings;
 use crate::rng::{RngChoice, RngMode};
+use crate::search::beam_search_top_k;
 
 /// Input arguments for the RSA demo and analysis pipeline.
 pub struct DemoArgs {
@@ -2036,6 +2039,264 @@ fn run_bitwise_speculative_oracle_attempt(
     })
 }
 
+/// Builds avalanche candidates from unique `(e * x)^{-1} mod phi(r)` decryptions.
+///
+/// # Parameters
+/// - `ctx`: RSA context containing key material.
+/// - `engine`: Engine configuration controlling HBC behavior.
+/// - `candidates`: Prepared r candidates to use as oracles.
+/// - `message`: Reference message used for bit width sizing.
+/// - `batch_size`: Number of ciphertext exponent variants in the batch.
+/// - `shift`: Whether to shift ciphertext by encrypted 2 before conversion.
+///
+/// # Returns
+/// - `Result<Vec<AvalancheNode>, Box<dyn Error>>`: Avalanche nodes for tree search.
+///
+/// # Expected Output
+/// - Returns candidate nodes; no stdout/stderr output.
+fn build_avalanche_nodes_unique_d(
+    ctx: &RSAContext,
+    engine: &EngineConfig,
+    candidates: &[OracleCandidate],
+    message: &BigUint,
+    batch_size: usize,
+    shift: bool,
+) -> Result<Vec<AvalancheNode>, Box<dyn Error>> {
+    if batch_size == 0 {
+        return Err("analysis batch size must be >= 1".into());
+    }
+    if candidates.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let bit_width = message.bits().max(1) as usize;
+    let y = engine.rabin_exponent as u32;
+    let n_pow_y = ctx.n.pow(y);
+    let e_big = ctx.e.clone();
+    let base_ciphertext = message.modpow(&ctx.e, &ctx.n);
+
+    let mut seen: Vec<HashSet<BigUint>> = vec![HashSet::new(); candidates.len()];
+    let mut nodes = Vec::new();
+    let target_bits = biguint_to_bits_le(message, bit_width);
+    let mut nodes_with_value: Vec<(BigUint, AvalancheNode)> = Vec::new();
+    let mut nodes_with_distance: Vec<(usize, BigUint, AvalancheNode)> = Vec::new();
+
+    for instance_idx in 0..batch_size {
+        let x_big = odd_ciphertext_exponent(&e_big, instance_idx, "analysis avalanche")?;
+        let ciphertext = base_ciphertext.modpow(&x_big, &ctx.n);
+        let shifted = maybe_shift_ciphertext(ctx, &ciphertext, shift);
+        let result_default = get_larger_number(&shifted, &ctx.n, y, true, false);
+        let e_x = &e_big * &x_big;
+
+        for (candidate_idx, candidate) in candidates.iter().enumerate() {
+            let Some(d_new) = mod_inverse(&e_x, &candidate.phi_new) else {
+                continue;
+            };
+            let seen_set = &mut seen[candidate_idx];
+            if !seen_set.insert(d_new.clone()) {
+                continue;
+            }
+            let dm = derive_candidate_message_from_result(
+                ctx,
+                engine,
+                &result_default,
+                &candidate.r,
+                &d_new,
+                &n_pow_y,
+                &candidate.r_pow_y,
+                y,
+                false,
+            );
+            let message_bits = biguint_to_bits_le(&dm, bit_width);
+            let node = AvalancheNode {
+                biases: vec![0.0; bit_width],
+                message_bits,
+            };
+            let message_value = bits_le_to_biguint(&node.message_bits);
+            if engine.use_hamming_distance {
+                let distance = node
+                    .message_bits
+                    .iter()
+                    .zip(target_bits.iter())
+                    .filter(|(cand, target)| cand != target)
+                    .count();
+                nodes_with_distance.push((distance, message_value, node));
+            } else {
+                nodes_with_value.push((message_value, node));
+            }
+        }
+    }
+
+    if engine.use_hamming_distance {
+        if !nodes_with_distance.is_empty() {
+            nodes_with_distance.sort_by(|a, b| {
+                a.0.cmp(&b.0)
+                    .then_with(|| a.1.cmp(&b.1))
+            });
+            nodes = nodes_with_distance
+                .into_iter()
+                .map(|(_, _, node)| node)
+                .collect();
+        }
+    } else if !nodes_with_value.is_empty() {
+        nodes_with_value.sort_by(|a, b| a.0.cmp(&b.0));
+        nodes = nodes_with_value
+            .into_iter()
+            .map(|(_, node)| node)
+            .collect();
+    }
+
+    Ok(nodes)
+}
+
+/// Normalizes avalanche biases into the [0.0, 1.0] range using max-abs scaling.
+///
+/// # Parameters
+/// - `biases`: Raw avalanche bias values.
+///
+/// # Returns
+/// - `Vec<f64>`: Normalized bias values.
+///
+/// # Expected Output
+/// - Returns normalized biases; no stdout/stderr output.
+fn normalize_avalanche_biases(biases: &[f64]) -> Vec<f64> {
+    let max_abs = biases
+        .iter()
+        .fold(0.0_f64, |acc, value| acc.max(value.abs()));
+    if max_abs == 0.0 {
+        return vec![0.0; biases.len()];
+    }
+    biases
+        .iter()
+        .map(|bias| (bias.abs() / max_abs).clamp(0.0, 1.0))
+        .collect()
+}
+
+/// Runs the avalanche tree search for unique `(e*x)^{-1} mod phi(r)` decryptions.
+///
+/// # Parameters
+/// - `ctx`: RSA context containing key material.
+/// - `engine`: Engine configuration controlling HBC behavior.
+/// - `candidates`: Prepared r candidates to use as oracles.
+/// - `message`: Reference message used for bit width sizing.
+/// - `batch_size`: Number of ciphertext exponent variants in the batch.
+/// - `shift`: Whether to shift ciphertext by encrypted 2 before conversion.
+/// - `analytics`: Session analytics accumulator for reporting.
+///
+/// # Returns
+/// - `Result<(), Box<dyn Error>>`: `Ok(())` when search runs or is skipped.
+///
+/// # Expected Output
+/// - Emits `dbg!` output for the avalanche result; no other stdout/stderr output.
+fn run_avalanche_search(
+    ctx: &RSAContext,
+    engine: &EngineConfig,
+    candidates: &[OracleCandidate],
+    message: &BigUint,
+    batch_size: usize,
+    shift: bool,
+    analytics: &Arc<Mutex<SessionAnalytics>>,
+) -> Result<(), Box<dyn Error>> {
+    let avalanche_nodes =
+        build_avalanche_nodes_unique_d(ctx, engine, candidates, message, batch_size, shift)?;
+    if avalanche_nodes.is_empty() {
+        with_analytics(analytics, |a| {
+            a.add_feature_note(
+                "information_sufficiency",
+                "avalanche tree skipped: no unique decryptions",
+            );
+        });
+        return Ok(());
+    }
+
+    let avalanche_count = avalanche_nodes.len();
+    let avalanche_result = search_avalanche_tree(avalanche_nodes)?;
+    // dbg!(&avalanche_result);
+    with_analytics(analytics, |a| {
+        a.set_feature_stat(
+            "information_sufficiency",
+            "avalanche_tree",
+            json!({
+                "bit_order": "lsb0",
+                "bit_width": avalanche_result.message_bits.len(),
+                "unique_messages": avalanche_count,
+                "biases": avalanche_result.biases,
+                "message_bits": avalanche_result.message_bits,
+            }),
+        );
+    });
+
+    let bit_width = avalanche_result.message_bits.len().max(1);
+    let normalized_biases = normalize_avalanche_biases(&avalanche_result.biases);
+    let beam_result = beam_search_top_k(
+        vec![Vec::new()],
+        5,
+        bit_width,
+        |candidate| {
+            if candidate.len() >= bit_width {
+                return Vec::new();
+            }
+            let mut zero = candidate.to_vec();
+            let mut one = candidate.to_vec();
+            zero.push(0.0);
+            one.push(1.0);
+            vec![zero, one]
+        },
+        |candidate| {
+            candidate
+                .iter()
+                .enumerate()
+                .map(|(idx, bit)| {
+                    let bias = normalized_biases
+                        .get(idx)
+                        .copied()
+                        .unwrap_or(0.0);
+                    if *bit >= 0.5 { bias } else { 1.0 - bias }
+                })
+                .sum()
+        },
+    )?;
+
+    let message_bits = biguint_to_bits_le(message, bit_width);
+    println!(
+        "Avalanche beam search top {} candidates (lsb0 order):",
+        beam_result.beam.len()
+    );
+    for (idx, candidate) in beam_result.beam.iter().enumerate() {
+        let candidate_bits: Vec<bool> =
+            candidate.vector.iter().map(|value| *value >= 0.5).collect();
+        let (_, matching_total) = count_matching_bits_le(&candidate_bits, &message_bits);
+        let match_pct = matching_total as f64 / bit_width as f64 * 100.0;
+        let candidate_ones = candidate_bits.iter().filter(|bit| **bit).count();
+        let matched_ones = candidate_bits
+            .iter()
+            .zip(message_bits.iter())
+            .filter(|(cand, msg)| **cand && **msg)
+            .count();
+        let ones_match_pct = if candidate_ones == 0 {
+            0.0
+        } else {
+            matched_ones as f64 / candidate_ones as f64 * 100.0
+        };
+        let mut candidate_hex = to_hex(&bits_le_to_biguint(&candidate_bits));
+        let hex_len = (bit_width + 3) / 4;
+        if candidate_hex.len() < hex_len {
+            let padding = "0".repeat(hex_len - candidate_hex.len());
+            candidate_hex = format!("{}{}", padding, candidate_hex);
+        }
+        println!(
+            "Beam {} score {:.4} match {:.2}% ones-match {:.2}% hex {}",
+            idx + 1,
+            candidate.score,
+            match_pct,
+            ones_match_pct,
+            candidate_hex
+        );
+    }
+
+    Ok(())
+}
+
 /// Computes per-bit best-case match percentages for a target message.
 ///
 /// # Parameters
@@ -2649,6 +2910,15 @@ fn run_information_sufficiency_tests(
         shift,
         true_match,
         selected_candidate,
+    )?;
+    run_avalanche_search(
+        ctx,
+        engine,
+        &candidates,
+        message,
+        batch_size,
+        shift,
+        analytics,
     )?;
     
     println!(
@@ -4497,6 +4767,7 @@ mod tests {
             session_json: "session.json".to_string(),
             shift: false,
             ciphertext_modify: false,
+            use_hamming_distance: false,
         })));
         let result = run_message_trial(
             &ctx,
@@ -4558,6 +4829,7 @@ mod tests {
             session_json: "session.json".to_string(),
             shift: false,
             ciphertext_modify: false,
+            use_hamming_distance: false,
         })));
         let result = run_message_trial(
             &ctx,

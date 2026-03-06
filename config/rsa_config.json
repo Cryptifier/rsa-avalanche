@@ -56,6 +56,7 @@
         "overlap_report_threshold" : 51,
         "entropy_report_threshold" : 0.99,
         "oracle_accuracy_threshold" : 51.0,
+        "use_hamming_distance" : false,
         "reuse_r_candidates" : true,
         "reuse_r_candidates_path" : "data/r_candidates.csv",
         "reuse_r_candidates_append_only" : false,
