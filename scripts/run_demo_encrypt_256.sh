@@ -63,7 +63,7 @@ for i in $(seq 1 "${RUNS}"); do
   encrypt_output="$(mktemp)"
   decrypt_output="$(mktemp)"
 
-  cargo run --bin demo -- --batch-size 2000 --batches 20 --config "${CONFIG}" --encrypt --plaintext-hex "0x${PLAINTEXT_HEX}" | tee "${encrypt_output}"
+  cargo run --bin demo -- --batch-size 2000 --batches 1 --config "${CONFIG}" --encrypt --plaintext-hex "0x${PLAINTEXT_HEX}" | tee "${encrypt_output}"
   ciphertext_hex=$(grep -m1 "Ciphertext (hex):" "${encrypt_output}" | awk '{print $3}')
   if [[ -z "${ciphertext_hex}" ]]; then
     echo "Failed to capture ciphertext from demo output." >&2
@@ -71,7 +71,7 @@ for i in $(seq 1 "${RUNS}"); do
     exit 1
   fi
 
-  cargo run --bin demo -- --config "${CONFIG}" --batches 20 --batch-size 1000 --decrypt --ciphertext "0x${ciphertext_hex}" | tee "${decrypt_output}"
+  cargo run --bin demo -- --config "${CONFIG}" --batches 1 --batch-size 1000 --decrypt --ciphertext "0x${ciphertext_hex}" | tee "${decrypt_output}"
   best_case_hex=$(grep -m1 "Recovered (best-case) hex:" "${decrypt_output}" | awk '{print $4}')
   majority_hex=$(grep -m1 "Recovered (majority) hex:" "${decrypt_output}" | awk '{print $4}')
 
