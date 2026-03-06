@@ -2077,6 +2077,7 @@ fn build_avalanche_nodes_unique_d(
 
     let mut seen: Vec<HashSet<BigUint>> = vec![HashSet::new(); candidates.len()];
     let mut nodes = Vec::new();
+    let mut nodes_with_value: Vec<(BigUint, AvalancheNode)> = Vec::new();
 
     for instance_idx in 0..batch_size {
         let x_big = odd_ciphertext_exponent(&e_big, instance_idx, "analysis avalanche")?;
@@ -2105,11 +2106,21 @@ fn build_avalanche_nodes_unique_d(
                 false,
             );
             let message_bits = biguint_to_bits_le(&dm, bit_width);
-            nodes.push(AvalancheNode {
+            let node = AvalancheNode {
                 biases: vec![0.0; bit_width],
                 message_bits,
-            });
+            };
+            let message_value = bits_le_to_biguint(&node.message_bits);
+            nodes_with_value.push((message_value, node));
         }
+    }
+
+    if !nodes_with_value.is_empty() {
+        nodes_with_value.sort_by(|a, b| a.0.cmp(&b.0));
+        nodes = nodes_with_value
+            .into_iter()
+            .map(|(_, node)| node)
+            .collect();
     }
 
     Ok(nodes)
