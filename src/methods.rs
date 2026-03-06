@@ -34,6 +34,7 @@ const BLUE: RGBColor = (30, 144, 255);
 const BLACK: RGBColor = (0, 0, 0);
 
 use num_bigint::BigUint;
+use num_integer::Integer;
 use num_traits::{One, Zero};
 use rand::RngCore;
 use serde::Serialize;
@@ -641,6 +642,38 @@ fn log_progress_every_ten_percent(done: u64, total: u64, next_pct: &mut u64, lab
             *next_pct = 100;
         }
     }
+}
+
+/// Computes an increasing odd exponent `x` per batch instance so that `e * x` remains odd.
+///
+/// # Parameters
+/// - `e`: RSA public exponent.
+/// - `instance_idx`: Zero-based batch instance index.
+/// - `context`: Label for error messages.
+///
+/// # Returns
+/// - `Result<BigUint, Box<dyn Error>>`: Odd exponent value for the instance.
+///
+/// # Expected Output
+/// - Returns the computed exponent; no side effects.
+fn odd_ciphertext_exponent(
+    e: &BigUint,
+    instance_idx: usize,
+    context: &str,
+) -> Result<BigUint, Box<dyn Error>> {
+    if e.is_even() {
+        return Err(format!(
+            "{context} requires an odd public exponent to keep e*x odd"
+        )
+        .into());
+    }
+    let idx = u64::try_from(instance_idx)
+        .map_err(|_| format!("{context} message index exceeds u64 range"))?;
+    let x_value = idx
+        .checked_mul(2)
+        .and_then(|value| value.checked_add(1))
+        .ok_or_else(|| format!("{context} message index exceeds u64 range"))?;
+    Ok(BigUint::from(x_value))
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -1804,13 +1837,7 @@ fn run_bitwise_speculative_oracle_attempt(
 
     let mut oracle_bits_by_instance = Vec::with_capacity(batch_size);
     for instance_idx in 0..batch_size {
-        let x_index = u64::try_from(instance_idx)
-            .map_err(|_| "analysis batch message index exceeds u64 range")?;
-        let x_value = x_index
-            .checked_mul(2)
-            .and_then(|value| value.checked_add(1))
-            .ok_or("analysis batch message index exceeds u64 range")?;
-        let x_big = BigUint::from(x_value);
+        let x_big = odd_ciphertext_exponent(&e_big, instance_idx, "analysis batch")?;
         let ciphertext = base_ciphertext.modpow(&x_big, &ctx.n);
         let shifted = maybe_shift_ciphertext(ctx, &ciphertext, shift);
         let result_default = get_larger_number(&shifted, &ctx.n, y, true, false);
@@ -4104,16 +4131,11 @@ fn run_r_candidate_accuracy_batches(
         let mut e_x_values = Vec::with_capacity(message_count);
 
         for msg_idx in 0..message_count {
-            let x_value = if engine.ciphertext_modify {
-                let idx = u64::try_from(msg_idx)
-                    .map_err(|_| "analysis_batch message index exceeds u64 range")?;
-                idx.checked_mul(2)
-                    .and_then(|value| value.checked_add(1))
-                    .ok_or("analysis_batch message index exceeds u64 range")?
+            let x_big = if engine.ciphertext_modify {
+                odd_ciphertext_exponent(&e_big, msg_idx, "analysis_batch")?
             } else {
-                1
+                BigUint::one()
             };
-            let x_big = BigUint::from(x_value);
             let ciphertext = if engine.ciphertext_modify {
                 base_ciphertext.modpow(&x_big, &ctx.n)
             } else {

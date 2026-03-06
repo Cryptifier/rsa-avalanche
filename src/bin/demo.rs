@@ -6,6 +6,7 @@ use std::{error::Error, sync::Arc};
 
 use clap::Parser;
 use num_bigint::BigUint;
+use num_integer::Integer;
 use num_traits::{One, Zero};
 use rayon::prelude::*;
 
@@ -219,6 +220,33 @@ fn resolve_demo_batch_size(engine: &EngineConfig, args: &Args) -> Result<usize, 
     };
 
     usize::try_from(size).map_err(|_| "demo batch size exceeds usize range".into())
+}
+
+/// Computes an increasing odd exponent `x` per batch instance so that `e * x` remains odd.
+///
+/// # Parameters
+/// - `e`: RSA public exponent.
+/// - `instance_idx`: Zero-based batch instance index.
+///
+/// # Returns
+/// - `Result<BigUint, Box<dyn Error>>`: Odd exponent value for the instance.
+///
+/// # Expected Output
+/// - Returns the computed exponent; no side effects.
+fn odd_ciphertext_exponent(
+    e: &BigUint,
+    instance_idx: usize,
+) -> Result<BigUint, Box<dyn Error>> {
+    if e.is_even() {
+        return Err("demo requires an odd public exponent to keep e*x odd".into());
+    }
+    let idx =
+        u64::try_from(instance_idx).map_err(|_| "demo batch message index exceeds u64 range")?;
+    let x_value = idx
+        .checked_mul(2)
+        .and_then(|value| value.checked_add(1))
+        .ok_or("demo batch message index exceeds u64 range")?;
+    Ok(BigUint::from(x_value))
 }
 
 /// Runs the speculative decryption pipeline using r candidates.
@@ -844,13 +872,7 @@ fn build_oracle_bits_by_instance(
 
     let mut oracle_bits_by_instance = Vec::with_capacity(batch_size);
     for instance_idx in 0..batch_size {
-        let x_index =
-            u64::try_from(instance_idx).map_err(|_| "demo batch message index exceeds u64 range")?;
-        let x_value = x_index
-            .checked_mul(2)
-            .and_then(|value| value.checked_add(1))
-            .ok_or("demo batch message index exceeds u64 range")?;
-        let x_big = BigUint::from(x_value);
+        let x_big = odd_ciphertext_exponent(&ctx.e, instance_idx)?;
         let ciphertext_x = ciphertext.modpow(&x_big, &ctx.n);
         let shifted = maybe_shift_ciphertext(ctx, &ciphertext_x, shift);
         let result_default = get_larger_number(&shifted, &ctx.n, y, true, false);
