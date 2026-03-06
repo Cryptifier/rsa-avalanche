@@ -2173,7 +2173,7 @@ fn run_avalanche_search(
 
     let avalanche_count = avalanche_nodes.len();
     let avalanche_result = search_avalanche_tree(avalanche_nodes)?;
-    dbg!(&avalanche_result);
+    // dbg!(&avalanche_result);
     with_analytics(analytics, |a| {
         a.set_feature_stat(
             "information_sufficiency",
