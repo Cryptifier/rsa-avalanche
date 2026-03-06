@@ -4006,7 +4006,7 @@ fn run_r_candidate_accuracy_batches(
     }
 
     let y = engine.rabin_exponent as u32;
-    let e_big = BigUint::from(ctx.e);
+    let e_big = ctx.e.clone();
     let mut prepared = Vec::with_capacity(candidates.len());
     for (r, factors) in candidates.drain(..) {
         let phi_new = compute_totient(&factors);
@@ -4096,7 +4096,7 @@ fn run_r_candidate_accuracy_batches(
                 let d_new = if engine.ciphertext_modify {
                     let e_x = e_x_values
                         .get(idx)
-                        .ok_or_else(|| "missing ciphertext exponent for message index".into())?;
+                        .ok_or_else(|| "missing ciphertext exponent for message index")?;
                     mod_inverse(e_x, &candidate.phi_new)
                 } else {
                     Some(candidate.d_new.clone())
