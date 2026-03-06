@@ -2114,6 +2114,63 @@ fn build_avalanche_nodes_unique_d(
     Ok(nodes)
 }
 
+/// Runs the avalanche tree search for unique `(e*x)^{-1} mod phi(r)` decryptions.
+///
+/// # Parameters
+/// - `ctx`: RSA context containing key material.
+/// - `engine`: Engine configuration controlling HBC behavior.
+/// - `candidates`: Prepared r candidates to use as oracles.
+/// - `message`: Reference message used for bit width sizing.
+/// - `batch_size`: Number of ciphertext exponent variants in the batch.
+/// - `shift`: Whether to shift ciphertext by encrypted 2 before conversion.
+/// - `analytics`: Session analytics accumulator for reporting.
+///
+/// # Returns
+/// - `Result<(), Box<dyn Error>>`: `Ok(())` when search runs or is skipped.
+///
+/// # Expected Output
+/// - Emits `dbg!` output for the avalanche result; no other stdout/stderr output.
+fn run_avalanche_search(
+    ctx: &RSAContext,
+    engine: &EngineConfig,
+    candidates: &[OracleCandidate],
+    message: &BigUint,
+    batch_size: usize,
+    shift: bool,
+    analytics: &Arc<Mutex<SessionAnalytics>>,
+) -> Result<(), Box<dyn Error>> {
+    let avalanche_nodes =
+        build_avalanche_nodes_unique_d(ctx, engine, candidates, message, batch_size, shift)?;
+    if avalanche_nodes.is_empty() {
+        with_analytics(analytics, |a| {
+            a.add_feature_note(
+                "information_sufficiency",
+                "avalanche tree skipped: no unique decryptions",
+            );
+        });
+        return Ok(());
+    }
+
+    let avalanche_count = avalanche_nodes.len();
+    let avalanche_result = search_avalanche_tree(avalanche_nodes)?;
+    dbg!(&avalanche_result);
+    with_analytics(analytics, |a| {
+        a.set_feature_stat(
+            "information_sufficiency",
+            "avalanche_tree",
+            json!({
+                "bit_order": "lsb0",
+                "bit_width": avalanche_result.message_bits.len(),
+                "unique_messages": avalanche_count,
+                "biases": avalanche_result.biases,
+                "message_bits": avalanche_result.message_bits,
+            }),
+        );
+    });
+
+    Ok(())
+}
+
 /// Computes per-bit best-case match percentages for a target message.
 ///
 /// # Parameters
@@ -2728,39 +2785,15 @@ fn run_information_sufficiency_tests(
         true_match,
         selected_candidate,
     )?;
-
-    let avalanche_nodes = build_avalanche_nodes_unique_d(
+    run_avalanche_search(
         ctx,
         engine,
         &candidates,
         message,
         batch_size,
         shift,
+        analytics,
     )?;
-    if avalanche_nodes.is_empty() {
-        with_analytics(analytics, |a| {
-            a.add_feature_note(
-                "information_sufficiency",
-                "avalanche tree skipped: no unique decryptions",
-            );
-        });
-    } else {
-        let avalanche_count = avalanche_nodes.len();
-        let avalanche_result = search_avalanche_tree(avalanche_nodes)?;
-        with_analytics(analytics, |a| {
-            a.set_feature_stat(
-                "information_sufficiency",
-                "avalanche_tree",
-                json!({
-                    "bit_order": "lsb0",
-                    "bit_width": avalanche_result.message_bits.len(),
-                    "unique_messages": avalanche_count,
-                    "biases": avalanche_result.biases,
-                    "message_bits": avalanche_result.message_bits,
-                }),
-            );
-        });
-    }
     
     println!(
         "Bitwise speculative oracle recovered (hex): {}",
