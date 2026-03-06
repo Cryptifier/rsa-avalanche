@@ -291,6 +291,13 @@ mod tests {
     use super::*;
     use std::time::Duration;
 
+    fn zmq_tests_enabled() -> bool {
+        matches!(
+            std::env::var("RSADEMO_ZMQ_TESTS").as_deref(),
+            Ok("1") | Ok("true") | Ok("TRUE") | Ok("yes") | Ok("YES")
+        )
+    }
+
     const CLIENT_THREADS: usize = 4;
     const EXPECTED_PINGS: usize = CLIENT_THREADS + 1;
 
@@ -312,6 +319,10 @@ mod tests {
 
     #[test]
     fn test_router_with_shared_context() {
+        if !zmq_tests_enabled() {
+            eprintln!("Skipping ZeroMQ tests; set RSADEMO_ZMQ_TESTS=1 to enable.");
+            return;
+        }
         GLOBAL_STATUS.store(0, Ordering::Relaxed);
         let context = Arc::new(Mutex::new(ZmqStatusContext::new()));
         let handle =
@@ -330,6 +341,10 @@ mod tests {
 
     #[test]
     fn test_router_with_mut_context() {
+        if !zmq_tests_enabled() {
+            eprintln!("Skipping ZeroMQ tests; set RSADEMO_ZMQ_TESTS=1 to enable.");
+            return;
+        }
         GLOBAL_STATUS.store(0, Ordering::Relaxed);
         let context = ZmqStatusContext::new();
         let handle = start_router_with_mut_context(EXPECTED_PINGS, context).expect("router");

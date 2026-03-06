@@ -6,7 +6,9 @@ use std::{error::Error, sync::Arc};
 
 use clap::Parser;
 use num_bigint::BigUint;
+use num_integer::Integer;
 use num_traits::{One, Zero};
+use rand::RngCore;
 use rayon::prelude::*;
 
 use rsademo::config::{load_config, Config, EngineConfig};
@@ -15,6 +17,8 @@ use rsademo::math::{
 };
 use rsademo::r_candidates::{generate_r_candidates_batch, RCandidateSettings};
 use rsademo::rng::{RngChoice, RngMode};
+
+const DEFAULT_DEMO_BATCH_SIZE: u64 = 1000;
 
 #[derive(Parser, Debug)]
 #[command(name = "demo", about = "Speculative RSA decrypt demo", author, version)]
@@ -42,6 +46,14 @@ struct Args {
     /// Multiply ciphertext by encrypted 2 before base conversion
     #[arg(long)]
     shift: bool,
+
+    /// Enable batched speculative decryption with ciphertext exponent variants
+    #[arg(long)]
+    batch: bool,
+
+    /// Number of ciphertext exponent variants to include in the batch
+    #[arg(long = "batch-size", value_parser = clap::value_parser!(u64).range(1..))]
+    batch_size: Option<u64>,
 }
 
 #[derive(Clone, Debug)]
@@ -54,6 +66,7 @@ struct DemoContext {
 struct OracleCandidate {
     r: BigUint,
     d_new: BigUint,
+    phi_new: BigUint,
     r_pow_y: BigUint,
 }
 
@@ -102,7 +115,14 @@ fn main() -> Result<(), Box<dyn Error>> {
     }
 
     let ciphertext = resolve_ciphertext(&args, &config)?;
-    let recovered = run_speculative_decrypt(&ctx, &config, &ciphertext, args.shift)?;
+    let batch_size = resolve_demo_batch_size(&config.engine, &args)?;
+    let recovered = run_speculative_decrypt(
+        &ctx,
+        &config,
+        &ciphertext,
+        args.shift,
+        batch_size,
+    )?;
     println!("Recovered (best-case) hex: {}", to_hex(&recovered.best_case));
     println!("Recovered (majority) hex: {}", to_hex(&recovered.majority));
 
@@ -175,6 +195,61 @@ fn resolve_ciphertext(args: &Args, config: &Config) -> Result<BigUint, Box<dyn E
     Err("ciphertext not provided; set --ciphertext or config.verify.ciphertext".into())
 }
 
+/// Resolves the demo batch size based on CLI arguments and config defaults.
+///
+/// # Parameters
+/// - `engine`: Engine configuration containing batch defaults.
+/// - `args`: Parsed CLI arguments.
+///
+/// # Returns
+/// - `Result<usize, Box<dyn Error>>`: Batch size to use for demo decryption.
+///
+/// # Expected Output
+/// - Returns the resolved batch size; no side effects.
+fn resolve_demo_batch_size(engine: &EngineConfig, args: &Args) -> Result<usize, Box<dyn Error>> {
+    let batch_enabled = engine.analysis_batch_enable || args.batch || args.batch_size.is_some();
+    let size = if batch_enabled {
+        if let Some(batch_size) = args.batch_size {
+            batch_size
+        } else if engine.analysis_batch_enable {
+            engine.analysis_batch_messages.max(1)
+        } else {
+            DEFAULT_DEMO_BATCH_SIZE
+        }
+    } else {
+        1
+    };
+
+    usize::try_from(size).map_err(|_| "demo batch size exceeds usize range".into())
+}
+
+/// Computes an increasing odd exponent `x` per batch instance so that `e * x` remains odd.
+///
+/// # Parameters
+/// - `e`: RSA public exponent.
+/// - `instance_idx`: Zero-based batch instance index.
+///
+/// # Returns
+/// - `Result<BigUint, Box<dyn Error>>`: Odd exponent value for the instance.
+///
+/// # Expected Output
+/// - Returns the computed exponent; no side effects.
+fn odd_ciphertext_exponent(
+    e: &BigUint,
+    instance_idx: usize,
+) -> Result<BigUint, Box<dyn Error>> {
+    if e.is_even() {
+        return Err("demo requires an odd public exponent to keep e*x odd".into());
+    }
+    let idx =
+        u64::try_from(instance_idx).map_err(|_| "demo batch message index exceeds u64 range")?;
+    let x_value = idx
+        .checked_mul(2)
+        .and_then(|value| value.checked_add(1))
+        .ok_or("demo batch message index exceeds u64 range")?;
+    Ok(BigUint::from(x_value))
+}
+
 /// Runs the speculative decryption pipeline using r candidates.
 ///
 /// # Parameters
@@ -182,6 +257,7 @@ fn resolve_ciphertext(args: &Args, config: &Config) -> Result<BigUint, Box<dyn E
 /// - `config`: Loaded configuration with engine settings.
 /// - `ciphertext`: Ciphertext to decrypt.
 /// - `shift`: Whether to shift ciphertext by encrypted 2 before conversion.
+/// - `batch_size`: Number of ciphertext exponent variants to include.
 ///
 /// # Returns
 /// - `Result<RecoveryResult, Box<dyn Error>>`: Best-case and majority results.
@@ -193,13 +269,14 @@ fn run_speculative_decrypt(
     config: &Config,
     ciphertext: &BigUint,
     shift: bool,
+    batch_size: usize,
 ) -> Result<RecoveryResult, Box<dyn Error>> {
     let engine = &config.engine;
     let mut rng = RngChoice::from_entropy(RngMode::Crypto)?;
 
     let settings = build_r_candidate_settings(engine);
-    let batch_size = engine.process_count.max(engine.process_min_count).max(1) as usize;
-    let candidates = generate_r_candidates_batch(&ctx.n, &settings, &mut rng, batch_size);
+    let candidate_batch_size = engine.process_count.max(engine.process_min_count).max(1) as usize;
+    let candidates = generate_r_candidates_batch(&ctx.n, &settings, &mut rng, candidate_batch_size);
     if candidates.is_empty() {
         return Err("no r candidates generated for demo".into());
     }
@@ -210,12 +287,23 @@ fn run_speculative_decrypt(
         let phi_new = compute_totient(&factors);
         if let Some(d_new) = mod_inverse(&ctx.e, &phi_new) {
             let r_pow_y = r.pow(y);
-            prepared.push(OracleCandidate { r, d_new, r_pow_y });
+            prepared.push(OracleCandidate {
+                r,
+                d_new,
+                phi_new,
+                r_pow_y,
+            });
         }
     }
 
     if prepared.is_empty() {
         return Err("no valid r candidates for demo".into());
+    }
+    if engine.same_r_batch && prepared.len() > 1 {
+        let idx = (rng.next_u64() as usize) % prepared.len();
+        let selected = prepared.swap_remove(idx);
+        prepared.clear();
+        prepared.push(selected);
     }
 
     let screen_iterations = engine.oracle_screen_iterations.max(1) as usize;
@@ -250,6 +338,7 @@ fn run_speculative_decrypt(
         ciphertext,
         shift,
         bit_width,
+        batch_size,
     )?;
     if let Some(stats) = compute_stats(&best_case_pct) {
         println!(
@@ -270,6 +359,7 @@ fn run_speculative_decrypt(
         ciphertext,
         shift,
         bit_width,
+        batch_size,
     )?;
 
     Ok(RecoveryResult {
@@ -745,6 +835,81 @@ fn screen_oracles_per_bit(
     Ok((per_bit_oracles, top_match_pct))
 }
 
+/// Builds oracle bit vectors for each batch instance using ciphertext exponent variants.
+///
+/// # Parameters
+/// - `ctx`: Demo context containing key material.
+/// - `engine`: Engine configuration controlling HBC behavior.
+/// - `candidates`: Prepared r candidates to use as oracles.
+/// - `per_bit_oracles`: Per-bit oracle selection ranked by screening.
+/// - `ciphertext`: Base ciphertext to exponentiate.
+/// - `batch_size`: Number of ciphertext exponent variants to include.
+/// - `shift`: Whether to shift ciphertext by encrypted 2 before conversion.
+/// - `bit_width`: Bit width for output vectors.
+///
+/// # Returns
+/// - `Result<Vec<Vec<Option<Vec<bool>>>>, Box<dyn Error>>`: Oracle bit vectors per batch instance.
+///
+/// # Expected Output
+/// - Returns oracle bit vectors; no side effects.
+fn build_oracle_bits_by_instance(
+    ctx: &DemoContext,
+    engine: &EngineConfig,
+    candidates: &[OracleCandidate],
+    per_bit_oracles: &[Vec<OracleBitSelection>],
+    ciphertext: &BigUint,
+    batch_size: usize,
+    shift: bool,
+    bit_width: usize,
+) -> Result<Vec<Vec<Option<Vec<bool>>>>, Box<dyn Error>> {
+    if batch_size == 0 {
+        return Err("demo batch size must be >= 1".into());
+    }
+
+    let y = engine.rabin_exponent as u32;
+    let n_pow_y = ctx.n.pow(y);
+    let e_big = ctx.e.clone();
+
+    let mut unique_oracle_indices = std::collections::HashSet::new();
+    for selections in per_bit_oracles {
+        for selection in selections {
+            unique_oracle_indices.insert(selection.oracle_idx);
+        }
+    }
+
+    let mut oracle_bits_by_instance = Vec::with_capacity(batch_size);
+    for instance_idx in 0..batch_size {
+        let x_big = odd_ciphertext_exponent(&ctx.e, instance_idx)?;
+        let ciphertext_x = ciphertext.modpow(&x_big, &ctx.n);
+        let shifted = maybe_shift_ciphertext(ctx, &ciphertext_x, shift);
+        let result_default = get_larger_number(&shifted, &ctx.n, y, true, false);
+
+        let mut oracle_bits: Vec<Option<Vec<bool>>> = vec![None; candidates.len()];
+        for oracle_idx in unique_oracle_indices.iter().copied() {
+            let candidate = &candidates[oracle_idx];
+            let e_x = &e_big * &x_big;
+            let Some(d_new) = mod_inverse(&e_x, &candidate.phi_new) else {
+                continue;
+            };
+            let dm = derive_candidate_message_from_result(
+                ctx,
+                engine,
+                &result_default,
+                &candidate.r,
+                &d_new,
+                &n_pow_y,
+                &candidate.r_pow_y,
+                y,
+                false,
+            );
+            oracle_bits[oracle_idx] = Some(biguint_to_bits_le(&dm, bit_width));
+        }
+        oracle_bits_by_instance.push(oracle_bits);
+    }
+
+    Ok(oracle_bits_by_instance)
+}
+
 /// Computes weighted best-case match percentages and best-case bits for a ciphertext.
 ///
 /// # Parameters
@@ -755,6 +920,8 @@ fn screen_oracles_per_bit(
 /// - `ciphertext`: Ciphertext to decrypt.
 /// - `shift`: Whether to shift ciphertext by encrypted 2 before conversion.
 /// - `bit_width`: Bit width for output vectors.
+/// - `batch_size`: Number of ciphertext exponent variants to include.
+/// - `batch_size`: Number of ciphertext exponent variants to include.
 ///
 /// # Returns
 /// - `Result<(Vec<f64>, Vec<bool>), Box<dyn Error>>`: Weighted match percentages and best-case bits.
@@ -769,39 +936,21 @@ fn compute_per_bit_best_case_match(
     ciphertext: &BigUint,
     shift: bool,
     bit_width: usize,
+    batch_size: usize,
 ) -> Result<(Vec<f64>, Vec<bool>), Box<dyn Error>> {
     if per_bit_oracles.is_empty() {
         return Err("per-bit oracle selection is empty".into());
     }
-
-    let y = engine.rabin_exponent as u32;
-    let n_pow_y = ctx.n.pow(y);
-    let shifted = maybe_shift_ciphertext(ctx, ciphertext, shift);
-    let result_default = get_larger_number(&shifted, &ctx.n, y, true, false);
-
-    let mut unique_oracle_indices = std::collections::HashSet::new();
-    for selections in per_bit_oracles {
-        for selection in selections {
-            unique_oracle_indices.insert(selection.oracle_idx);
-        }
-    }
-
-    let mut oracle_bits: Vec<Option<Vec<bool>>> = vec![None; candidates.len()];
-    for oracle_idx in unique_oracle_indices.iter().copied() {
-        let candidate = &candidates[oracle_idx];
-        let dm = derive_candidate_message_from_result(
-            ctx,
-            engine,
-            &result_default,
-            &candidate.r,
-            &candidate.d_new,
-            &n_pow_y,
-            &candidate.r_pow_y,
-            y,
-            false,
-        );
-        oracle_bits[oracle_idx] = Some(biguint_to_bits_le(&dm, bit_width));
-    }
+    let oracle_bits_by_instance = build_oracle_bits_by_instance(
+        ctx,
+        engine,
+        candidates,
+        per_bit_oracles,
+        ciphertext,
+        batch_size,
+        shift,
+        bit_width,
+    )?;
 
     let mut results = (0..bit_width)
         .into_par_iter()
@@ -811,15 +960,17 @@ fn compute_per_bit_best_case_match(
             let mut score_one = 0.0;
             let mut score_zero = 0.0;
             for selection in selections {
-                if let Some(bits) = oracle_bits
-                    .get(selection.oracle_idx)
-                    .and_then(|entry| entry.as_ref())
-                {
-                    let bit = if selection.invert { !bits[bit_idx] } else { bits[bit_idx] };
-                    if bit {
-                        score_one += selection.match_pct;
-                    } else {
-                        score_zero += selection.match_pct;
+                for oracle_bits in &oracle_bits_by_instance {
+                    if let Some(bits) = oracle_bits
+                        .get(selection.oracle_idx)
+                        .and_then(|entry| entry.as_ref())
+                    {
+                        let bit = if selection.invert { !bits[bit_idx] } else { bits[bit_idx] };
+                        if bit {
+                            score_one += selection.match_pct;
+                        } else {
+                            score_zero += selection.match_pct;
+                        }
                     }
                 }
             }
@@ -869,39 +1020,21 @@ fn recover_message_bits_majority(
     ciphertext: &BigUint,
     shift: bool,
     bit_width: usize,
+    batch_size: usize,
 ) -> Result<Vec<bool>, Box<dyn Error>> {
     if per_bit_oracles.is_empty() {
         return Err("per-bit oracle selection is empty".into());
     }
-
-    let y = engine.rabin_exponent as u32;
-    let n_pow_y = ctx.n.pow(y);
-    let shifted = maybe_shift_ciphertext(ctx, ciphertext, shift);
-    let result_default = get_larger_number(&shifted, &ctx.n, y, true, false);
-
-    let mut unique_oracle_indices = std::collections::HashSet::new();
-    for selections in per_bit_oracles {
-        for selection in selections {
-            unique_oracle_indices.insert(selection.oracle_idx);
-        }
-    }
-
-    let mut oracle_bits: Vec<Option<Vec<bool>>> = vec![None; candidates.len()];
-    for oracle_idx in unique_oracle_indices.iter().copied() {
-        let candidate = &candidates[oracle_idx];
-        let dm = derive_candidate_message_from_result(
-            ctx,
-            engine,
-            &result_default,
-            &candidate.r,
-            &candidate.d_new,
-            &n_pow_y,
-            &candidate.r_pow_y,
-            y,
-            false,
-        );
-        oracle_bits[oracle_idx] = Some(biguint_to_bits_le(&dm, bit_width));
-    }
+    let oracle_bits_by_instance = build_oracle_bits_by_instance(
+        ctx,
+        engine,
+        candidates,
+        per_bit_oracles,
+        ciphertext,
+        batch_size,
+        shift,
+        bit_width,
+    )?;
 
     let mut recovered = (0..bit_width)
         .into_par_iter()
@@ -911,15 +1044,17 @@ fn recover_message_bits_majority(
             let mut ones = 0usize;
             let mut zeros = 0usize;
             for selection in selections {
-                if let Some(bits) = oracle_bits
-                    .get(selection.oracle_idx)
-                    .and_then(|entry| entry.as_ref())
-                {
-                    let bit = if selection.invert { !bits[bit_idx] } else { bits[bit_idx] };
-                    if bit {
-                        ones += 1;
-                    } else {
-                        zeros += 1;
+                for oracle_bits in &oracle_bits_by_instance {
+                    if let Some(bits) = oracle_bits
+                        .get(selection.oracle_idx)
+                        .and_then(|entry| entry.as_ref())
+                    {
+                        let bit = if selection.invert { !bits[bit_idx] } else { bits[bit_idx] };
+                        if bit {
+                            ones += 1;
+                        } else {
+                            zeros += 1;
+                        }
                     }
                 }
             }

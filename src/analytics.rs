@@ -31,6 +31,8 @@ pub struct AnalyticsCliArgs {
     pub session_json: String,
     /// Whether ciphertext shifting is enabled.
     pub shift: bool,
+    /// Whether ciphertext exponent modification is enabled.
+    pub ciphertext_modify: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -45,6 +47,7 @@ struct AnalyticsCliInfo {
     export: bool,
     session_json: String,
     shift: bool,
+    ciphertext_modify: bool,
 }
 
 /// Timing entry for a named step.
@@ -241,6 +244,7 @@ impl SessionAnalytics {
                 export: args.export,
                 session_json: args.session_json,
                 shift: args.shift,
+                ciphertext_modify: args.ciphertext_modify,
             },
             steps: Vec::new(),
             step_summaries: Vec::new(),
