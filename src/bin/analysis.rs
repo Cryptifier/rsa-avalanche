@@ -54,6 +54,14 @@ struct Args {
     /// Multiply ciphertext by encrypted 2 before base conversion
     #[arg(long)]
     shift: bool,
+
+    /// Number of r-candidate accuracy batches to run
+    #[arg(long, value_parser = clap::value_parser!(u64).range(1..))]
+    batches: Option<u64>,
+
+    /// Number of r candidates per accuracy batch
+    #[arg(long = "batch-size", value_parser = clap::value_parser!(u64).range(1..))]
+    batch_size: Option<u64>,
 }
 
 /// Entry point for the RSA round-trip demo CLI.
@@ -68,7 +76,17 @@ struct Args {
 /// - Prints key generation, encryption/decryption, and analysis results; may write output files.
 fn main() -> Result<(), Box<dyn Error>> {
     let args = Args::parse();
-    let config = load_config(&args.config)?;
+    let mut config = load_config(&args.config)?;
+    let mut batch_enable = config.engine.analysis_batch_enable;
+    if let Some(batch_size) = args.batch_size {
+        config.engine.analysis_batch_candidates = batch_size;
+        batch_enable = true;
+    }
+    if let Some(batch_count) = args.batches {
+        config.engine.analysis_batch_batches = batch_count;
+        batch_enable = true;
+    }
+    config.engine.analysis_batch_enable = batch_enable;
     let analytics = Arc::new(Mutex::new(SessionAnalytics::new(AnalyticsCliArgs {
         bits: args.bits,
         message_override: args.message.clone(),

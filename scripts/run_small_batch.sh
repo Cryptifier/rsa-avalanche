@@ -8,6 +8,8 @@ ANALYSIS_LOG=${ANALYSIS_LOG:-"logs_current.log"}
 SCRIPT_LOG=${SCRIPT_LOG:-"logs_current_script.log"}
 RESUME=${RESUME:-0}
 ANALYSIS_EXTRA_ARGS=${ANALYSIS_EXTRA_ARGS:-}
+ANALYSIS_BATCHES=${ANALYSIS_BATCHES:-10}
+ANALYSIS_BATCH_SIZE=${ANALYSIS_BATCH_SIZE:-50}
 LOG_DIR=${LOG_DIR:-"logs"}
 RUN_TESTS=${RUN_TESTS:-0}
 RUN_PCA=${RUN_PCA:-0}
@@ -69,7 +71,8 @@ for i in $(seq 1 "${RUNS}"); do
   echo ""
   echo "===== RUN ${i} (seed ${seed}) ====="
   set +e
-  cargo run --bin analysis -- --bits 56 --seed "${seed}" -c "${CONFIG}" --tests --crypto-rng --session-json "${session_path}" "${TEST_ARGS[@]}" "${EXTRA_ARGS[@]}" \
+  cargo run --bin analysis -- --bits 56 --seed "${seed}" -c "${CONFIG}" --tests --crypto-rng --session-json "${session_path}" \
+    --batches "${ANALYSIS_BATCHES}" --batch-size "${ANALYSIS_BATCH_SIZE}" "${TEST_ARGS[@]}" "${EXTRA_ARGS[@]}" \
     2>&1 | tee -a "${ANALYSIS_LOG}" | tee "${run_output}" > /dev/null
   status=$?
   set -e

@@ -100,8 +100,6 @@ pub struct EngineConfig {
     pub analysis_shift_multiplications: usize,
     #[serde(default = "default_analysis_batch_enable")]
     pub analysis_batch_enable: bool,
-    #[serde(default = "default_analysis_batch_messages")]
-    pub analysis_batch_messages: u64,
     #[serde(default = "default_analysis_batch_candidates")]
     pub analysis_batch_candidates: u64,
     #[serde(default = "default_analysis_batch_batches")]
@@ -243,7 +241,6 @@ impl Default for EngineConfig {
             analysis_tests_stride: default_analysis_tests_stride(),
             analysis_shift_multiplications: default_analysis_shift_multiplications(),
             analysis_batch_enable: default_analysis_batch_enable(),
-            analysis_batch_messages: default_analysis_batch_messages(),
             analysis_batch_candidates: default_analysis_batch_candidates(),
             analysis_batch_batches: default_analysis_batch_batches(),
             oracle_accuracy_threshold: default_oracle_accuracy_threshold(),
@@ -722,20 +719,6 @@ fn default_analysis_shift_multiplications() -> usize {
 /// - Returns a constant default value; no side effects.
 fn default_analysis_batch_enable() -> bool {
     false
-}
-
-/// Default number of messages per r-candidate accuracy batch.
-///
-/// # Parameters
-/// - None.
-///
-/// # Returns
-/// - `u64`: Default message count per batch.
-///
-/// # Expected Output
-/// - Returns a constant default value; no side effects.
-fn default_analysis_batch_messages() -> u64 {
-    0
 }
 
 /// Default number of r candidates per accuracy batch.
