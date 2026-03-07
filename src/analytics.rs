@@ -35,6 +35,8 @@ pub struct AnalyticsCliArgs {
     pub ciphertext_modify: bool,
     /// Whether avalanche candidates are sorted by Hamming distance.
     pub use_hamming_distance: bool,
+    /// Expected bit width for decryptions.
+    pub bits_decrypt: Option<u32>,
 }
 
 #[derive(Debug, Serialize)]
@@ -51,6 +53,7 @@ struct AnalyticsCliInfo {
     shift: bool,
     ciphertext_modify: bool,
     use_hamming_distance: bool,
+    bits_decrypt: Option<u32>,
 }
 
 /// Timing entry for a named step.
@@ -249,6 +252,7 @@ impl SessionAnalytics {
                 shift: args.shift,
                 ciphertext_modify: args.ciphertext_modify,
                 use_hamming_distance: args.use_hamming_distance,
+                bits_decrypt: args.bits_decrypt,
             },
             steps: Vec::new(),
             step_summaries: Vec::new(),

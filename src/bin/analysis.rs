@@ -59,6 +59,10 @@ struct Args {
     #[arg(long = "true")]
     true_match: bool,
 
+    /// Expected bit width for decrypted values
+    #[arg(long = "bits-decrypt", value_parser = clap::value_parser!(u32).range(1..=8192))]
+    bits_decrypt: Option<u32>,
+
     /// Number of r-candidate accuracy batches to run
     #[arg(long, value_parser = clap::value_parser!(u64).range(1..))]
     batches: Option<u64>,
@@ -125,6 +129,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         shift: args.shift,
         ciphertext_modify: args.ciphertext_modify,
         use_hamming_distance: args.use_hamming_distance,
+        bits_decrypt: args.bits_decrypt,
     })));
 
     let analytics_for_handler = Arc::clone(&analytics);
@@ -149,6 +154,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         export: args.export,
         shift: args.shift,
         true_match: args.true_match,
+        bits_decrypt: args.bits_decrypt,
     };
 
     let result = run_demo(demo_args, config, &analytics);
