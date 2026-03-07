@@ -759,6 +759,16 @@ fn run_avalanche_beam_search(
         .count();
     let msb_zero_count = avalanche_nodes.len().saturating_sub(msb_one_count);
     let avalanche_result = search_avalanche_tree(avalanche_nodes)?;
+    let raw_bias_line = avalanche_result
+        .biases
+        .iter()
+        .map(|bias| format_beam_float(*bias, BEAM_SCORE_DECIMALS))
+        .collect::<Vec<_>>()
+        .join(" ");
+    println!(
+        "Avalanche beam raw biases (lsb0 order): {}",
+        raw_bias_line
+    );
     let normalized_biases = normalize_avalanche_biases(&avalanche_result.biases);
     let bias_line = normalized_biases
         .iter()
