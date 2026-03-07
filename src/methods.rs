@@ -55,7 +55,7 @@ use crate::math::{
 };
 use crate::r_candidates::RCandidateSettings;
 use crate::rng::{RngChoice, RngMode};
-use crate::search::beam_search_top_k;
+use crate::search::{beam_search_top_k, viterbi_decode};
 
 /// Input arguments for the RSA demo and analysis pipeline.
 pub struct DemoArgs {
@@ -68,6 +68,7 @@ pub struct DemoArgs {
     pub export: bool,
     pub shift: bool,
     pub true_match: bool,
+    pub bits_decrypt: Option<u32>,
 }
 
 /// Executes an analytics update inside a shared session lock.
@@ -88,6 +89,27 @@ where
     if let Ok(mut guard) = analytics.lock() {
         action(&mut guard);
     }
+}
+
+/// Resolves the bit width for decryptions that use ciphertext exponent variants.
+///
+/// # Parameters
+/// - `message`: Reference message used for sizing defaults.
+/// - `expected_bits`: Optional expected bit width override.
+///
+/// # Returns
+/// - `Result<usize, Box<dyn Error>>`: Bit width to use for decryption bit vectors.
+///
+/// # Expected Output
+/// - Returns the resolved bit width; no stdout/stderr output.
+fn resolve_decrypt_bit_width(
+    message: &BigUint,
+    expected_bits: Option<u32>,
+) -> Result<usize, Box<dyn Error>> {
+    if let Some(bits) = expected_bits {
+        return usize::try_from(bits).map_err(|_| "decrypt bit width exceeds usize range".into());
+    }
+    Ok(message.bits().max(1) as usize)
 }
 
 /// Runs the core RSA demo and analysis pipeline.
@@ -539,6 +561,7 @@ pub fn run_demo(
             analytics,
             args.shift,
             args.true_match,
+            args.bits_decrypt,
         ) {
             Ok(()) => {
                 with_analytics(analytics, |a| {
@@ -565,9 +588,14 @@ pub fn run_demo(
 
     if config.engine.analysis_batch_enable {
         let batch_start = Instant::now();
-        if let Err(err) =
-            run_r_candidate_accuracy_batches(&ctx, &config.engine, &mut rng, analytics, args.shift)
-        {
+        if let Err(err) = run_r_candidate_accuracy_batches(
+            &ctx,
+            &config.engine,
+            &mut rng,
+            analytics,
+            args.shift,
+            args.bits_decrypt,
+        ) {
             with_analytics(analytics, |a| {
                 a.add_feature_note("r_candidate_accuracy", &format!("failed: {}", err));
                 a.record_feature_duration("r_candidate_accuracy", batch_start.elapsed());
@@ -1885,6 +1913,7 @@ fn screen_oracles_per_bit(
 /// - `message`: Reference message to compare against.
 /// - `batch_size`: Number of ciphertext exponent variants in the batch.
 /// - `shift`: Whether to shift ciphertext by encrypted 2 before conversion.
+/// - `bits_decrypt`: Optional expected bit width override.
 ///
 /// # Returns
 /// - `Result<SpeculativeOracleReport, Box<dyn Error>>`: Reconstruction report or an error.
@@ -1901,6 +1930,7 @@ fn run_bitwise_speculative_oracle_attempt(
     shift: bool,
     true_match: bool,
     selected_candidate: Option<usize>,
+    bits_decrypt: Option<u32>,
 ) -> Result<SpeculativeOracleReport, Box<dyn Error>> {
     if per_bit_oracles.is_empty() {
         return Err("per-bit oracle selection is empty".into());
@@ -1908,7 +1938,7 @@ fn run_bitwise_speculative_oracle_attempt(
     if batch_size == 0 {
         return Err("analysis batch size must be >= 1".into());
     }
-    let bit_width = message.bits().max(1) as usize;
+    let bit_width = resolve_decrypt_bit_width(message, bits_decrypt)?;
     let selected_candidate = selected_candidate.filter(|&idx| idx < candidates.len());
     let oracles_per_bit = if selected_candidate.is_some() {
         1
@@ -2048,6 +2078,7 @@ fn run_bitwise_speculative_oracle_attempt(
 /// - `message`: Reference message used for bit width sizing.
 /// - `batch_size`: Number of ciphertext exponent variants in the batch.
 /// - `shift`: Whether to shift ciphertext by encrypted 2 before conversion.
+/// - `bits_decrypt`: Optional expected bit width override.
 ///
 /// # Returns
 /// - `Result<Vec<AvalancheNode>, Box<dyn Error>>`: Avalanche nodes for tree search.
@@ -2061,6 +2092,7 @@ fn build_avalanche_nodes_unique_d(
     message: &BigUint,
     batch_size: usize,
     shift: bool,
+    bits_decrypt: Option<u32>,
 ) -> Result<Vec<AvalancheNode>, Box<dyn Error>> {
     if batch_size == 0 {
         return Err("analysis batch size must be >= 1".into());
@@ -2069,7 +2101,7 @@ fn build_avalanche_nodes_unique_d(
         return Ok(Vec::new());
     }
 
-    let bit_width = message.bits().max(1) as usize;
+    let bit_width = resolve_decrypt_bit_width(message, bits_decrypt)?;
     let y = engine.rabin_exponent as u32;
     let n_pow_y = ctx.n.pow(y);
     let e_big = ctx.e.clone();
@@ -2212,6 +2244,7 @@ fn format_beam_float(value: f64, precision: usize) -> String {
 /// - `batch_size`: Number of ciphertext exponent variants in the batch.
 /// - `shift`: Whether to shift ciphertext by encrypted 2 before conversion.
 /// - `analytics`: Session analytics accumulator for reporting.
+/// - `bits_decrypt`: Optional expected bit width override.
 ///
 /// # Returns
 /// - `Result<(), Box<dyn Error>>`: `Ok(())` when search runs or is skipped.
@@ -2226,9 +2259,18 @@ fn run_avalanche_search(
     batch_size: usize,
     shift: bool,
     analytics: &Arc<Mutex<SessionAnalytics>>,
+    bits_decrypt: Option<u32>,
 ) -> Result<(), Box<dyn Error>> {
     let avalanche_nodes =
-        build_avalanche_nodes_unique_d(ctx, engine, candidates, message, batch_size, shift)?;
+        build_avalanche_nodes_unique_d(
+            ctx,
+            engine,
+            candidates,
+            message,
+            batch_size,
+            shift,
+            bits_decrypt,
+        )?;
     if avalanche_nodes.is_empty() {
         with_analytics(analytics, |a| {
             a.add_feature_note(
@@ -2243,6 +2285,11 @@ fn run_avalanche_search(
         "Avalanche tree instances: {}",
         avalanche_nodes.len()
     );
+    let msb_one_count = avalanche_nodes
+        .iter()
+        .filter(|node| node.message_bits.last().copied().unwrap_or(false))
+        .count();
+    let msb_zero_count = avalanche_nodes.len().saturating_sub(msb_one_count);
     let avalanche_count = avalanche_nodes.len();
     let avalanche_result = search_avalanche_tree(avalanche_nodes)?;
     // dbg!(&avalanche_result);
@@ -2261,7 +2308,40 @@ fn run_avalanche_search(
     });
 
     let bit_width = avalanche_result.message_bits.len().max(1);
+    let raw_bias_line = avalanche_result
+        .biases
+        .iter()
+        .map(|bias| format_beam_float(*bias, BEAM_SCORE_DECIMALS))
+        .collect::<Vec<_>>()
+        .join(" ");
+    println!(
+        "Avalanche beam raw biases (lsb0 order): {}",
+        raw_bias_line
+    );
     let normalized_biases = normalize_avalanche_biases(&avalanche_result.biases);
+    let bias_line = normalized_biases
+        .iter()
+        .map(|bias| format_beam_float(*bias, BEAM_SCORE_DECIMALS))
+        .collect::<Vec<_>>()
+        .join(" ");
+    println!(
+        "Avalanche beam search probabilities (lsb0 order): {}",
+        bias_line
+    );
+    println!(
+        "Avalanche beam bias diagnostics: raw_len {} bit_width {} raw_last {}",
+        avalanche_result.biases.len(),
+        bit_width,
+        avalanche_result
+            .biases
+            .last()
+            .copied()
+            .unwrap_or(0.0)
+    );
+    println!(
+        "Avalanche beam MSB count: ones {} zeros {}",
+        msb_one_count, msb_zero_count
+    );
     let beam_result = beam_search_top_k(
         vec![Vec::new()],
         5,
@@ -2340,6 +2420,55 @@ fn run_avalanche_search(
         println!("Avalanche beam top MSB: {}", if msb { 1 } else { 0 });
     }
 
+    let viterbi_bits = {
+        let observations: Vec<usize> = (0..bit_width).collect();
+        let start_log_probs = vec![0.5f64.ln(), 0.5f64.ln()];
+        let transition_log_probs = vec![
+            vec![0.5f64.ln(), 0.5f64.ln()],
+            vec![0.5f64.ln(), 0.5f64.ln()],
+        ];
+        let emission_zero: Vec<f64> = normalized_biases
+            .iter()
+            .map(|bias| {
+                let p = bias.clamp(1e-12, 1.0 - 1e-12);
+                (1.0 - p).ln()
+            })
+            .collect();
+        let emission_one: Vec<f64> = normalized_biases
+            .iter()
+            .map(|bias| {
+                let p = bias.clamp(1e-12, 1.0 - 1e-12);
+                p.ln()
+            })
+            .collect();
+        let emission_log_probs = vec![emission_zero, emission_one];
+        let result = viterbi_decode(
+            &observations,
+            &start_log_probs,
+            &transition_log_probs,
+            &emission_log_probs,
+        )?;
+        let bits: Vec<bool> = result.path.iter().map(|state| *state == 1).collect();
+        (bits, result.log_prob)
+    };
+
+    let mut viterbi_hex = to_hex(&bits_le_to_biguint(&viterbi_bits.0));
+    let hex_len = (bit_width + 3) / 4;
+    if viterbi_hex.len() < hex_len {
+        let padding = "0".repeat(hex_len - viterbi_hex.len());
+        viterbi_hex = format!("{}{}", padding, viterbi_hex);
+    }
+    println!(
+        "Avalanche viterbi decode (lsb0 order): log_prob {} hex {}",
+        format_beam_float(viterbi_bits.1, BEAM_SCORE_DECIMALS),
+        viterbi_hex
+    );
+    let viterbi_msb = viterbi_bits.0.last().copied().unwrap_or(false);
+    println!(
+        "Avalanche viterbi MSB: {}",
+        if viterbi_msb { 1 } else { 0 }
+    );
+
     Ok(())
 }
 
@@ -2352,6 +2481,7 @@ fn run_avalanche_search(
 /// - `per_bit_oracles`: Per-bit oracle selection ranked by screening.
 /// - `message`: Reference message to compare against.
 /// - `shift`: Whether to shift ciphertext by encrypted 2 before conversion.
+/// - `bits_decrypt`: Optional expected bit width override.
 ///
 /// # Returns
 /// - `Result<(Vec<f64>, Vec<bool>), Box<dyn Error>>`: Per-bit match percentages and best-case bits.
@@ -2365,12 +2495,13 @@ fn compute_per_bit_best_case_match(
     per_bit_oracles: &[Vec<OracleBitSelection>],
     message: &BigUint,
     shift: bool,
+    bits_decrypt: Option<u32>,
 ) -> Result<(Vec<f64>, Vec<bool>), Box<dyn Error>> {
     if per_bit_oracles.is_empty() {
         return Err("per-bit oracle selection is empty".into());
     }
 
-    let bit_width = message.bits().max(1) as usize;
+    let bit_width = resolve_decrypt_bit_width(message, bits_decrypt)?;
     let y = engine.rabin_exponent as u32;
     let n_pow_y = ctx.n.pow(y);
     let base_ciphertext = message.modpow(&ctx.e, &ctx.n);
@@ -2627,6 +2758,7 @@ fn plot_timeline_series(
 /// - `analytics`: Session analytics accumulator for timing and candidate metadata.
 /// - `shift`: Whether to shift ciphertext by encrypted 2 before conversion.
 /// - `true_match`: Whether to report the true match percentage without inversion.
+/// - `bits_decrypt`: Optional expected bit width override.
 ///
 /// # Returns
 /// - `Result<(), Box<dyn Error>>`: `Ok(())` if sufficient, otherwise an error.
@@ -2642,6 +2774,7 @@ fn run_information_sufficiency_tests(
     analytics: &Arc<Mutex<SessionAnalytics>>,
     shift: bool,
     true_match: bool,
+    bits_decrypt: Option<u32>,
 ) -> Result<(), Box<dyn Error>> {
     let engine = &config.engine;
     let iterations = engine.analysis_tests_iterations as usize;
@@ -2899,6 +3032,7 @@ fn run_information_sufficiency_tests(
         &per_bit_oracles,
         message,
         shift,
+        bits_decrypt,
     )?;
     if let Some(stats) = compute_stats(&per_bit_best_pct) {
         println!(
@@ -2956,6 +3090,7 @@ fn run_information_sufficiency_tests(
         shift,
         true_match,
         selected_candidate,
+        bits_decrypt,
     )?;
     run_avalanche_search(
         ctx,
@@ -2965,6 +3100,7 @@ fn run_information_sufficiency_tests(
         batch_size,
         shift,
         analytics,
+        bits_decrypt,
     )?;
     
     println!(
@@ -4502,6 +4638,7 @@ struct BeamCandidateBits {
 /// - `message`: Reference message used for bit width sizing.
 /// - `batch_size`: Number of ciphertext exponent variants to include.
 /// - `shift`: Whether to shift ciphertext by encrypted 2 before conversion.
+/// - `bits_decrypt`: Optional expected bit width override.
 ///
 /// # Returns
 /// - `Result<Option<BeamCandidateBits>, Box<dyn Error>>`: Best candidate or `None` if unavailable.
@@ -4515,9 +4652,18 @@ fn beam_max_candidate_from_avalanche(
     message: &BigUint,
     batch_size: usize,
     shift: bool,
+    bits_decrypt: Option<u32>,
 ) -> Result<Option<BeamCandidateBits>, Box<dyn Error>> {
     let avalanche_nodes =
-        build_avalanche_nodes_unique_d(ctx, engine, candidates, message, batch_size, shift)?;
+        build_avalanche_nodes_unique_d(
+            ctx,
+            engine,
+            candidates,
+            message,
+            batch_size,
+            shift,
+            bits_decrypt,
+        )?;
     if avalanche_nodes.is_empty() {
         return Ok(None);
     }
@@ -4571,6 +4717,7 @@ fn beam_max_candidate_from_avalanche(
 /// - `rng`: Random number generator for candidate and message sampling.
 /// - `analytics`: Session analytics accumulator receiving batch data.
 /// - `shift`: Whether to shift ciphertext by encrypted 2 before conversion.
+/// - `bits_decrypt`: Optional expected bit width override.
 ///
 /// # Returns
 /// - `Result<(), Box<dyn Error>>`: `Ok(())` on success or an error on invalid configuration.
@@ -4583,6 +4730,7 @@ fn run_r_candidate_accuracy_batches(
     rng: &mut RngChoice,
     analytics: &Arc<Mutex<SessionAnalytics>>,
     shift: bool,
+    bits_decrypt: Option<u32>,
 ) -> Result<(), Box<dyn Error>> {
     if !engine.analysis_batch_enable {
         return Ok(());
@@ -4778,6 +4926,7 @@ fn run_r_candidate_accuracy_batches(
             &message,
             message_count,
             shift,
+            bits_decrypt,
         )? {
             let replace = match beam_max {
                 Some(ref current) => candidate.score > current.score,
@@ -4983,6 +5132,7 @@ mod tests {
             shift: false,
             ciphertext_modify: false,
             use_hamming_distance: false,
+            bits_decrypt: None,
         })));
         let result = run_message_trial(
             &ctx,
@@ -5045,6 +5195,7 @@ mod tests {
             shift: false,
             ciphertext_modify: false,
             use_hamming_distance: false,
+            bits_decrypt: None,
         })));
         let result = run_message_trial(
             &ctx,
