@@ -2,7 +2,14 @@
 /// SPDX-License-Identifier: EPL-2.0
 /// Copyright (c) 2025 Nicholas LaRoche <nlaroche@cryptifier.dev>
 
-use std::{collections::HashSet, error::Error, sync::Arc};
+use std::{
+    collections::HashSet,
+    error::Error,
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Arc,
+    },
+};
 
 use clap::Parser;
 use num_bigint::BigUint;
@@ -1175,23 +1182,50 @@ fn screen_oracles_per_bit(
         message_bits: Vec<bool>,
     }
 
-    let mut samples: Vec<ScreeningSample> = Vec::with_capacity(iterations);
-    let mut next_pct = 10u64;
-    for idx in 0..iterations {
-        let msg = random_message_under_n(engine, &ctx.n, rng);
-        let ciphertext = msg.modpow(&ctx.e, &ctx.n);
-        let message_bits = biguint_to_bits_le(&msg, bit_width);
-        let shifted = maybe_shift_ciphertext(ctx, &ciphertext, shift);
-        let result_default = get_larger_number(&shifted, &ctx.n, y, true, false);
-        samples.push(ScreeningSample { result_default, message_bits });
+    let seeds: Vec<u64> = (0..iterations).map(|_| rng.next_u64()).collect();
+    let done = Arc::new(AtomicU64::new(0));
+    let next_pct = Arc::new(AtomicU64::new(10));
+    let iterations_u64 = iterations as u64;
+    let samples: Vec<ScreeningSample> = seeds
+        .into_par_iter()
+        .map(|seed| {
+            let mut local_rng = RngChoice::from_seed(rng.mode(), seed);
+            let msg = random_message_under_n(engine, &ctx.n, &mut local_rng);
+            let ciphertext = msg.modpow(&ctx.e, &ctx.n);
+            let message_bits = biguint_to_bits_le(&msg, bit_width);
+            let shifted = maybe_shift_ciphertext(ctx, &ciphertext, shift);
+            let result_default = get_larger_number(&shifted, &ctx.n, y, true, false);
 
-        log_progress_every_ten_percent(
-            (idx + 1) as u64,
-            iterations as u64,
-            &mut next_pct,
-            "Oracle screening",
-        );
-    }
+            let finished = done.fetch_add(1, Ordering::Relaxed) + 1;
+            let pct = finished.saturating_mul(100) / iterations_u64;
+            let mut current_next = next_pct.load(Ordering::Relaxed);
+            while pct >= current_next && current_next <= 100 {
+                let new_next = current_next.saturating_add(10);
+                match next_pct.compare_exchange(
+                    current_next,
+                    new_next,
+                    Ordering::Relaxed,
+                    Ordering::Relaxed,
+                ) {
+                    Ok(_) => {
+                        let display_pct = if finished == iterations_u64 {
+                            100
+                        } else {
+                            ((pct / 10) * 10).min(100)
+                        };
+                        println!(
+                            "Oracle screening progress: {}% ({}/{})",
+                            display_pct, finished, iterations_u64
+                        );
+                        current_next = new_next;
+                    }
+                    Err(actual) => current_next = actual,
+                }
+            }
+
+            ScreeningSample { result_default, message_bits }
+        })
+        .collect();
 
     let samples = Arc::new(samples);
     let counts: Vec<Vec<u32>> = candidates
@@ -1312,36 +1346,42 @@ fn build_oracle_bits_by_instance(
             unique_oracle_indices.insert(selection.oracle_idx);
         }
     }
+    let mut oracle_index_list: Vec<usize> = unique_oracle_indices.into_iter().collect();
+    oracle_index_list.sort_unstable();
 
-    let mut oracle_bits_by_instance = Vec::with_capacity(batch_size);
-    for instance_idx in 0..batch_size {
-        let x_big = odd_ciphertext_exponent(&ctx.e, instance_idx)?;
-        let ciphertext_x = ciphertext.modpow(&x_big, &ctx.n);
-        let shifted = maybe_shift_ciphertext(ctx, &ciphertext_x, shift);
-        let result_default = get_larger_number(&shifted, &ctx.n, y, true, false);
+    let oracle_bits_by_instance: Vec<Vec<Option<Vec<bool>>>> = (0..batch_size)
+        .into_par_iter()
+        .map(|instance_idx| {
+            let x_big =
+                odd_ciphertext_exponent(&ctx.e, instance_idx).map_err(|err| err.to_string())?;
+            let ciphertext_x = ciphertext.modpow(&x_big, &ctx.n);
+            let shifted = maybe_shift_ciphertext(ctx, &ciphertext_x, shift);
+            let result_default = get_larger_number(&shifted, &ctx.n, y, true, false);
 
-        let mut oracle_bits: Vec<Option<Vec<bool>>> = vec![None; candidates.len()];
-        for oracle_idx in unique_oracle_indices.iter().copied() {
-            let candidate = &candidates[oracle_idx];
-            let e_x = &e_big * &x_big;
-            let Some(d_new) = mod_inverse(&e_x, &candidate.phi_new) else {
-                continue;
-            };
-            let dm = derive_candidate_message_from_result(
-                ctx,
-                engine,
-                &result_default,
-                &candidate.r,
-                &d_new,
-                &n_pow_y,
-                &candidate.r_pow_y,
-                y,
-                false,
-            );
-            oracle_bits[oracle_idx] = Some(biguint_to_bits_le(&dm, bit_width));
-        }
-        oracle_bits_by_instance.push(oracle_bits);
-    }
+            let mut oracle_bits: Vec<Option<Vec<bool>>> = vec![None; candidates.len()];
+            for oracle_idx in oracle_index_list.iter().copied() {
+                let candidate = &candidates[oracle_idx];
+                let e_x = &e_big * &x_big;
+                let Some(d_new) = mod_inverse(&e_x, &candidate.phi_new) else {
+                    continue;
+                };
+                let dm = derive_candidate_message_from_result(
+                    ctx,
+                    engine,
+                    &result_default,
+                    &candidate.r,
+                    &d_new,
+                    &n_pow_y,
+                    &candidate.r_pow_y,
+                    y,
+                    false,
+                );
+                oracle_bits[oracle_idx] = Some(biguint_to_bits_le(&dm, bit_width));
+            }
+            Ok::<_, String>(oracle_bits)
+        })
+        .collect::<Result<_, _>>()
+        .map_err(|err| -> Box<dyn Error> { err.into() })?;
 
     Ok(oracle_bits_by_instance)
 }
@@ -1510,38 +1550,6 @@ fn recover_message_bits_majority(
     }
 
     Ok(recovered_bits)
-}
-
-/// Logs progress updates at 10% increments.
-///
-/// # Parameters
-/// - `done`: Number of completed items.
-/// - `total`: Total number of items.
-/// - `next_pct`: Mutable threshold for the next log event.
-/// - `label`: Human-readable label for the progress report.
-///
-/// # Returns
-/// - `()`: This function returns nothing.
-///
-/// # Expected Output
-/// - Prints progress updates to stdout when thresholds are reached.
-fn log_progress_every_ten_percent(done: u64, total: u64, next_pct: &mut u64, label: &str) {
-    if total == 0 {
-        return;
-    }
-
-    let pct = done.saturating_mul(100) / total;
-    if pct >= *next_pct || done == total {
-        let display_pct = if done == total { 100 } else { ((pct / 10) * 10).min(100) };
-        println!("{label} progress: {}% ({}/{})", display_pct, done, total);
-
-        while *next_pct <= pct && *next_pct < 100 {
-            *next_pct += 10;
-        }
-        if done == total {
-            *next_pct = 100;
-        }
-    }
 }
 
 /// Parses a big integer argument in decimal or hex form.
