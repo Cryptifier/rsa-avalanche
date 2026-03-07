@@ -25,7 +25,7 @@ use rsademo::math::{
 use rsademo::r_candidates::{generate_r_candidates_batch, RCandidateSettings};
 use rsademo::rng::{RngChoice, RngMode};
 use rsademo::avalanche::{search_avalanche_tree, AvalancheNode};
-use rsademo::search::beam_search_top_k;
+use rsademo::search::{beam_search_top_k, viterbi_decode};
 
 const DEFAULT_DEMO_BATCH_SIZE: u64 = 1000;
 
@@ -722,6 +722,15 @@ fn run_avalanche_beam_search(
     );
     let avalanche_result = search_avalanche_tree(avalanche_nodes)?;
     let normalized_biases = normalize_avalanche_biases(&avalanche_result.biases);
+    let bias_line = normalized_biases
+        .iter()
+        .map(|bias| format_beam_float(*bias, BEAM_SCORE_DECIMALS))
+        .collect::<Vec<_>>()
+        .join(" ");
+    println!(
+        "Avalanche beam search probabilities (lsb0 order): {}",
+        bias_line
+    );
     let beam_result = beam_search_top_k(
         vec![Vec::new()],
         5,
@@ -783,6 +792,55 @@ fn run_avalanche_beam_search(
         let msb = top_bits.last().copied().unwrap_or(false);
         println!("Avalanche beam top MSB: {}", if msb { 1 } else { 0 });
     }
+
+    let viterbi_bits = {
+        let observations: Vec<usize> = (0..bit_width).collect();
+        let start_log_probs = vec![0.5f64.ln(), 0.5f64.ln()];
+        let transition_log_probs = vec![
+            vec![0.5f64.ln(), 0.5f64.ln()],
+            vec![0.5f64.ln(), 0.5f64.ln()],
+        ];
+        let emission_zero: Vec<f64> = normalized_biases
+            .iter()
+            .map(|bias| {
+                let p = bias.clamp(1e-12, 1.0 - 1e-12);
+                (1.0 - p).ln()
+            })
+            .collect();
+        let emission_one: Vec<f64> = normalized_biases
+            .iter()
+            .map(|bias| {
+                let p = bias.clamp(1e-12, 1.0 - 1e-12);
+                p.ln()
+            })
+            .collect();
+        let emission_log_probs = vec![emission_zero, emission_one];
+        let result = viterbi_decode(
+            &observations,
+            &start_log_probs,
+            &transition_log_probs,
+            &emission_log_probs,
+        )?;
+        let bits: Vec<bool> = result.path.iter().map(|state| *state == 1).collect();
+        (bits, result.log_prob)
+    };
+
+    let mut viterbi_hex = to_hex(&bits_le_to_biguint(&viterbi_bits.0));
+    let hex_len = (bit_width + 3) / 4;
+    if viterbi_hex.len() < hex_len {
+        let padding = "0".repeat(hex_len - viterbi_hex.len());
+        viterbi_hex = format!("{}{}", padding, viterbi_hex);
+    }
+    println!(
+        "Avalanche viterbi decode (lsb0 order): log_prob {} hex {}",
+        format_beam_float(viterbi_bits.1, BEAM_SCORE_DECIMALS),
+        viterbi_hex
+    );
+    let viterbi_msb = viterbi_bits.0.last().copied().unwrap_or(false);
+    println!(
+        "Avalanche viterbi MSB: {}",
+        if viterbi_msb { 1 } else { 0 }
+    );
 
     let top = beam_result.beam.first().cloned().map(|candidate| BeamCandidateBits {
         score: candidate.score,
