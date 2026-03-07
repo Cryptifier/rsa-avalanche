@@ -587,52 +587,85 @@ fn build_avalanche_nodes_unique_d_demo(
     let y = engine.rabin_exponent as u32;
     let n_pow_y = ctx.n.pow(y);
     let e_big = ctx.e.clone();
+    let use_distance = engine.use_hamming_distance && reference_bits.is_some();
+
+    struct CandidateInstanceNode {
+        candidate_idx: usize,
+        d_new: BigUint,
+        message_value: BigUint,
+        node: AvalancheNode,
+        distance: Option<usize>,
+    }
+
+    let per_instance_nodes: Vec<Vec<CandidateInstanceNode>> = (0..batch_size)
+        .into_par_iter()
+        .map(|instance_idx| {
+            let x_big = odd_ciphertext_exponent(&e_big, instance_idx)
+                .map_err(|err| err.to_string())?;
+            let ciphertext_x = ciphertext.modpow(&x_big, &ctx.n);
+            let shifted = maybe_shift_ciphertext(ctx, &ciphertext_x, shift);
+            let result_default = get_larger_number(&shifted, &ctx.n, y, true, false);
+            let e_x = &e_big * &x_big;
+
+            let mut nodes = Vec::with_capacity(candidates.len());
+            for (candidate_idx, candidate) in candidates.iter().enumerate() {
+                let Some(d_new) = mod_inverse(&e_x, &candidate.phi_new) else {
+                    continue;
+                };
+                let dm = derive_candidate_message_from_result(
+                    ctx,
+                    engine,
+                    &result_default,
+                    &candidate.r,
+                    &d_new,
+                    &n_pow_y,
+                    &candidate.r_pow_y,
+                    y,
+                    false,
+                );
+                let message_bits = biguint_to_bits_le(&dm, bit_width);
+                let node = AvalancheNode {
+                    biases: vec![0.0; bit_width],
+                    message_bits,
+                };
+                let message_value = bits_le_to_biguint(&node.message_bits);
+                let distance = if use_distance {
+                    reference_bits.map(|reference| hamming_distance_bits(&node.message_bits, reference))
+                } else {
+                    None
+                };
+                nodes.push(CandidateInstanceNode {
+                    candidate_idx,
+                    d_new,
+                    message_value,
+                    node,
+                    distance,
+                });
+            }
+            Ok::<_, String>(nodes)
+        })
+        .collect::<Result<_, _>>()
+        .map_err(|err| -> Box<dyn Error> { err.into() })?;
+
     let mut seen: Vec<HashSet<BigUint>> = vec![HashSet::new(); candidates.len()];
     let mut nodes_with_value: Vec<(BigUint, AvalancheNode)> = Vec::new();
     let mut nodes_with_distance: Vec<(usize, BigUint, AvalancheNode)> = Vec::new();
 
-    for instance_idx in 0..batch_size {
-        let x_big = odd_ciphertext_exponent(&e_big, instance_idx)?;
-        let ciphertext_x = ciphertext.modpow(&x_big, &ctx.n);
-        let shifted = maybe_shift_ciphertext(ctx, &ciphertext_x, shift);
-        let result_default = get_larger_number(&shifted, &ctx.n, y, true, false);
-        let e_x = &e_big * &x_big;
-
-        for (candidate_idx, candidate) in candidates.iter().enumerate() {
-            let Some(d_new) = mod_inverse(&e_x, &candidate.phi_new) else {
-                continue;
-            };
-            let seen_set = &mut seen[candidate_idx];
-            if !seen_set.insert(d_new.clone()) {
+    for nodes in per_instance_nodes {
+        for entry in nodes {
+            let seen_set = &mut seen[entry.candidate_idx];
+            if !seen_set.insert(entry.d_new) {
                 continue;
             }
-            let dm = derive_candidate_message_from_result(
-                ctx,
-                engine,
-                &result_default,
-                &candidate.r,
-                &d_new,
-                &n_pow_y,
-                &candidate.r_pow_y,
-                y,
-                false,
-            );
-            let message_bits = biguint_to_bits_le(&dm, bit_width);
-            let node = AvalancheNode {
-                biases: vec![0.0; bit_width],
-                message_bits,
-            };
-            let message_value = bits_le_to_biguint(&node.message_bits);
-    if engine.use_hamming_distance {
-        if let Some(reference) = reference_bits {
-            let distance = hamming_distance_bits(&node.message_bits, reference);
-            nodes_with_distance.push((distance, message_value, node));
-        } else {
-            nodes_with_value.push((message_value, node));
-        }
-    } else {
-        nodes_with_value.push((message_value, node));
-    }
+            if engine.use_hamming_distance {
+                if let Some(distance) = entry.distance {
+                    nodes_with_distance.push((distance, entry.message_value, entry.node));
+                } else {
+                    nodes_with_value.push((entry.message_value, entry.node));
+                }
+            } else {
+                nodes_with_value.push((entry.message_value, entry.node));
+            }
         }
     }
 
@@ -720,6 +753,11 @@ fn run_avalanche_beam_search(
         "Avalanche tree instances: {}",
         avalanche_nodes.len()
     );
+    let msb_one_count = avalanche_nodes
+        .iter()
+        .filter(|node| node.message_bits.last().copied().unwrap_or(false))
+        .count();
+    let msb_zero_count = avalanche_nodes.len().saturating_sub(msb_one_count);
     let avalanche_result = search_avalanche_tree(avalanche_nodes)?;
     let normalized_biases = normalize_avalanche_biases(&avalanche_result.biases);
     let bias_line = normalized_biases
@@ -730,6 +768,20 @@ fn run_avalanche_beam_search(
     println!(
         "Avalanche beam search probabilities (lsb0 order): {}",
         bias_line
+    );
+    println!(
+        "Avalanche beam bias diagnostics: raw_len {} bit_width {} raw_last {}",
+        avalanche_result.biases.len(),
+        bit_width,
+        avalanche_result
+            .biases
+            .last()
+            .copied()
+            .unwrap_or(0.0)
+    );
+    println!(
+        "Avalanche beam MSB count: ones {} zeros {}",
+        msb_one_count, msb_zero_count
     );
     let beam_result = beam_search_top_k(
         vec![Vec::new()],
