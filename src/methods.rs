@@ -2326,6 +2326,13 @@ fn run_avalanche_search(
             format_beam_float(ones_match_pct, BEAM_PCT_DECIMALS),
             candidate_hex
         );
+        let candidate_value = bits_le_to_biguint(&candidate_bits);
+        println!(
+            "Beam {} bits: total {} biguint {}",
+            idx + 1,
+            candidate_bits.len(),
+            candidate_value.bits()
+        );
     }
     if let Some(top) = beam_result.beam.first() {
         let top_bits: Vec<bool> = top.vector.iter().map(|value| *value >= 0.5).collect();
@@ -4818,6 +4825,12 @@ fn run_r_candidate_accuracy_batches(
                     format_beam_float(match_pct, BEAM_PCT_DECIMALS),
                     format_beam_float(ones_match_pct, BEAM_PCT_DECIMALS),
                     hex
+                );
+                let max_value = bits_le_to_biguint(&max.bits);
+                println!(
+                    "Avalanche beam max bits: total {} biguint {}",
+                    max.bits.len(),
+                    max_value.bits()
                 );
                 let msb = max.bits.last().copied().unwrap_or(false);
                 println!(

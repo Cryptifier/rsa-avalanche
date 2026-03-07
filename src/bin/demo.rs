@@ -45,6 +45,10 @@ struct Args {
     #[arg(long, value_name = "VALUE")]
     ciphertext: Option<String>,
 
+    /// Expected bit width for decrypted values
+    #[arg(long, value_parser = clap::value_parser!(u32).range(1..=8192))]
+    bits: Option<u32>,
+
     /// Multiply ciphertext by encrypted 2 before base conversion
     #[arg(long)]
     shift: bool,
@@ -128,13 +132,14 @@ fn main() -> Result<(), Box<dyn Error>> {
             println!("\n===== DEMO BATCH {} / {} =====", batch_idx + 1, batch_runs);
         }
         let start = std::time::Instant::now();
-        let recovered = match run_speculative_decrypt(
-            &ctx,
-            &config,
-            &ciphertext,
-            args.shift,
-            batch_size,
-        ) {
+    let recovered = match run_speculative_decrypt(
+        &ctx,
+        &config,
+        &ciphertext,
+        args.shift,
+        batch_size,
+        args.bits,
+    ) {
             Ok(result) => result,
             Err(err) => {
                 eprintln!(
@@ -176,6 +181,12 @@ fn main() -> Result<(), Box<dyn Error>> {
             format_beam_float(candidate.score, BEAM_SCORE_DECIMALS),
             batch_number,
             hex
+        );
+        let max_value = bits_le_to_biguint(&candidate.bits);
+        println!(
+            "Avalanche beam aggregate max bits: total {} biguint {}",
+            candidate.bits.len(),
+            max_value.bits()
         );
         let msb = candidate.bits.last().copied().unwrap_or(false);
         println!(
@@ -293,6 +304,29 @@ fn resolve_demo_batch_size(engine: &EngineConfig, args: &Args) -> Result<usize, 
     usize::try_from(size).map_err(|_| "demo batch size exceeds usize range".into())
 }
 
+/// Resolves the bit width for demo decryption outputs.
+///
+/// # Parameters
+/// - `engine`: Engine configuration containing defaults.
+/// - `n`: RSA modulus used for sizing defaults.
+/// - `expected_bits`: Optional bit-width override from the CLI.
+///
+/// # Returns
+/// - `Result<usize, Box<dyn Error>>`: Bit width to use for decoding.
+///
+/// # Expected Output
+/// - Returns the resolved bit width; no stdout/stderr output.
+fn resolve_demo_bit_width(
+    engine: &EngineConfig,
+    n: &BigUint,
+    expected_bits: Option<u32>,
+) -> Result<usize, Box<dyn Error>> {
+    if let Some(bits) = expected_bits {
+        return usize::try_from(bits).map_err(|_| "demo bits exceeds usize range".into());
+    }
+    Ok(analysis_bit_width(engine, n))
+}
+
 /// Computes an increasing odd exponent `x` per batch instance so that `e * x` remains odd.
 ///
 /// # Parameters
@@ -328,6 +362,7 @@ fn odd_ciphertext_exponent(
 /// - `ciphertext`: Ciphertext to decrypt.
 /// - `shift`: Whether to shift ciphertext by encrypted 2 before conversion.
 /// - `batch_size`: Number of ciphertext exponent variants to include.
+/// - `expected_bits`: Optional expected bit width override.
 ///
 /// # Returns
 /// - `Result<RecoveryResult, Box<dyn Error>>`: Best-case and majority results.
@@ -340,6 +375,7 @@ fn run_speculative_decrypt(
     ciphertext: &BigUint,
     shift: bool,
     batch_size: usize,
+    expected_bits: Option<u32>,
 ) -> Result<RecoveryResult, Box<dyn Error>> {
     let engine = &config.engine;
     let mut rng = RngChoice::from_entropy(RngMode::Crypto)?;
@@ -375,6 +411,7 @@ fn run_speculative_decrypt(
         prepared.push(selected);
     }
 
+    let bit_width = resolve_demo_bit_width(engine, &ctx.n, expected_bits)?;
     let screen_iterations = engine.oracle_screen_iterations.max(1) as usize;
     let top_k = engine.combiner_k_oracles.max(1).min(prepared.len());
     let (per_bit_oracles, top_match_pct) = screen_oracles_per_bit(
@@ -385,6 +422,7 @@ fn run_speculative_decrypt(
         top_k,
         &mut rng,
         shift,
+        bit_width,
     )?;
 
     if let Some(stats) = compute_stats(&top_match_pct) {
@@ -398,7 +436,6 @@ fn run_speculative_decrypt(
         );
     }
 
-    let bit_width = analysis_bit_width(engine, &ctx.n);
     let (best_case_pct, best_case_bits) = compute_per_bit_best_case_match(
         ctx,
         engine,
@@ -725,6 +762,13 @@ fn run_avalanche_beam_search(
             idx + 1,
             format_beam_float(candidate.score, BEAM_SCORE_DECIMALS),
             candidate_hex
+        );
+        let candidate_value = bits_le_to_biguint(&candidate_bits);
+        println!(
+            "Beam {} bits: total {} biguint {}",
+            idx + 1,
+            candidate_bits.len(),
+            candidate_value.bits()
         );
     }
     if let Some(top) = beam_result.beam.first() {
@@ -1098,6 +1142,7 @@ fn maybe_shift_ciphertext(ctx: &DemoContext, ciphertext: &BigUint, shift: bool) 
 /// - `top_k`: Number of top oracles to select per bit.
 /// - `rng`: Random number generator for message sampling.
 /// - `shift`: Whether to shift ciphertext by encrypted 2 before conversion.
+/// - `bit_width`: Bit width for output vectors.
 ///
 /// # Returns
 /// - `Result<(Vec<Vec<OracleBitSelection>>, Vec<f64>), Box<dyn Error>>`: Per-bit oracle selection and top match %.
@@ -1112,6 +1157,7 @@ fn screen_oracles_per_bit(
     top_k: usize,
     rng: &mut RngChoice,
     shift: bool,
+    bit_width: usize,
 ) -> Result<(Vec<Vec<OracleBitSelection>>, Vec<f64>), Box<dyn Error>> {
     if iterations == 0 {
         return Err("oracle_screen_iterations must be >= 1".into());
@@ -1121,7 +1167,6 @@ fn screen_oracles_per_bit(
     }
     let top_k = top_k.max(1).min(candidates.len());
 
-    let bit_width = analysis_bit_width(engine, &ctx.n);
     let y = engine.rabin_exponent as u32;
     let n_pow_y = ctx.n.pow(y);
 
@@ -1152,30 +1197,41 @@ fn screen_oracles_per_bit(
     let counts: Vec<Vec<u32>> = candidates
         .par_iter()
         .map(|candidate| {
-            let mut match_counts = vec![0u32; bit_width];
             let Some(d_new) = mod_inverse(&ctx.e, &candidate.phi_new) else {
-                return match_counts;
+                return vec![0u32; bit_width];
             };
-            for sample in samples.iter() {
-                let dm = derive_candidate_message_from_result(
-                    ctx,
-                    engine,
-                    &sample.result_default,
-                    &candidate.r,
-                    &d_new,
-                    &n_pow_y,
-                    &candidate.r_pow_y,
-                    y,
-                    false,
-                );
-                let dm_bits = biguint_to_bits_le(&dm, bit_width);
-                for (bit_idx, bit) in dm_bits.iter().enumerate() {
-                    if *bit == sample.message_bits[bit_idx] {
-                        match_counts[bit_idx] = match_counts[bit_idx].saturating_add(1);
+            samples
+                .par_iter()
+                .map(|sample| {
+                    let mut match_counts = vec![0u32; bit_width];
+                    let dm = derive_candidate_message_from_result(
+                        ctx,
+                        engine,
+                        &sample.result_default,
+                        &candidate.r,
+                        &d_new,
+                        &n_pow_y,
+                        &candidate.r_pow_y,
+                        y,
+                        false,
+                    );
+                    let dm_bits = biguint_to_bits_le(&dm, bit_width);
+                    for (bit_idx, bit) in dm_bits.iter().enumerate() {
+                        if *bit == sample.message_bits[bit_idx] {
+                            match_counts[bit_idx] = match_counts[bit_idx].saturating_add(1);
+                        }
                     }
-                }
-            }
-            match_counts
+                    match_counts
+                })
+                .reduce(
+                    || vec![0u32; bit_width],
+                    |mut acc, counts| {
+                        for (idx, value) in counts.into_iter().enumerate() {
+                            acc[idx] = acc[idx].saturating_add(value);
+                        }
+                        acc
+                    },
+                )
         })
         .collect();
 
