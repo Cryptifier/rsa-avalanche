@@ -90,3 +90,7 @@ python3 scripts/enciphered_bins_video.py \
 **Adjusted Homomorphic Base Conversion Method**
 
 ![Adjusted HBC Method](./docs/diagrams/HBC-Methods-Page-2.drawio.png)
+
+**Avalanche Tree Method**
+
+![Avalanche Tree Method](./docs/diagrams/HBC-Avalanche.drawio.png)
