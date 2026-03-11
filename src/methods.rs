@@ -44,7 +44,7 @@ use crate::analytics::{
     generate_r_candidates_with_analytics, RCandidateAccuracyBatch, RCandidateAccuracyEntry,
     RCandidateFactor, RCandidateTraceBatch, RCandidateTraceEntry, SessionAnalytics,
 };
-use crate::avalanche::{search_avalanche_tree, AvalancheNode};
+use crate::avalanche::{search_avalanche_tree, search_avalanche_tree_with_scores, AvalancheNode};
 use crate::helpers::{format_beam_float, normalize_avalanche_biases};
 use crate::combiner::majority_vote_with_distribution;
 use crate::config::{Config, EngineConfig};
@@ -2365,7 +2365,8 @@ fn run_avalanche_search(
         .count();
     let msb_zero_count = avalanche_nodes.len().saturating_sub(msb_one_count);
     let avalanche_count = avalanche_nodes.len();
-    let avalanche_result = search_avalanche_tree(avalanche_nodes)?;
+    let avalanche_search = search_avalanche_tree_with_scores(avalanche_nodes)?;
+    let avalanche_result = avalanche_search.node;
     // dbg!(&avalanche_result);
     with_analytics(analytics, |a| {
         a.set_feature_stat(
@@ -2377,6 +2378,8 @@ fn run_avalanche_search(
                 "unique_messages": avalanche_count,
                 "biases": avalanche_result.biases,
                 "message_bits": avalanche_result.message_bits,
+                "level_similarity_pct": avalanche_search.level_similarity_pct,
+                "level_pair_counts": avalanche_search.level_pair_counts,
             }),
         );
     });
@@ -2416,6 +2419,18 @@ fn run_avalanche_search(
         "Avalanche beam MSB count: ones {} zeros {}",
         msb_one_count, msb_zero_count
     );
+    if !avalanche_search.level_similarity_pct.is_empty() {
+        let similarity_line = avalanche_search
+            .level_similarity_pct
+            .iter()
+            .map(|pct| format_beam_float(*pct, BEAM_PCT_DECIMALS))
+            .collect::<Vec<_>>()
+            .join(" ");
+        println!(
+            "Avalanche similarity per level (%): {}",
+            similarity_line
+        );
+    }
     let beam_result = beam_search_top_k(
         vec![Vec::new()],
         5,
