@@ -74,7 +74,7 @@ fn validate_candidates(candidates: &[AvalancheNode]) -> Result<usize, AvalancheE
     Ok(bit_width)
 }
 
-/// Builds the next avalanche level without allocating pair lists.
+/// Builds the next avalanche level by pairing most-similar candidates.
 ///
 /// # Parameters
 /// - `candidates`: Current level of avalanche nodes.
@@ -90,16 +90,55 @@ fn build_next_level(
     bit_width: usize,
 ) -> Result<Vec<AvalancheNode>, AvalancheError> {
     let mut next = Vec::with_capacity((candidates.len() + 1) / 2);
-    let mut idx = 0usize;
-    while idx + 1 < candidates.len() {
-        let combined = combine_candidates(&candidates[idx], &candidates[idx + 1], bit_width)?;
-        next.push(combined);
-        idx += 2;
-    }
-    if idx < candidates.len() {
-        next.push(candidates[idx].clone());
+    let mut used = vec![false; candidates.len()];
+    for idx in 0..candidates.len() {
+        if used[idx] {
+            continue;
+        }
+        let mut best_partner = None;
+        let mut best_distance = usize::MAX;
+        for other in (idx + 1)..candidates.len() {
+            if used[other] {
+                continue;
+            }
+            let distance = hamming_distance_bits(
+                &candidates[idx].message_bits,
+                &candidates[other].message_bits,
+            );
+            if distance < best_distance {
+                best_distance = distance;
+                best_partner = Some(other);
+            }
+        }
+        if let Some(other) = best_partner {
+            used[idx] = true;
+            used[other] = true;
+            let combined = combine_candidates(&candidates[idx], &candidates[other], bit_width)?;
+            next.push(combined);
+        } else {
+            used[idx] = true;
+            next.push(candidates[idx].clone());
+        }
     }
     Ok(next)
+}
+
+/// Computes the Hamming distance between two bit slices.
+///
+/// # Parameters
+/// - `left`: First bit slice.
+/// - `right`: Second bit slice.
+///
+/// # Returns
+/// - `usize`: Count of differing bit positions.
+///
+/// # Expected Output
+/// - Returns the distance; no side effects.
+fn hamming_distance_bits(left: &[bool], right: &[bool]) -> usize {
+    left.iter()
+        .zip(right.iter())
+        .filter(|(a, b)| a != b)
+        .count()
 }
 
 /// Combines two nodes by AND-ing bits and adding bias for `true` positions.
