@@ -77,7 +77,7 @@ for i in $(seq 1 "${RUNS}"); do
     exit 1
   fi
 
-  cargo run --bin demo -- --bits 256 --config "${CONFIG}" --batches 100 --batch-size 1000 --decrypt --ciphertext "0x${ciphertext_hex}" | tee "${decrypt_output}"
+  cargo run --bin demo -- --bits 256 --config "${CONFIG}" --batches 100 --batch-size 3000 --decrypt --ciphertext "0x${ciphertext_hex}" | tee "${decrypt_output}"
   best_case_hex=$(grep -m1 "Recovered (best-case) hex:" "${decrypt_output}" | awk '{print $4}')
   majority_hex=$(grep -m1 "Recovered (majority) hex:" "${decrypt_output}" | awk '{print $4}')
 
