@@ -60,7 +60,7 @@
         "analysis_batch_enable" : true,
         "analysis_batch_messages" : 100000,
         "analysis_batch_candidates" : 50,
-        "analysis_batch_batches" : 1,
+        "analysis_batch_batches" : 10,
         "same_r_batch" : true,
         "ciphertext_modify" : true,
         "enciphered_export_enable" : false,
