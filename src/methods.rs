@@ -45,6 +45,7 @@ use crate::analytics::{
     RCandidateFactor, RCandidateTraceBatch, RCandidateTraceEntry, SessionAnalytics,
 };
 use crate::avalanche::{search_avalanche_tree, AvalancheNode};
+use crate::helpers::{format_beam_float, normalize_avalanche_biases};
 use crate::combiner::majority_vote_with_distribution;
 use crate::config::{Config, EngineConfig};
 use crate::dsp::{find_ramp_signals_f64, ramp_signal_strength_f64};
@@ -2304,46 +2305,8 @@ fn build_avalanche_nodes_unique_d(
     Ok(nodes)
 }
 
-/// Normalizes avalanche biases into the [0.0, 1.0] range using max-abs scaling.
-///
-/// # Parameters
-/// - `biases`: Raw avalanche bias values.
-///
-/// # Returns
-/// - `Vec<f64>`: Normalized bias values.
-///
-/// # Expected Output
-/// - Returns normalized biases; no stdout/stderr output.
-fn normalize_avalanche_biases(biases: &[f64]) -> Vec<f64> {
-    let max_abs = biases
-        .iter()
-        .fold(0.0_f64, |acc, value| acc.max(value.abs()));
-    if max_abs == 0.0 {
-        return vec![0.0; biases.len()];
-    }
-    biases
-        .iter()
-        .map(|bias| (bias.abs() / max_abs).clamp(0.0, 1.0))
-        .collect()
-}
-
 const BEAM_SCORE_DECIMALS: usize = 8;
 const BEAM_PCT_DECIMALS: usize = 8;
-
-/// Formats a floating-point value for beam search output.
-///
-/// # Parameters
-/// - `value`: Value to format.
-/// - `precision`: Number of decimal places to include.
-///
-/// # Returns
-/// - `String`: Formatted string with the requested precision.
-///
-/// # Expected Output
-/// - Returns a formatted string; no stdout/stderr output.
-fn format_beam_float(value: f64, precision: usize) -> String {
-    format!("{:.precision$}", value, precision = precision)
-}
 
 /// Runs the avalanche tree search for unique `(e*x)^{-1} mod phi(r)` decryptions.
 ///

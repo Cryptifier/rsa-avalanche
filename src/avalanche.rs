@@ -1,3 +1,7 @@
+use rayon::prelude::*;
+
+use crate::helpers::hamming_distance_bits;
+
 /// Errors returned by avalanche tree search.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AvalancheError {
@@ -15,8 +19,6 @@ impl std::fmt::Display for AvalancheError {
 }
 
 impl std::error::Error for AvalancheError {}
-
-use rayon::prelude::*;
 
 /// Container for avalanche tree state.
 #[derive(Debug, Clone)]
@@ -126,24 +128,6 @@ fn build_next_level(
         }
     }
     Ok(next)
-}
-
-/// Computes the Hamming distance between two bit slices.
-///
-/// # Parameters
-/// - `left`: First bit slice.
-/// - `right`: Second bit slice.
-///
-/// # Returns
-/// - `usize`: Count of differing bit positions.
-///
-/// # Expected Output
-/// - Returns the distance; no side effects.
-fn hamming_distance_bits(left: &[bool], right: &[bool]) -> usize {
-    left.iter()
-        .zip(right.iter())
-        .filter(|(a, b)| a != b)
-        .count()
 }
 
 /// Combines two nodes by AND-ing bits and adding bias for `true` positions.
