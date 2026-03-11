@@ -1554,64 +1554,101 @@ fn run_oracle_entropy_timeline(
     let y = engine.rabin_exponent as u32;
     let n_pow_y = ctx.n.pow(y);
 
+    let mut seeds = Vec::with_capacity(iterations);
+    for _ in 0..iterations {
+        seeds.push(rng.next_u64());
+    }
+    let done = Arc::new(AtomicU64::new(0));
+    let next_pct = Arc::new(AtomicU64::new(10));
+    let iterations_u64 = iterations as u64;
+
+    let mut results = seeds
+        .into_par_iter()
+        .map(|seed| {
+            let mut local_rng = RngChoice::from_seed(rng.mode(), seed);
+            let msg = sample_message_for_tests(engine, &ctx.n, &fixed_message, &mut local_rng);
+            let base_ciphertext = msg.modpow(&ctx.e, &ctx.n);
+
+            let mut oracles: Vec<Vec<bool>> = Vec::with_capacity(oracle_count);
+            for candidate in candidates.iter().take(oracle_count) {
+                let ciphertext = ciphertext_for_candidate(ctx, &base_ciphertext, candidate);
+                let shifted = maybe_shift_ciphertext(ctx, &ciphertext, shift);
+                let result_default = get_larger_number(&shifted, &ctx.n, y, true, false);
+                let dm = derive_candidate_message_from_result(
+                    ctx,
+                    engine,
+                    &result_default,
+                    &candidate.r,
+                    &candidate.d_new,
+                    &n_pow_y,
+                    &candidate.r_pow_y,
+                    y,
+                    false,
+                );
+                oracles.push(biguint_to_bits_le(&dm, bit_width));
+            }
+
+            let distribution =
+                majority_vote_with_distribution(&oracles, engine.combiner_tie_breaker)
+                    .map_err(|err| err.to_string())?;
+
+            let mut entropy_sum = 0.0;
+            for p in &distribution.probability_one {
+                entropy_sum += shannon_entropy_bit(*p);
+            }
+            let entropy = if distribution.probability_one.is_empty() {
+                0.0
+            } else {
+                entropy_sum / distribution.probability_one.len() as f64
+            };
+
+            let message_bits = biguint_to_bits_le(&msg, distribution.majority_bits.len());
+            let mut correct = 0usize;
+            for (a, b) in distribution.majority_bits.iter().zip(message_bits.iter()) {
+                if a == b {
+                    correct += 1;
+                }
+            }
+            let total = distribution.majority_bits.len().max(1);
+            let accuracy = correct as f64 / total as f64 * 100.0;
+
+            let finished = done.fetch_add(1, Ordering::Relaxed) + 1;
+            let pct = finished.saturating_mul(100) / iterations_u64;
+            let mut current_next = next_pct.load(Ordering::Relaxed);
+            while pct >= current_next && current_next <= 100 {
+                let new_next = current_next.saturating_add(10);
+                match next_pct.compare_exchange(
+                    current_next,
+                    new_next,
+                    Ordering::Relaxed,
+                    Ordering::Relaxed,
+                ) {
+                    Ok(_) => {
+                        let display_pct = if finished == iterations_u64 {
+                            100
+                        } else {
+                            ((pct / 10) * 10).min(100)
+                        };
+                        println!(
+                            "Oracle entropy timeline progress: {}% ({}/{})",
+                            display_pct, finished, iterations_u64
+                        );
+                        current_next = new_next;
+                    }
+                    Err(actual) => current_next = actual,
+                }
+            }
+
+            Ok::<_, String>((entropy, accuracy))
+        })
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|err| -> Box<dyn Error> { err.into() })?;
+
     let mut entropy_mean = Vec::with_capacity(iterations);
     let mut accuracy_pct = Vec::with_capacity(iterations);
-    let mut next_pct = 10u64;
-    for idx in 0..iterations {
-        let msg = sample_message_for_tests(engine, &ctx.n, &fixed_message, rng);
-        let base_ciphertext = msg.modpow(&ctx.e, &ctx.n);
-
-        let mut oracles: Vec<Vec<bool>> = Vec::with_capacity(oracle_count);
-        for candidate in candidates.iter().take(oracle_count) {
-            let ciphertext = ciphertext_for_candidate(ctx, &base_ciphertext, candidate);
-            let shifted = maybe_shift_ciphertext(ctx, &ciphertext, shift);
-            let result_default = get_larger_number(&shifted, &ctx.n, y, true, false);
-            let dm = derive_candidate_message_from_result(
-                ctx,
-                engine,
-                &result_default,
-                &candidate.r,
-                &candidate.d_new,
-                &n_pow_y,
-                &candidate.r_pow_y,
-                y,
-                false,
-            );
-            oracles.push(biguint_to_bits_le(&dm, bit_width));
-        }
-
-        let distribution =
-            majority_vote_with_distribution(&oracles, engine.combiner_tie_breaker)?;
-
-        let mut entropy_sum = 0.0;
-        for p in &distribution.probability_one {
-            entropy_sum += shannon_entropy_bit(*p);
-        }
-        let entropy = if distribution.probability_one.is_empty() {
-            0.0
-        } else {
-            entropy_sum / distribution.probability_one.len() as f64
-        };
-
-        let message_bits = biguint_to_bits_le(&msg, distribution.majority_bits.len());
-        let mut correct = 0usize;
-        for (a, b) in distribution.majority_bits.iter().zip(message_bits.iter()) {
-            if a == b {
-                correct += 1;
-            }
-        }
-        let total = distribution.majority_bits.len().max(1);
-        let accuracy = correct as f64 / total as f64 * 100.0;
-
+    for (entropy, accuracy) in results.drain(..) {
         entropy_mean.push(entropy);
         accuracy_pct.push(accuracy);
-
-        log_progress_every_ten_percent(
-            (idx + 1) as u64,
-            iterations as u64,
-            &mut next_pct,
-            "Oracle entropy timeline",
-        );
     }
 
     Ok(OracleEntropySeries {
@@ -1821,24 +1858,55 @@ fn screen_oracles_per_bit(
     let y = engine.rabin_exponent as u32;
     let n_pow_y = ctx.n.pow(y);
 
-    let mut samples: Vec<OracleTrainingSample> = Vec::with_capacity(iterations);
-    let mut next_pct = 10u64;
-    for idx in 0..iterations {
-        let msg = random_message_under_n(engine, &ctx.n, rng);
-        let ciphertext = msg.modpow(&ctx.e, &ctx.n);
-        let message_bits = biguint_to_bits_le(&msg, bit_width);
-        samples.push(OracleTrainingSample {
-            ciphertext,
-            message_bits,
-        });
-
-        log_progress_every_ten_percent(
-            (idx + 1) as u64,
-            iterations as u64,
-            &mut next_pct,
-            "Oracle screening",
-        );
+    let mut seeds = Vec::with_capacity(iterations);
+    for _ in 0..iterations {
+        seeds.push(rng.next_u64());
     }
+    let done = Arc::new(AtomicU64::new(0));
+    let next_pct = Arc::new(AtomicU64::new(10));
+    let iterations_u64 = iterations as u64;
+
+    let samples: Vec<OracleTrainingSample> = seeds
+        .into_par_iter()
+        .map(|seed| {
+            let mut local_rng = RngChoice::from_seed(rng.mode(), seed);
+            let msg = random_message_under_n(engine, &ctx.n, &mut local_rng);
+            let ciphertext = msg.modpow(&ctx.e, &ctx.n);
+            let message_bits = biguint_to_bits_le(&msg, bit_width);
+
+            let finished = done.fetch_add(1, Ordering::Relaxed) + 1;
+            let pct = finished.saturating_mul(100) / iterations_u64;
+            let mut current_next = next_pct.load(Ordering::Relaxed);
+            while pct >= current_next && current_next <= 100 {
+                let new_next = current_next.saturating_add(10);
+                match next_pct.compare_exchange(
+                    current_next,
+                    new_next,
+                    Ordering::Relaxed,
+                    Ordering::Relaxed,
+                ) {
+                    Ok(_) => {
+                        let display_pct = if finished == iterations_u64 {
+                            100
+                        } else {
+                            ((pct / 10) * 10).min(100)
+                        };
+                        println!(
+                            "Oracle screening progress: {}% ({}/{})",
+                            display_pct, finished, iterations_u64
+                        );
+                        current_next = new_next;
+                    }
+                    Err(actual) => current_next = actual,
+                }
+            }
+
+            OracleTrainingSample {
+                ciphertext,
+                message_bits,
+            }
+        })
+        .collect();
 
     let samples = Arc::new(samples);
     let counts: Vec<Vec<u32>> = candidates
@@ -2113,54 +2181,91 @@ fn build_avalanche_nodes_unique_d(
     let e_big = ctx.e.clone();
     let base_ciphertext = message.modpow(&ctx.e, &ctx.n);
 
+    let use_distance = engine.use_hamming_distance;
     let mut seen: Vec<HashSet<BigUint>> = vec![HashSet::new(); candidates.len()];
     let mut nodes = Vec::new();
     let target_bits = biguint_to_bits_le(message, bit_width);
     let mut nodes_with_value: Vec<(BigUint, AvalancheNode)> = Vec::new();
     let mut nodes_with_distance: Vec<(usize, BigUint, AvalancheNode)> = Vec::new();
 
-    for instance_idx in 0..batch_size {
-        let x_big = odd_ciphertext_exponent(&e_big, instance_idx, "analysis avalanche")?;
-        let ciphertext = base_ciphertext.modpow(&x_big, &ctx.n);
-        let shifted = maybe_shift_ciphertext(ctx, &ciphertext, shift);
-        let result_default = get_larger_number(&shifted, &ctx.n, y, true, false);
-        let e_x = &e_big * &x_big;
+    struct CandidateInstanceNode {
+        candidate_idx: usize,
+        d_new: BigUint,
+        message_value: BigUint,
+        node: AvalancheNode,
+        distance: Option<usize>,
+    }
 
-        for (candidate_idx, candidate) in candidates.iter().enumerate() {
-            let Some(d_new) = mod_inverse(&e_x, &candidate.phi_new) else {
-                continue;
-            };
-            let seen_set = &mut seen[candidate_idx];
-            if !seen_set.insert(d_new.clone()) {
+    let per_instance_nodes: Vec<Vec<CandidateInstanceNode>> = (0..batch_size)
+        .into_par_iter()
+        .map(|instance_idx| {
+            let x_big = odd_ciphertext_exponent(&e_big, instance_idx, "analysis avalanche")
+                .map_err(|err| err.to_string())?;
+            let ciphertext = base_ciphertext.modpow(&x_big, &ctx.n);
+            let shifted = maybe_shift_ciphertext(ctx, &ciphertext, shift);
+            let result_default = get_larger_number(&shifted, &ctx.n, y, true, false);
+            let e_x = &e_big * &x_big;
+
+            let mut nodes = Vec::with_capacity(candidates.len());
+            for (candidate_idx, candidate) in candidates.iter().enumerate() {
+                let Some(d_new) = mod_inverse(&e_x, &candidate.phi_new) else {
+                    continue;
+                };
+                let dm = derive_candidate_message_from_result(
+                    ctx,
+                    engine,
+                    &result_default,
+                    &candidate.r,
+                    &d_new,
+                    &n_pow_y,
+                    &candidate.r_pow_y,
+                    y,
+                    false,
+                );
+                let message_bits = biguint_to_bits_le(&dm, bit_width);
+                let node = AvalancheNode {
+                    biases: vec![0.0; bit_width],
+                    message_bits,
+                };
+                let message_value = bits_le_to_biguint(&node.message_bits);
+                let distance = if use_distance {
+                    Some(
+                        node.message_bits
+                            .iter()
+                            .zip(target_bits.iter())
+                            .filter(|(cand, target)| cand != target)
+                            .count(),
+                    )
+                } else {
+                    None
+                };
+                nodes.push(CandidateInstanceNode {
+                    candidate_idx,
+                    d_new,
+                    message_value,
+                    node,
+                    distance,
+                });
+            }
+            Ok::<_, String>(nodes)
+        })
+        .collect::<Result<_, _>>()
+        .map_err(|err| -> Box<dyn Error> { err.into() })?;
+
+    for nodes in per_instance_nodes {
+        for entry in nodes {
+            let seen_set = &mut seen[entry.candidate_idx];
+            if !seen_set.insert(entry.d_new) {
                 continue;
             }
-            let dm = derive_candidate_message_from_result(
-                ctx,
-                engine,
-                &result_default,
-                &candidate.r,
-                &d_new,
-                &n_pow_y,
-                &candidate.r_pow_y,
-                y,
-                false,
-            );
-            let message_bits = biguint_to_bits_le(&dm, bit_width);
-            let node = AvalancheNode {
-                biases: vec![0.0; bit_width],
-                message_bits,
-            };
-            let message_value = bits_le_to_biguint(&node.message_bits);
-            if engine.use_hamming_distance {
-                let distance = node
-                    .message_bits
-                    .iter()
-                    .zip(target_bits.iter())
-                    .filter(|(cand, target)| cand != target)
-                    .count();
-                nodes_with_distance.push((distance, message_value, node));
+            if use_distance {
+                if let Some(distance) = entry.distance {
+                    nodes_with_distance.push((distance, entry.message_value, entry.node));
+                } else {
+                    nodes_with_value.push((entry.message_value, entry.node));
+                }
             } else {
-                nodes_with_value.push((message_value, node));
+                nodes_with_value.push((entry.message_value, entry.node));
             }
         }
     }
