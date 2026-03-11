@@ -1966,35 +1966,41 @@ fn run_bitwise_speculative_oracle_attempt(
         invert: false,
     }]);
 
-    let mut oracle_bits_by_instance = Vec::with_capacity(batch_size);
-    for instance_idx in 0..batch_size {
-        let x_big = odd_ciphertext_exponent(&e_big, instance_idx, "analysis batch")?;
-        let ciphertext = base_ciphertext.modpow(&x_big, &ctx.n);
-        let shifted = maybe_shift_ciphertext(ctx, &ciphertext, shift);
-        let result_default = get_larger_number(&shifted, &ctx.n, y, true, false);
+    let mut oracle_index_list: Vec<usize> = unique_oracle_indices.iter().copied().collect();
+    oracle_index_list.sort_unstable();
+    let oracle_bits_by_instance: Vec<Vec<Option<Vec<bool>>>> = (0..batch_size)
+        .into_par_iter()
+        .map(|instance_idx| {
+            let x_big = odd_ciphertext_exponent(&e_big, instance_idx, "analysis batch")
+                .map_err(|err| err.to_string())?;
+            let ciphertext = base_ciphertext.modpow(&x_big, &ctx.n);
+            let shifted = maybe_shift_ciphertext(ctx, &ciphertext, shift);
+            let result_default = get_larger_number(&shifted, &ctx.n, y, true, false);
 
-        let mut oracle_bits: Vec<Option<Vec<bool>>> = vec![None; candidates.len()];
-        for oracle_idx in unique_oracle_indices.iter().copied() {
-            let candidate = &candidates[oracle_idx];
-            let e_x = &e_big * &x_big;
-            let Some(d_new) = mod_inverse(&e_x, &candidate.phi_new) else {
-                continue;
-            };
-            let dm = derive_candidate_message_from_result(
-                ctx,
-                engine,
-                &result_default,
-                &candidate.r,
-                &d_new,
-                &n_pow_y,
-                &candidate.r_pow_y,
-                y,
-                false,
-            );
-            oracle_bits[oracle_idx] = Some(biguint_to_bits_le(&dm, bit_width));
-        }
-        oracle_bits_by_instance.push(oracle_bits);
-    }
+            let mut oracle_bits: Vec<Option<Vec<bool>>> = vec![None; candidates.len()];
+            for oracle_idx in oracle_index_list.iter().copied() {
+                let candidate = &candidates[oracle_idx];
+                let e_x = &e_big * &x_big;
+                let Some(d_new) = mod_inverse(&e_x, &candidate.phi_new) else {
+                    continue;
+                };
+                let dm = derive_candidate_message_from_result(
+                    ctx,
+                    engine,
+                    &result_default,
+                    &candidate.r,
+                    &d_new,
+                    &n_pow_y,
+                    &candidate.r_pow_y,
+                    y,
+                    false,
+                );
+                oracle_bits[oracle_idx] = Some(biguint_to_bits_le(&dm, bit_width));
+            }
+            Ok::<_, String>(oracle_bits)
+        })
+        .collect::<Result<_, _>>()
+        .map_err(|err| -> Box<dyn Error> { err.into() })?;
 
     let mut recovered_bits = vec![false; bit_width];
     if let Some(single) = single_selection.as_ref() {
@@ -4846,68 +4852,70 @@ fn run_r_candidate_accuracy_batches(
             tonelli_ciphertexts.push(result_default);
         }
 
-        let mut entries = Vec::with_capacity(batch_candidates.len());
-        for candidate in batch_candidates {
-            let mut hbc_ciphertexts_r = Vec::with_capacity(message_count);
-            let mut candidate_decryptions = Vec::with_capacity(message_count);
-            let mut total_accuracy = 0.0f64;
+        let entries: Vec<RCandidateAccuracyEntry> = batch_candidates
+            .par_iter()
+            .map(|candidate| {
+                let mut hbc_ciphertexts_r = Vec::with_capacity(message_count);
+                let mut candidate_decryptions = Vec::with_capacity(message_count);
+                let mut total_accuracy = 0.0f64;
 
-            for (idx, msg) in messages.iter().enumerate() {
-                let result_default = &tonelli_ciphertexts[idx];
-                let hbc_result = hbc(result_default, &candidate.r, &n_pow_y, engine);
-                let d_new = if engine.ciphertext_modify {
-                    let e_x = e_x_values
-                        .get(idx)
-                        .ok_or_else(|| "missing ciphertext exponent for message index")?;
-                    mod_inverse(e_x, &candidate.phi_new)
-                } else {
-                    Some(candidate.d_new.clone())
-                };
+                for (idx, msg) in messages.iter().enumerate() {
+                    let result_default = &tonelli_ciphertexts[idx];
+                    let hbc_result = hbc(result_default, &candidate.r, &n_pow_y, engine);
+                    let d_new = if engine.ciphertext_modify {
+                        let e_x = e_x_values
+                            .get(idx)
+                            .ok_or_else(|| "missing ciphertext exponent for message index".to_string())?;
+                        mod_inverse(e_x, &candidate.phi_new)
+                    } else {
+                        Some(candidate.d_new.clone())
+                    };
 
-                if let Some(d_new) = d_new {
-                    let dm = derive_candidate_message_from_result(
-                        ctx,
-                        engine,
-                        result_default,
-                        &candidate.r,
-                        &d_new,
-                        &n_pow_y,
-                        &candidate.r_pow_y,
-                        y,
-                        false,
-                    );
-                    let message_bits = msg.bits().max(1) as f64;
-                    let (_, matching_total) = count_matching_bits(&dm, msg);
-                    let match_pct = (matching_total as f64 / message_bits) * 100.0;
-                    total_accuracy += match_pct;
+                    if let Some(d_new) = d_new {
+                        let dm = derive_candidate_message_from_result(
+                            ctx,
+                            engine,
+                            result_default,
+                            &candidate.r,
+                            &d_new,
+                            &n_pow_y,
+                            &candidate.r_pow_y,
+                            y,
+                            false,
+                        );
+                        let message_bits = msg.bits().max(1) as f64;
+                        let (_, matching_total) = count_matching_bits(&dm, msg);
+                        let match_pct = (matching_total as f64 / message_bits) * 100.0;
+                        total_accuracy += match_pct;
 
-                    hbc_ciphertexts_r.push(hbc_result.to_string());
-                    candidate_decryptions.push(dm.to_string());
-                } else {
-                    hbc_ciphertexts_r.push(hbc_result.to_string());
-                    candidate_decryptions.push("0".to_string());
+                        hbc_ciphertexts_r.push(hbc_result.to_string());
+                        candidate_decryptions.push(dm.to_string());
+                    } else {
+                        hbc_ciphertexts_r.push(hbc_result.to_string());
+                        candidate_decryptions.push("0".to_string());
+                    }
                 }
-            }
 
-            let accuracy_pct = total_accuracy / message_count as f64;
-            let entry = RCandidateAccuracyEntry {
-                r: candidate.r.to_string(),
-                r_bits: candidate.r.bits(),
-                factors: candidate
-                    .factors
-                    .iter()
-                    .map(|(p, e)| RCandidateFactor {
-                        prime: p.to_string(),
-                        exponent: *e,
-                        prime_bits: p.bits(),
-                    })
-                    .collect(),
-                accuracy_pct,
-                hbc_ciphertexts_r,
-                candidate_decryptions,
-            };
-            entries.push(entry);
-        }
+                let accuracy_pct = total_accuracy / message_count as f64;
+                Ok::<_, String>(RCandidateAccuracyEntry {
+                    r: candidate.r.to_string(),
+                    r_bits: candidate.r.bits(),
+                    factors: candidate
+                        .factors
+                        .iter()
+                        .map(|(p, e)| RCandidateFactor {
+                            prime: p.to_string(),
+                            exponent: *e,
+                            prime_bits: p.bits(),
+                        })
+                        .collect(),
+                    accuracy_pct,
+                    hbc_ciphertexts_r,
+                    candidate_decryptions,
+                })
+            })
+            .collect::<Result<_, _>>()
+            .map_err(|err| -> Box<dyn Error> { err.into() })?;
 
         let oracle_candidates: Vec<OracleCandidate> = batch_candidates
             .iter()
