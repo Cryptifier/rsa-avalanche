@@ -16,6 +16,8 @@ impl std::fmt::Display for AvalancheError {
 
 impl std::error::Error for AvalancheError {}
 
+use rayon::prelude::*;
+
 /// Container for avalanche tree state.
 #[derive(Debug, Clone)]
 pub struct AvalancheNode {
@@ -95,21 +97,24 @@ fn build_next_level(
         if used[idx] {
             continue;
         }
-        let mut best_partner = None;
-        let mut best_distance = usize::MAX;
-        for other in (idx + 1)..candidates.len() {
-            if used[other] {
-                continue;
-            }
-            let distance = hamming_distance_bits(
-                &candidates[idx].message_bits,
-                &candidates[other].message_bits,
-            );
-            if distance < best_distance {
-                best_distance = distance;
-                best_partner = Some(other);
-            }
-        }
+        let best_partner = (idx + 1..candidates.len())
+            .into_par_iter()
+            .filter(|other| !used[*other])
+            .map(|other| {
+                let distance = hamming_distance_bits(
+                    &candidates[idx].message_bits,
+                    &candidates[other].message_bits,
+                );
+                (distance, other)
+            })
+            .reduce_with(|a, b| {
+                if a.0 < b.0 || (a.0 == b.0 && a.1 < b.1) {
+                    a
+                } else {
+                    b
+                }
+            })
+            .map(|(_, other)| other);
         if let Some(other) = best_partner {
             used[idx] = true;
             used[other] = true;
