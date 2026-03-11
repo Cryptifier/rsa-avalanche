@@ -124,6 +124,7 @@ for i in $(seq 1 "${RUNS}"); do
   else
     echo "Run ${i} summary: ${RED}FAILED (exit ${status})${RESET}, match ${match_color}${match_pct:-N/A}%${RESET}, verdict ${verdict_color}${verdict:-UNKNOWN}${RESET}, duration ${duration_s}s"
   fi
+  echo "Session JSON: ${session_path}"
   progress_bar "${i}" "${RUNS}"
   rm -f "${run_output}"
 done
@@ -148,6 +149,9 @@ echo "===== SUMMARY ====="
 echo "Match % stats: mean ${mean}, std dev ${stddev}, min ${min}, max ${max}, n ${count}"
 echo "Verdicts: PASS ${pass_count}, FAIL ${fail_count}"
 echo "Average duration per run: ${avg_time_s}s"
+if [[ -n "${session_path:-}" ]]; then
+  echo "Viewer: python3 scripts/session_viewer.py ${session_path} (Beam vs R tab)"
+fi
 
 if [[ "${RUN_PCA}" == "1" && -n "${session_path:-}" ]]; then
   echo ""

@@ -73,8 +73,35 @@ def empty_session():
         "cli": {},
         "features": [],
         "r_candidate_batches": [],
+        "r_candidate_accuracy_batches": [],
         "errors": [],
     }
+
+
+def compute_basic_stats(values):
+    if not values:
+        return None, None, None, None
+    count = len(values)
+    mean = sum(values) / count
+    variance = sum((value - mean) ** 2 for value in values) / count
+    stddev = variance ** 0.5
+    return mean, stddev, min(values), max(values)
+
+
+def pearson_corr(pairs):
+    if len(pairs) < 2:
+        return None
+    xs = [pair[0] for pair in pairs]
+    ys = [pair[1] for pair in pairs]
+    mean_x = sum(xs) / len(xs)
+    mean_y = sum(ys) / len(ys)
+    num = sum((x - mean_x) * (y - mean_y) for x, y in pairs)
+    denom_x = sum((x - mean_x) ** 2 for x in xs)
+    denom_y = sum((y - mean_y) ** 2 for y in ys)
+    denom = (denom_x * denom_y) ** 0.5
+    if denom == 0:
+        return None
+    return num / denom
 
 
 def collect_log_paths(default_paths, log_dir):
@@ -1311,6 +1338,7 @@ class SessionViewer(QtWidgets.QMainWindow):
         self._tabs.addTab(self._build_bit_similarity_tab(session), "Bit Similarity")
         self._tabs.addTab(self._build_bit_true_timeline_tab(session), "Bit True Timeline")
         self._tabs.addTab(self._build_avalanche_tab(session), "Avalanche")
+        self._tabs.addTab(self._build_beam_vs_r_tab(session), "Beam vs R")
         if self._tabs.count():
             self._tabs.setCurrentIndex(min(current_index, self._tabs.count() - 1))
         if self._current_session_path:
@@ -1501,6 +1529,159 @@ class SessionViewer(QtWidgets.QMainWindow):
         table.resizeColumnsToContents()
         layout.addWidget(table)
 
+        return widget
+
+    def _build_beam_vs_r_tab(self, session):
+        widget = QtWidgets.QWidget()
+        layout = QtWidgets.QVBoxLayout(widget)
+
+        batches = session.get("r_candidate_accuracy_batches", []) or []
+        if not batches:
+            layout.addWidget(
+                QtWidgets.QLabel(
+                    "Beam vs r-candidate data not found. Run analysis batches to populate it."
+                )
+            )
+            return widget
+
+        rows = []
+        mean_pairs = []
+        max_pairs = []
+        near_100 = 0
+        for idx, batch in enumerate(batches, start=1):
+            candidates = batch.get("candidates", []) or []
+            accuracies = [
+                entry.get("accuracy_pct")
+                for entry in candidates
+                if isinstance(entry.get("accuracy_pct"), (int, float))
+            ]
+            mean_acc, stddev_acc, min_acc, max_acc = compute_basic_stats(accuracies)
+            beam_match = batch.get("beam_match_pct")
+            beam_ones = batch.get("beam_ones_match_pct")
+            beam_score = batch.get("beam_score")
+            beam_bits = batch.get("beam_bit_width")
+            if isinstance(beam_match, (int, float)) and isinstance(mean_acc, (int, float)):
+                mean_pairs.append((float(beam_match), float(mean_acc)))
+            if isinstance(beam_match, (int, float)) and isinstance(max_acc, (int, float)):
+                max_pairs.append((float(beam_match), float(max_acc)))
+            if isinstance(beam_match, (int, float)) and beam_match >= 99.0:
+                near_100 += 1
+
+            rows.append(
+                {
+                    "batch": batch.get("context", f"batch_{idx}"),
+                    "beam_match": beam_match,
+                    "beam_ones": beam_ones,
+                    "beam_score": beam_score,
+                    "beam_bits": beam_bits,
+                    "r_mean": mean_acc,
+                    "r_max": max_acc,
+                    "r_min": min_acc,
+                    "r_stddev": stddev_acc,
+                    "candidate_count": len(candidates),
+                }
+            )
+
+        corr_mean = pearson_corr(mean_pairs)
+        corr_max = pearson_corr(max_pairs)
+        summary_lines = [
+            f"Batches with beam match >= 99%: {near_100} / {len(batches)}"
+        ]
+        if corr_mean is not None:
+            summary_lines.append(f"Correlation (beam match vs r mean): {corr_mean:.3f}")
+        else:
+            summary_lines.append("Correlation (beam match vs r mean): N/A")
+        if corr_max is not None:
+            summary_lines.append(f"Correlation (beam match vs r max): {corr_max:.3f}")
+        else:
+            summary_lines.append("Correlation (beam match vs r max): N/A")
+
+        layout.addWidget(QtWidgets.QLabel("\n".join(summary_lines)))
+
+        table = QtWidgets.QTableWidget(len(rows), 10)
+        table.setHorizontalHeaderLabels(
+            [
+                "Batch",
+                "Beam Match %",
+                "Beam Ones %",
+                "Beam Score",
+                "Beam Bits",
+                "R Mean %",
+                "R Max %",
+                "R Min %",
+                "R Stddev",
+                "Candidates",
+            ]
+        )
+        table.verticalHeader().setVisible(False)
+        table.setEditTriggers(QtWidgets.QAbstractItemView.EditTrigger.NoEditTriggers)
+
+        for row_idx, row in enumerate(rows):
+            table.setItem(row_idx, 0, QtWidgets.QTableWidgetItem(str(row["batch"])))
+            table.setItem(
+                row_idx,
+                1,
+                QtWidgets.QTableWidgetItem(
+                    f"{row['beam_match']:.2f}" if isinstance(row["beam_match"], (int, float)) else ""
+                ),
+            )
+            table.setItem(
+                row_idx,
+                2,
+                QtWidgets.QTableWidgetItem(
+                    f"{row['beam_ones']:.2f}" if isinstance(row["beam_ones"], (int, float)) else ""
+                ),
+            )
+            table.setItem(
+                row_idx,
+                3,
+                QtWidgets.QTableWidgetItem(
+                    f"{row['beam_score']:.4f}" if isinstance(row["beam_score"], (int, float)) else ""
+                ),
+            )
+            table.setItem(
+                row_idx,
+                4,
+                QtWidgets.QTableWidgetItem(
+                    str(row["beam_bits"]) if row["beam_bits"] is not None else ""
+                ),
+            )
+            table.setItem(
+                row_idx,
+                5,
+                QtWidgets.QTableWidgetItem(
+                    f"{row['r_mean']:.2f}" if isinstance(row["r_mean"], (int, float)) else ""
+                ),
+            )
+            table.setItem(
+                row_idx,
+                6,
+                QtWidgets.QTableWidgetItem(
+                    f"{row['r_max']:.2f}" if isinstance(row["r_max"], (int, float)) else ""
+                ),
+            )
+            table.setItem(
+                row_idx,
+                7,
+                QtWidgets.QTableWidgetItem(
+                    f"{row['r_min']:.2f}" if isinstance(row["r_min"], (int, float)) else ""
+                ),
+            )
+            table.setItem(
+                row_idx,
+                8,
+                QtWidgets.QTableWidgetItem(
+                    f"{row['r_stddev']:.2f}" if isinstance(row["r_stddev"], (int, float)) else ""
+                ),
+            )
+            table.setItem(
+                row_idx,
+                9,
+                QtWidgets.QTableWidgetItem(str(row["candidate_count"])),
+            )
+
+        table.resizeColumnsToContents()
+        layout.addWidget(table)
         return widget
 
     def _capture_bit_similarity_settings(self):

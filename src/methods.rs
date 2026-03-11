@@ -5032,6 +5032,10 @@ fn run_r_candidate_accuracy_batches(
                 x: BigUint::one(),
             })
             .collect();
+        let mut beam_match_pct = None;
+        let mut beam_ones_match_pct = None;
+        let mut beam_score = None;
+        let mut beam_bit_width = None;
         if let Some(candidate) = beam_max_candidate_from_avalanche(
             ctx,
             engine,
@@ -5041,12 +5045,32 @@ fn run_r_candidate_accuracy_batches(
             shift,
             bits_decrypt,
         )? {
+            let message_bits = biguint_to_bits_le(&message, candidate.bits.len());
+            let (_, matching_total) =
+                count_matching_bits_le(&candidate.bits, &message_bits);
+            let match_pct =
+                matching_total as f64 / candidate.bits.len().max(1) as f64 * 100.0;
+            let candidate_ones = candidate.bits.iter().filter(|bit| **bit).count();
+            let matched_ones = candidate
+                .bits
+                .iter()
+                .zip(message_bits.iter())
+                .filter(|(cand, msg)| **cand && **msg)
+                .count();
+            let ones_match_pct = if candidate_ones == 0 {
+                0.0
+            } else {
+                matched_ones as f64 / candidate_ones as f64 * 100.0
+            };
+            beam_match_pct = Some(match_pct);
+            beam_ones_match_pct = Some(ones_match_pct);
+            beam_score = Some(candidate.score);
+            beam_bit_width = Some(candidate.bits.len());
             let replace = match beam_max {
                 Some(ref current) => candidate.score > current.score,
                 None => true,
             };
             if replace {
-                let message_bits = biguint_to_bits_le(&message, candidate.bits.len());
                 beam_max = Some(BeamMaxCandidate {
                     score: candidate.score,
                     bits: candidate.bits,
@@ -5120,6 +5144,10 @@ fn run_r_candidate_accuracy_batches(
                     .map(|c| c.to_string())
                     .collect(),
                 candidates: entries,
+                beam_match_pct,
+                beam_ones_match_pct,
+                beam_score,
+                beam_bit_width,
             });
         });
     }
