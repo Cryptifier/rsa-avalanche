@@ -2183,6 +2183,7 @@ fn build_avalanche_nodes_unique_d(
     let base_ciphertext = message.modpow(&ctx.e, &ctx.n);
 
     let use_distance = engine.use_hamming_distance;
+    let mirror_invert = engine.use_hamming_distance && engine.mirror_invert_candidates;
     let mut seen: Vec<HashSet<BigUint>> = vec![HashSet::new(); candidates.len()];
     let mut nodes = Vec::new();
     let target_bits = biguint_to_bits_le(message, bit_width);
@@ -2261,7 +2262,27 @@ fn build_avalanche_nodes_unique_d(
             }
             if use_distance {
                 if let Some(distance) = entry.distance {
-                    nodes_with_distance.push((distance, entry.message_value, entry.node));
+                    let node = entry.node;
+                    let message_value = entry.message_value;
+                    if mirror_invert {
+                        let mut inverted_bits = node.message_bits.clone();
+                        for bit in &mut inverted_bits {
+                            *bit = !*bit;
+                        }
+                        let inverted_node = AvalancheNode {
+                            biases: vec![0.0; bit_width],
+                            message_bits: inverted_bits,
+                        };
+                        let inverted_value = bits_le_to_biguint(&inverted_node.message_bits);
+                        let inverted_distance = inverted_node
+                            .message_bits
+                            .iter()
+                            .zip(target_bits.iter())
+                            .filter(|(cand, target)| cand != target)
+                            .count();
+                        nodes_with_distance.push((inverted_distance, inverted_value, inverted_node));
+                    }
+                    nodes_with_distance.push((distance, message_value, node));
                 } else {
                     nodes_with_value.push((entry.message_value, entry.node));
                 }
@@ -5251,6 +5272,7 @@ mod tests {
             shift: false,
             ciphertext_modify: false,
             use_hamming_distance: false,
+            mirror_invert_candidates: false,
             bits_decrypt: None,
         })));
         let result = run_message_trial(
@@ -5314,6 +5336,7 @@ mod tests {
             shift: false,
             ciphertext_modify: false,
             use_hamming_distance: false,
+            mirror_invert_candidates: false,
             bits_decrypt: None,
         })));
         let result = run_message_trial(

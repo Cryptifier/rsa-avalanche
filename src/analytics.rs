@@ -35,6 +35,8 @@ pub struct AnalyticsCliArgs {
     pub ciphertext_modify: bool,
     /// Whether avalanche candidates are sorted by Hamming distance.
     pub use_hamming_distance: bool,
+    /// Whether bitwise-inverted avalanche candidates are mirrored into the grid.
+    pub mirror_invert_candidates: bool,
     /// Expected bit width for decryptions.
     pub bits_decrypt: Option<u32>,
 }
@@ -53,6 +55,7 @@ struct AnalyticsCliInfo {
     shift: bool,
     ciphertext_modify: bool,
     use_hamming_distance: bool,
+    mirror_invert_candidates: bool,
     bits_decrypt: Option<u32>,
 }
 
@@ -260,6 +263,7 @@ impl SessionAnalytics {
                 shift: args.shift,
                 ciphertext_modify: args.ciphertext_modify,
                 use_hamming_distance: args.use_hamming_distance,
+                mirror_invert_candidates: args.mirror_invert_candidates,
                 bits_decrypt: args.bits_decrypt,
             },
             steps: Vec::new(),

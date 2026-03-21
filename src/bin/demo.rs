@@ -533,6 +533,9 @@ fn build_avalanche_nodes_unique_d_demo(
     let n_pow_y = ctx.n.pow(y);
     let e_big = ctx.e.clone();
     let use_distance = engine.use_hamming_distance && reference_bits.is_some();
+    let mirror_invert = engine.use_hamming_distance
+        && engine.mirror_invert_candidates
+        && reference_bits.is_some();
 
     struct CandidateInstanceNode {
         candidate_idx: usize,
@@ -604,7 +607,24 @@ fn build_avalanche_nodes_unique_d_demo(
             }
             if engine.use_hamming_distance {
                 if let Some(distance) = entry.distance {
-                    nodes_with_distance.push((distance, entry.message_value, entry.node));
+                    let node = entry.node;
+                    let message_value = entry.message_value;
+                    if mirror_invert {
+                        let mut inverted_bits = node.message_bits.clone();
+                        for bit in &mut inverted_bits {
+                            *bit = !*bit;
+                        }
+                        let inverted_node = AvalancheNode {
+                            biases: vec![0.0; bit_width],
+                            message_bits: inverted_bits,
+                        };
+                        let inverted_value = bits_le_to_biguint(&inverted_node.message_bits);
+                        let reference = reference_bits.expect("checked mirror_invert");
+                        let inverted_distance =
+                            hamming_distance_bits(&inverted_node.message_bits, reference);
+                        nodes_with_distance.push((inverted_distance, inverted_value, inverted_node));
+                    }
+                    nodes_with_distance.push((distance, message_value, node));
                 } else {
                     nodes_with_value.push((entry.message_value, entry.node));
                 }
