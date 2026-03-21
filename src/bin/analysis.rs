@@ -8,7 +8,8 @@ use std::{
 };
 
 use clap::Parser;
-use rsademo::analytics::{AnalyticsCliArgs, SessionAnalytics, write_session_json};
+use rsademo::analytics::{AnalyticsCliArgs, SessionAnalytics};
+use rsademo::logs::write_session_log;
 use rsademo::config::load_config;
 use rsademo::methods::{DemoArgs, run_demo};
 
@@ -145,7 +146,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         if let Ok(mut guard) = analytics_for_handler.lock() {
             guard.finish(Some("interrupted".to_string()));
             let output_path = guard.session_json_path().to_string();
-            if let Err(err) = write_session_json(&output_path, &guard) {
+            if let Err(err) = write_session_log(&output_path, &guard) {
                 eprintln!("Failed to write {}: {}", output_path, err);
             }
         }
@@ -169,7 +170,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     if let Ok(mut guard) = analytics.lock() {
         guard.finish(result.as_ref().err().map(|err| err.to_string()));
         let output_path = guard.session_json_path().to_string();
-        if let Err(err) = write_session_json(&output_path, &guard) {
+        if let Err(err) = write_session_log(&output_path, &guard) {
             eprintln!("Failed to write {}: {}", output_path, err);
         }
     }

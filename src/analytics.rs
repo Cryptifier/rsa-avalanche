@@ -42,7 +42,7 @@ pub struct AnalyticsCliArgs {
 }
 
 #[derive(Debug, Serialize)]
-struct AnalyticsCliInfo {
+pub(crate) struct AnalyticsCliInfo {
     bits: u32,
     message_override: Option<String>,
     public_exponent: u64,
@@ -223,16 +223,16 @@ pub struct RCandidateTraceBatch {
 /// Top-level analytics session payload.
 #[derive(Debug, Serialize)]
 pub struct SessionAnalytics {
-    started_unix_ms: u128,
-    finished_unix_ms: Option<u128>,
-    cli: AnalyticsCliInfo,
-    steps: Vec<StepTiming>,
-    step_summaries: Vec<StepSummary>,
-    features: Vec<FeatureAnalytics>,
-    r_candidate_batches: Vec<RCandidateBatchAnalytics>,
-    r_candidate_accuracy_batches: Vec<RCandidateAccuracyBatch>,
-    r_candidate_traces: Vec<RCandidateTraceBatch>,
-    errors: Vec<String>,
+    pub(crate) started_unix_ms: u128,
+    pub(crate) finished_unix_ms: Option<u128>,
+    pub(crate) cli: AnalyticsCliInfo,
+    pub(crate) steps: Vec<StepTiming>,
+    pub(crate) step_summaries: Vec<StepSummary>,
+    pub(crate) features: Vec<FeatureAnalytics>,
+    pub(crate) r_candidate_batches: Vec<RCandidateBatchAnalytics>,
+    pub(crate) r_candidate_accuracy_batches: Vec<RCandidateAccuracyBatch>,
+    pub(crate) r_candidate_traces: Vec<RCandidateTraceBatch>,
+    pub(crate) errors: Vec<String>,
 }
 
 impl SessionAnalytics {
@@ -551,15 +551,6 @@ pub fn generate_r_candidates_with_analytics(
 ///
 /// # Expected Output
 /// - Writes a JSON file to `path`.
-pub fn write_session_json(
-    path: &str,
-    session: &SessionAnalytics,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let serialized = serde_json::to_string_pretty(session)?;
-    std::fs::write(path, serialized)?;
-    Ok(())
-}
-
 /// Gets the current UNIX time in milliseconds.
 ///
 /// # Parameters
