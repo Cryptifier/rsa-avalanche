@@ -1,5 +1,6 @@
 pub mod analytics;
 pub mod avalanche;
+pub mod bitflow;
 pub mod combiner;
 pub mod config;
 pub mod dsp;
