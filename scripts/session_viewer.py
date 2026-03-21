@@ -139,7 +139,9 @@ def coerce_list(value):
 
 
 def coerce_dict(value):
-    return dict(value) if isinstance(value, dict) else {}
+    if isinstance(value, dict):
+        return dict(value)
+    return {}
 
 
 def coerce_optional(value):
