@@ -10,7 +10,30 @@ from PySide6 import QtCore, QtGui, QtWidgets
 
 def load_session(path):
     with open(path, "r", encoding="utf-8") as handle:
-        return json.load(handle)
+        raw = handle.read()
+    raw_stripped = raw.lstrip()
+    if not raw_stripped:
+        return empty_session()
+    try:
+        data = json.loads(raw)
+        if isinstance(data, dict):
+            if "event" in data and "payload" in data:
+                return build_session_from_events([data])
+            return normalize_session(data)
+        if isinstance(data, list):
+            return build_session_from_events(data)
+    except json.JSONDecodeError:
+        pass
+    events = []
+    for line in raw.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            events.append(json.loads(line))
+        except json.JSONDecodeError:
+            continue
+    return build_session_from_events(events)
 
 
 def format_unix_ms(value):
@@ -71,11 +94,283 @@ def empty_session():
         "started_unix_ms": None,
         "finished_unix_ms": None,
         "cli": {},
+        "steps": [],
+        "step_summaries": [],
         "features": [],
         "r_candidate_batches": [],
         "r_candidate_accuracy_batches": [],
+        "r_candidate_traces": [],
         "errors": [],
     }
+
+
+def coerce_str(value):
+    if value is None:
+        return ""
+    return str(value)
+
+
+def coerce_int(value):
+    if value is None:
+        return 0
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return 0
+
+
+def coerce_float(value):
+    if value is None:
+        return 0.0
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def coerce_bool(value):
+    if value is None:
+        return False
+    return bool(value)
+
+
+def coerce_list(value):
+    return list(value) if isinstance(value, list) else []
+
+
+def coerce_dict(value):
+    return dict(value) if isinstance(value, dict) else {}
+
+
+def coerce_optional(value):
+    return value if value is not None else None
+
+
+def normalize_cli(cli):
+    cli = coerce_dict(cli)
+    return {
+        "bits": coerce_int(cli.get("bits")),
+        "message_override": coerce_optional(cli.get("message_override")),
+        "public_exponent": coerce_int(cli.get("public_exponent")),
+        "seed": coerce_optional(cli.get("seed")),
+        "crypto_rng": coerce_bool(cli.get("crypto_rng")),
+        "config_path": coerce_str(cli.get("config_path")),
+        "tests": coerce_bool(cli.get("tests")),
+        "export": coerce_bool(cli.get("export")),
+        "session_json": coerce_str(cli.get("session_json")),
+        "shift": coerce_bool(cli.get("shift")),
+        "ciphertext_modify": coerce_bool(cli.get("ciphertext_modify")),
+        "use_hamming_distance": coerce_bool(cli.get("use_hamming_distance")),
+        "mirror_invert_candidates": coerce_bool(cli.get("mirror_invert_candidates")),
+        "bits_decrypt": coerce_optional(cli.get("bits_decrypt")),
+    }
+
+
+def normalize_feature(feature):
+    feature = coerce_dict(feature)
+    return {
+        "name": coerce_str(feature.get("name")),
+        "enabled": coerce_bool(feature.get("enabled")),
+        "duration_ms": coerce_optional(feature.get("duration_ms")),
+        "notes": coerce_list(feature.get("notes")),
+        "stats": coerce_dict(feature.get("stats")),
+    }
+
+
+def normalize_step(step):
+    step = coerce_dict(step)
+    return {
+        "name": coerce_str(step.get("name")),
+        "duration_ms": coerce_int(step.get("duration_ms")),
+    }
+
+
+def normalize_step_summary(summary):
+    summary = coerce_dict(summary)
+    return {
+        "name": coerce_str(summary.get("name")),
+        "count": coerce_int(summary.get("count")),
+        "total_ms": coerce_int(summary.get("total_ms")),
+        "mean_ms": coerce_float(summary.get("mean_ms")),
+    }
+
+
+def normalize_r_candidate_factor(factor):
+    factor = coerce_dict(factor)
+    return {
+        "prime": coerce_str(factor.get("prime")),
+        "exponent": coerce_int(factor.get("exponent")),
+        "prime_bits": coerce_int(factor.get("prime_bits")),
+    }
+
+
+def normalize_r_candidate_entry(entry):
+    entry = coerce_dict(entry)
+    factors = [normalize_r_candidate_factor(factor) for factor in coerce_list(entry.get("factors"))]
+    return {
+        "r": coerce_str(entry.get("r")),
+        "r_bits": coerce_int(entry.get("r_bits")),
+        "factors": factors,
+    }
+
+
+def normalize_r_candidate_batch(batch):
+    batch = coerce_dict(batch)
+    candidates = [
+        normalize_r_candidate_entry(entry)
+        for entry in coerce_list(batch.get("candidates"))
+    ]
+    return {
+        "context": coerce_str(batch.get("context")),
+        "mode": coerce_str(batch.get("mode")),
+        "target_count": coerce_int(batch.get("target_count")),
+        "generated_count": coerce_int(batch.get("generated_count")),
+        "duration_ms": coerce_int(batch.get("duration_ms")),
+        "reuse_path": coerce_str(batch.get("reuse_path")),
+        "reuse_enabled": coerce_bool(batch.get("reuse_enabled")),
+        "reuse_append_only": coerce_bool(batch.get("reuse_append_only")),
+        "min_factor": coerce_str(batch.get("min_factor")),
+        "process_scale": coerce_int(batch.get("process_scale")),
+        "small_prime_factors": coerce_int(batch.get("small_prime_factors")),
+        "max_factors": coerce_int(batch.get("max_factors")),
+        "target_bit_length": coerce_optional(batch.get("target_bit_length")),
+        "candidates": candidates,
+    }
+
+
+def normalize_r_candidate_accuracy_entry(entry):
+    entry = coerce_dict(entry)
+    factors = [normalize_r_candidate_factor(factor) for factor in coerce_list(entry.get("factors"))]
+    return {
+        "r": coerce_str(entry.get("r")),
+        "r_bits": coerce_int(entry.get("r_bits")),
+        "factors": factors,
+        "accuracy_pct": coerce_float(entry.get("accuracy_pct")),
+        "hbc_ciphertexts_r": coerce_list(entry.get("hbc_ciphertexts_r")),
+        "candidate_decryptions": coerce_list(entry.get("candidate_decryptions")),
+    }
+
+
+def normalize_r_candidate_accuracy_batch(batch):
+    batch = coerce_dict(batch)
+    candidates = [
+        normalize_r_candidate_accuracy_entry(entry)
+        for entry in coerce_list(batch.get("candidates"))
+    ]
+    return {
+        "context": coerce_str(batch.get("context")),
+        "messages": coerce_list(batch.get("messages")),
+        "ciphertexts": coerce_list(batch.get("ciphertexts")),
+        "shifted_ciphertexts": coerce_list(batch.get("shifted_ciphertexts")),
+        "rabin_exponent": coerce_int(batch.get("rabin_exponent")),
+        "tonelli_shanks_modulus": coerce_str(batch.get("tonelli_shanks_modulus")),
+        "tonelli_shanks_ciphertexts": coerce_list(batch.get("tonelli_shanks_ciphertexts")),
+        "candidates": candidates,
+        "beam_match_pct": coerce_optional(batch.get("beam_match_pct")),
+        "beam_ones_match_pct": coerce_optional(batch.get("beam_ones_match_pct")),
+        "beam_score": coerce_optional(batch.get("beam_score")),
+        "beam_bit_width": coerce_optional(batch.get("beam_bit_width")),
+    }
+
+
+def normalize_r_candidate_trace_entry(entry):
+    entry = coerce_dict(entry)
+    return {
+        "r": coerce_str(entry.get("r")),
+        "r_bits": coerce_int(entry.get("r_bits")),
+        "hbc_ciphertext_r": coerce_str(entry.get("hbc_ciphertext_r")),
+        "candidate_decryption": coerce_str(entry.get("candidate_decryption")),
+    }
+
+
+def normalize_r_candidate_trace_batch(batch):
+    batch = coerce_dict(batch)
+    candidates = [
+        normalize_r_candidate_trace_entry(entry)
+        for entry in coerce_list(batch.get("candidates"))
+    ]
+    return {
+        "context": coerce_str(batch.get("context")),
+        "message": coerce_str(batch.get("message")),
+        "ciphertext": coerce_str(batch.get("ciphertext")),
+        "shifted_ciphertext": coerce_str(batch.get("shifted_ciphertext")),
+        "rabin_exponent": coerce_int(batch.get("rabin_exponent")),
+        "tonelli_shanks_modulus": coerce_str(batch.get("tonelli_shanks_modulus")),
+        "tonelli_shanks_ciphertext": coerce_str(batch.get("tonelli_shanks_ciphertext")),
+        "candidates": candidates,
+    }
+
+
+def normalize_session(session):
+    session = coerce_dict(session)
+    normalized = empty_session()
+    normalized["started_unix_ms"] = coerce_optional(session.get("started_unix_ms"))
+    normalized["finished_unix_ms"] = coerce_optional(session.get("finished_unix_ms"))
+    normalized["cli"] = normalize_cli(session.get("cli", {}))
+    normalized["steps"] = [
+        normalize_step(step) for step in coerce_list(session.get("steps"))
+    ]
+    normalized["step_summaries"] = [
+        normalize_step_summary(summary)
+        for summary in coerce_list(session.get("step_summaries"))
+    ]
+    normalized["features"] = [
+        normalize_feature(feature)
+        for feature in coerce_list(session.get("features"))
+    ]
+    normalized["r_candidate_batches"] = [
+        normalize_r_candidate_batch(batch)
+        for batch in coerce_list(session.get("r_candidate_batches"))
+    ]
+    normalized["r_candidate_accuracy_batches"] = [
+        normalize_r_candidate_accuracy_batch(batch)
+        for batch in coerce_list(session.get("r_candidate_accuracy_batches"))
+    ]
+    normalized["r_candidate_traces"] = [
+        normalize_r_candidate_trace_batch(batch)
+        for batch in coerce_list(session.get("r_candidate_traces"))
+    ]
+    normalized["errors"] = coerce_list(session.get("errors"))
+    return normalized
+
+
+def build_session_from_events(events):
+    session = empty_session()
+    for event in events:
+        if not isinstance(event, dict):
+            continue
+        event_name = event.get("event")
+        payload = event.get("payload", {})
+        if event_name == "session_start":
+            payload = coerce_dict(payload)
+            session["started_unix_ms"] = coerce_optional(payload.get("started_unix_ms"))
+            session["cli"] = normalize_cli(payload.get("cli", {}))
+        elif event_name == "session_finish":
+            payload = coerce_dict(payload)
+            session["finished_unix_ms"] = coerce_optional(payload.get("finished_unix_ms"))
+            session["errors"] = coerce_list(payload.get("errors"))
+        elif event_name == "step":
+            session["steps"].append(normalize_step(payload))
+        elif event_name == "step_summary":
+            session["step_summaries"].append(normalize_step_summary(payload))
+        elif event_name == "feature":
+            normalized = normalize_feature(payload)
+            existing = get_feature(session, normalized.get("name"))
+            if existing is None:
+                session["features"].append(normalized)
+            else:
+                existing.update(normalized)
+        elif event_name == "r_candidate_batch":
+            session["r_candidate_batches"].append(normalize_r_candidate_batch(payload))
+        elif event_name == "r_candidate_accuracy_batch":
+            session["r_candidate_accuracy_batches"].append(
+                normalize_r_candidate_accuracy_batch(payload)
+            )
+        elif event_name == "r_candidate_trace_batch":
+            session["r_candidate_traces"].append(
+                normalize_r_candidate_trace_batch(payload)
+            )
+    return normalize_session(session)
 
 
 def compute_basic_stats(values):
