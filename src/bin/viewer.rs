@@ -73,6 +73,7 @@ struct ViewerArgs {
 }
 
 impl ViewerArgs {
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
     fn parse() -> Self {
         let mut session_path = PathBuf::from("session.log");
         let mut log_dir = PathBuf::from("logs");
@@ -168,19 +169,25 @@ struct PendingUpdates {
 #[derive(Debug)]
 struct ViewerApp {
     session: Session,
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
     session_path: PathBuf,
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
     log_dir: PathBuf,
     log_entries: Vec<LogEntry>,
     selected_log: Option<String>,
     status: String,
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
     last_poll: Instant,
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
     last_scan: Instant,
     #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
     last_log_fetch: Instant,
     #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
     last_session_fetch: Instant,
     ndjson_mode: bool,
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
     offset: u64,
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
     buffer: String,
     tab: Tab,
     bit_true_bit_idx: usize,
