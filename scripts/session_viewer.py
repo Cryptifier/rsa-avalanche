@@ -9,8 +9,42 @@ from PySide6 import QtCore, QtGui, QtWidgets
 
 
 def load_session(path):
+    session, _is_ndjson = load_session_with_mode(path)
+    return session
+
+
+def load_session_with_mode(path):
     with open(path, "r", encoding="utf-8") as handle:
-        return json.load(handle)
+        raw = handle.read()
+    raw_stripped = raw.lstrip()
+    if not raw_stripped:
+        return empty_session(), False
+    try:
+        data = json.loads(raw)
+        if isinstance(data, dict):
+            if "event" in data and "payload" in data:
+                return build_session_from_events([data]), True
+            return normalize_session(data), False
+        if isinstance(data, list):
+            is_events = all(
+                isinstance(item, dict) and "event" in item and "payload" in item
+                for item in data
+            )
+            if is_events:
+                return build_session_from_events(data), True
+            return normalize_session({"r_candidate_batches": data}), False
+    except json.JSONDecodeError:
+        pass
+    events = []
+    for line in raw.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            events.append(json.loads(line))
+        except json.JSONDecodeError:
+            continue
+    return build_session_from_events(events), True
 
 
 def format_unix_ms(value):
@@ -66,15 +100,410 @@ def hex_to_bits_le(hex_str, bit_width):
     return bits
 
 
+def bits_to_preview(bits, max_len=64):
+    if not bits:
+        return ""
+    text = "".join("1" if int(bit) else "0" for bit in bits)
+    if len(text) > max_len:
+        return text[:max_len] + "..."
+    return text
+
+
+def bit_ones_pct(bits):
+    if not bits:
+        return 0.0
+    ones = sum(1 for bit in bits if int(bit))
+    return 100.0 * ones / len(bits)
+
+
 def empty_session():
     return {
         "started_unix_ms": None,
         "finished_unix_ms": None,
         "cli": {},
+        "steps": [],
+        "step_summaries": [],
         "features": [],
         "r_candidate_batches": [],
+        "r_candidate_accuracy_batches": [],
+        "r_candidate_traces": [],
+        "bitflow_runs": [],
+        "bitflow_candidates": [],
         "errors": [],
     }
+
+
+def coerce_str(value):
+    if value is None:
+        return ""
+    return str(value)
+
+
+def coerce_int(value):
+    if value is None:
+        return 0
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return 0
+
+
+def coerce_float(value):
+    if value is None:
+        return 0.0
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def coerce_bool(value):
+    if value is None:
+        return False
+    return bool(value)
+
+
+def coerce_list(value):
+    return list(value) if isinstance(value, list) else []
+
+
+def coerce_dict(value):
+    if isinstance(value, dict):
+        return dict(value)
+    return {}
+
+
+def coerce_optional(value):
+    return value if value is not None else None
+
+
+def normalize_cli(cli):
+    cli = coerce_dict(cli)
+    return {
+        "bits": coerce_int(cli.get("bits")),
+        "message_override": coerce_optional(cli.get("message_override")),
+        "public_exponent": coerce_int(cli.get("public_exponent")),
+        "seed": coerce_optional(cli.get("seed")),
+        "crypto_rng": coerce_bool(cli.get("crypto_rng")),
+        "config_path": coerce_str(cli.get("config_path")),
+        "tests": coerce_bool(cli.get("tests")),
+        "export": coerce_bool(cli.get("export")),
+        "session_json": coerce_str(cli.get("session_json")),
+        "shift": coerce_bool(cli.get("shift")),
+        "ciphertext_modify": coerce_bool(cli.get("ciphertext_modify")),
+        "use_hamming_distance": coerce_bool(cli.get("use_hamming_distance")),
+        "mirror_invert_candidates": coerce_bool(cli.get("mirror_invert_candidates")),
+        "bits_decrypt": coerce_optional(cli.get("bits_decrypt")),
+    }
+
+
+def normalize_feature(feature):
+    feature = coerce_dict(feature)
+    return {
+        "name": coerce_str(feature.get("name")),
+        "enabled": coerce_bool(feature.get("enabled")),
+        "duration_ms": coerce_optional(feature.get("duration_ms")),
+        "notes": coerce_list(feature.get("notes")),
+        "stats": coerce_dict(feature.get("stats")),
+    }
+
+
+def normalize_bit_list(values):
+    normalized = []
+    for value in coerce_list(values):
+        if isinstance(value, bool):
+            normalized.append(1 if value else 0)
+            continue
+        try:
+            normalized.append(1 if int(value) else 0)
+        except (TypeError, ValueError):
+            normalized.append(0)
+    return normalized
+
+
+def normalize_bitflow_run(run):
+    run = coerce_dict(run)
+    return {
+        "run_id": coerce_str(run.get("run_id")),
+        "bit_width": coerce_int(run.get("bit_width")),
+        "min_partition_size": coerce_int(run.get("min_partition_size")),
+        "max_partition_size": coerce_int(run.get("max_partition_size")),
+        "progression": coerce_str(run.get("progression")),
+        "max_iterations": coerce_int(run.get("max_iterations")),
+        "max_partitions_to_flip": coerce_int(run.get("max_partitions_to_flip")),
+        "per_candidate_trials": coerce_int(run.get("per_candidate_trials")),
+        "seed": coerce_int(run.get("seed")),
+        "pow_mod_base": coerce_int(run.get("pow_mod_base")),
+        "pow_mod_modulus": coerce_int(run.get("pow_mod_modulus")),
+        "message_bits": normalize_bit_list(run.get("message_bits")),
+    }
+
+
+def normalize_bitflow_candidate(candidate):
+    candidate = coerce_dict(candidate)
+    return {
+        "run_id": coerce_str(candidate.get("run_id")),
+        "iteration": coerce_int(candidate.get("iteration")),
+        "trial": coerce_int(candidate.get("trial")),
+        "partition_size": coerce_int(candidate.get("partition_size")),
+        "inverted_partitions": [
+            coerce_int(value)
+            for value in coerce_list(candidate.get("inverted_partitions"))
+        ],
+        "bits": normalize_bit_list(candidate.get("bits")),
+    }
+
+
+def normalize_step(step):
+    step = coerce_dict(step)
+    return {
+        "name": coerce_str(step.get("name")),
+        "duration_ms": coerce_int(step.get("duration_ms")),
+    }
+
+
+def normalize_step_summary(summary):
+    summary = coerce_dict(summary)
+    return {
+        "name": coerce_str(summary.get("name")),
+        "count": coerce_int(summary.get("count")),
+        "total_ms": coerce_int(summary.get("total_ms")),
+        "mean_ms": coerce_float(summary.get("mean_ms")),
+    }
+
+
+def normalize_r_candidate_factor(factor):
+    factor = coerce_dict(factor)
+    return {
+        "prime": coerce_str(factor.get("prime")),
+        "exponent": coerce_int(factor.get("exponent")),
+        "prime_bits": coerce_int(factor.get("prime_bits")),
+    }
+
+
+def normalize_r_candidate_entry(entry):
+    entry = coerce_dict(entry)
+    factors = [normalize_r_candidate_factor(factor) for factor in coerce_list(entry.get("factors"))]
+    return {
+        "r": coerce_str(entry.get("r")),
+        "r_bits": coerce_int(entry.get("r_bits")),
+        "factors": factors,
+    }
+
+
+def normalize_r_candidate_batch(batch):
+    batch = coerce_dict(batch)
+    candidates = [
+        normalize_r_candidate_entry(entry)
+        for entry in coerce_list(batch.get("candidates"))
+    ]
+    return {
+        "context": coerce_str(batch.get("context")),
+        "mode": coerce_str(batch.get("mode")),
+        "target_count": coerce_int(batch.get("target_count")),
+        "generated_count": coerce_int(batch.get("generated_count")),
+        "duration_ms": coerce_int(batch.get("duration_ms")),
+        "reuse_path": coerce_str(batch.get("reuse_path")),
+        "reuse_enabled": coerce_bool(batch.get("reuse_enabled")),
+        "reuse_append_only": coerce_bool(batch.get("reuse_append_only")),
+        "min_factor": coerce_str(batch.get("min_factor")),
+        "process_scale": coerce_int(batch.get("process_scale")),
+        "small_prime_factors": coerce_int(batch.get("small_prime_factors")),
+        "max_factors": coerce_int(batch.get("max_factors")),
+        "target_bit_length": coerce_optional(batch.get("target_bit_length")),
+        "candidates": candidates,
+    }
+
+
+def normalize_r_candidate_accuracy_entry(entry):
+    entry = coerce_dict(entry)
+    factors = [normalize_r_candidate_factor(factor) for factor in coerce_list(entry.get("factors"))]
+    return {
+        "r": coerce_str(entry.get("r")),
+        "r_bits": coerce_int(entry.get("r_bits")),
+        "factors": factors,
+        "accuracy_pct": coerce_float(entry.get("accuracy_pct")),
+        "hbc_ciphertexts_r": coerce_list(entry.get("hbc_ciphertexts_r")),
+        "candidate_decryptions": coerce_list(entry.get("candidate_decryptions")),
+    }
+
+
+def normalize_r_candidate_accuracy_batch(batch):
+    batch = coerce_dict(batch)
+    candidates = [
+        normalize_r_candidate_accuracy_entry(entry)
+        for entry in coerce_list(batch.get("candidates"))
+    ]
+    return {
+        "context": coerce_str(batch.get("context")),
+        "messages": coerce_list(batch.get("messages")),
+        "ciphertexts": coerce_list(batch.get("ciphertexts")),
+        "shifted_ciphertexts": coerce_list(batch.get("shifted_ciphertexts")),
+        "rabin_exponent": coerce_int(batch.get("rabin_exponent")),
+        "tonelli_shanks_modulus": coerce_str(batch.get("tonelli_shanks_modulus")),
+        "tonelli_shanks_ciphertexts": coerce_list(batch.get("tonelli_shanks_ciphertexts")),
+        "candidates": candidates,
+        "beam_match_pct": coerce_optional(batch.get("beam_match_pct")),
+        "beam_ones_match_pct": coerce_optional(batch.get("beam_ones_match_pct")),
+        "beam_score": coerce_optional(batch.get("beam_score")),
+        "beam_bit_width": coerce_optional(batch.get("beam_bit_width")),
+    }
+
+
+def normalize_r_candidate_trace_entry(entry):
+    entry = coerce_dict(entry)
+    return {
+        "r": coerce_str(entry.get("r")),
+        "r_bits": coerce_int(entry.get("r_bits")),
+        "hbc_ciphertext_r": coerce_str(entry.get("hbc_ciphertext_r")),
+        "candidate_decryption": coerce_str(entry.get("candidate_decryption")),
+    }
+
+
+def normalize_r_candidate_trace_batch(batch):
+    batch = coerce_dict(batch)
+    candidates = [
+        normalize_r_candidate_trace_entry(entry)
+        for entry in coerce_list(batch.get("candidates"))
+    ]
+    return {
+        "context": coerce_str(batch.get("context")),
+        "message": coerce_str(batch.get("message")),
+        "ciphertext": coerce_str(batch.get("ciphertext")),
+        "shifted_ciphertext": coerce_str(batch.get("shifted_ciphertext")),
+        "rabin_exponent": coerce_int(batch.get("rabin_exponent")),
+        "tonelli_shanks_modulus": coerce_str(batch.get("tonelli_shanks_modulus")),
+        "tonelli_shanks_ciphertext": coerce_str(batch.get("tonelli_shanks_ciphertext")),
+        "candidates": candidates,
+    }
+
+
+def normalize_session(session):
+    session = coerce_dict(session)
+    normalized = empty_session()
+    normalized["started_unix_ms"] = coerce_optional(session.get("started_unix_ms"))
+    normalized["finished_unix_ms"] = coerce_optional(session.get("finished_unix_ms"))
+    normalized["cli"] = normalize_cli(session.get("cli", {}))
+    normalized["steps"] = [
+        normalize_step(step) for step in coerce_list(session.get("steps"))
+    ]
+    normalized["step_summaries"] = [
+        normalize_step_summary(summary)
+        for summary in coerce_list(session.get("step_summaries"))
+    ]
+    normalized["features"] = [
+        normalize_feature(feature)
+        for feature in coerce_list(session.get("features"))
+    ]
+    normalized["r_candidate_batches"] = [
+        normalize_r_candidate_batch(batch)
+        for batch in coerce_list(session.get("r_candidate_batches"))
+    ]
+    normalized["r_candidate_accuracy_batches"] = [
+        normalize_r_candidate_accuracy_batch(batch)
+        for batch in coerce_list(session.get("r_candidate_accuracy_batches"))
+    ]
+    normalized["r_candidate_traces"] = [
+        normalize_r_candidate_trace_batch(batch)
+        for batch in coerce_list(session.get("r_candidate_traces"))
+    ]
+    normalized["bitflow_runs"] = [
+        normalize_bitflow_run(run)
+        for run in coerce_list(session.get("bitflow_runs"))
+    ]
+    normalized["bitflow_candidates"] = [
+        normalize_bitflow_candidate(candidate)
+        for candidate in coerce_list(session.get("bitflow_candidates"))
+    ]
+    normalized["errors"] = coerce_list(session.get("errors"))
+    for idx, run in enumerate(normalized["bitflow_runs"]):
+        if not run.get("run_id"):
+            run["run_id"] = f"run-{idx + 1}"
+    for candidate in normalized["bitflow_candidates"]:
+        if not candidate.get("run_id"):
+            candidate["run_id"] = "run-unknown"
+    return normalized
+
+
+def apply_event_to_session(session, event):
+    event_name = event.get("event")
+    payload = event.get("payload", {})
+    if event_name == "session_start":
+        payload = coerce_dict(payload)
+        session["started_unix_ms"] = coerce_optional(payload.get("started_unix_ms"))
+        session["cli"] = normalize_cli(payload.get("cli", {}))
+    elif event_name == "session_finish":
+        payload = coerce_dict(payload)
+        session["finished_unix_ms"] = coerce_optional(payload.get("finished_unix_ms"))
+        session["errors"] = coerce_list(payload.get("errors"))
+    elif event_name == "step":
+        session["steps"].append(normalize_step(payload))
+    elif event_name == "step_summary":
+        session["step_summaries"].append(normalize_step_summary(payload))
+    elif event_name == "feature":
+        normalized = normalize_feature(payload)
+        existing = get_feature(session, normalized.get("name"))
+        if existing is None:
+            session["features"].append(normalized)
+        else:
+            existing.update(normalized)
+    elif event_name == "r_candidate_batch":
+        session["r_candidate_batches"].append(normalize_r_candidate_batch(payload))
+    elif event_name == "r_candidate_accuracy_batch":
+        session["r_candidate_accuracy_batches"].append(
+            normalize_r_candidate_accuracy_batch(payload)
+        )
+    elif event_name == "r_candidate_trace_batch":
+        session["r_candidate_traces"].append(
+            normalize_r_candidate_trace_batch(payload)
+        )
+    elif event_name == "bitflow_run":
+        run = normalize_bitflow_run(payload)
+        if not run.get("run_id"):
+            run["run_id"] = f"run-{len(session['bitflow_runs']) + 1}"
+        session["bitflow_runs"].append(run)
+    elif event_name == "bitflow_candidate":
+        candidate = normalize_bitflow_candidate(payload)
+        if not candidate.get("run_id"):
+            candidate["run_id"] = "run-unknown"
+        session["bitflow_candidates"].append(candidate)
+
+
+def build_session_from_events(events):
+    session = empty_session()
+    for event in events:
+        if not isinstance(event, dict):
+            continue
+        if "event" not in event:
+            continue
+        apply_event_to_session(session, event)
+    return normalize_session(session)
+
+
+def compute_basic_stats(values):
+    if not values:
+        return None, None, None, None
+    count = len(values)
+    mean = sum(values) / count
+    variance = sum((value - mean) ** 2 for value in values) / count
+    stddev = variance ** 0.5
+    return mean, stddev, min(values), max(values)
+
+
+def pearson_corr(pairs):
+    if len(pairs) < 2:
+        return None
+    xs = [pair[0] for pair in pairs]
+    ys = [pair[1] for pair in pairs]
+    mean_x = sum(xs) / len(xs)
+    mean_y = sum(ys) / len(ys)
+    num = sum((x - mean_x) * (y - mean_y) for x, y in pairs)
+    denom_x = sum((x - mean_x) ** 2 for x in xs)
+    denom_y = sum((y - mean_y) ** 2 for y in ys)
+    denom = (denom_x * denom_y) ** 0.5
+    if denom == 0:
+        return None
+    return num / denom
 
 
 def collect_log_paths(default_paths, log_dir):
@@ -1171,6 +1600,10 @@ class SessionFileWatcher(QtCore.QObject):
     def __init__(self, path, parent=None):
         super().__init__(parent)
         self._path = ""
+        self._offset = 0
+        self._buffer = ""
+        self._session = empty_session()
+        self._ndjson_mode = False
         self._watcher = QtCore.QFileSystemWatcher(self)
         self._watcher.fileChanged.connect(self._schedule_reload)
         self._watcher.directoryChanged.connect(self._schedule_reload)
@@ -1198,20 +1631,77 @@ class SessionFileWatcher(QtCore.QObject):
     def _schedule_reload(self, *_args):
         self._debounce.start()
 
-    def _reload(self):
+    def _reload(self, full_reload=False):
         self._watch_paths()
         if not self._path:
             return
         try:
-            session = load_session(self._path)
+            if full_reload or not self._ndjson_mode:
+                session, is_ndjson = load_session_with_mode(self._path)
+                self._session = session
+                self._ndjson_mode = is_ndjson
+                if self._ndjson_mode:
+                    try:
+                        self._offset = os.path.getsize(self._path)
+                    except OSError:
+                        self._offset = 0
+                    self._buffer = ""
+                self.session_updated.emit(session)
+                return
+            updated = self._ingest_new_lines()
+            if updated:
+                self.session_updated.emit(self._session)
         except (OSError, json.JSONDecodeError) as exc:
             self.error.emit(str(exc))
             return
-        self.session_updated.emit(session)
+
+    def _ingest_new_lines(self):
+        if not os.path.exists(self._path):
+            return False
+        try:
+            size = os.path.getsize(self._path)
+        except OSError:
+            return False
+        if size < self._offset:
+            self._offset = 0
+            self._buffer = ""
+            self._session = empty_session()
+        with open(self._path, "r", encoding="utf-8") as handle:
+            handle.seek(self._offset)
+            chunk = handle.read()
+            self._offset = handle.tell()
+        if not chunk:
+            return False
+        data = self._buffer + chunk
+        lines = data.splitlines()
+        if data and not data.endswith("\n"):
+            self._buffer = lines.pop() if lines else data
+        else:
+            self._buffer = ""
+        updated = False
+        for line in lines:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                event = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(event, dict) or "event" not in event:
+                continue
+            apply_event_to_session(self._session, event)
+            updated = True
+        return updated
 
     def set_path(self, path):
         self._path = os.path.abspath(path) if path else ""
+        self._offset = 0
+        self._buffer = ""
+        self._session = empty_session()
+        self._ndjson_mode = False
         self._watch_paths()
+        if self._path:
+            self._reload(full_reload=True)
 
 
 class SessionViewer(QtWidgets.QMainWindow):
@@ -1311,6 +1801,8 @@ class SessionViewer(QtWidgets.QMainWindow):
         self._tabs.addTab(self._build_bit_similarity_tab(session), "Bit Similarity")
         self._tabs.addTab(self._build_bit_true_timeline_tab(session), "Bit True Timeline")
         self._tabs.addTab(self._build_avalanche_tab(session), "Avalanche")
+        self._tabs.addTab(self._build_beam_vs_r_tab(session), "Beam vs R")
+        self._tabs.addTab(self._build_bitflow_tab(session), "Bitflow")
         if self._tabs.count():
             self._tabs.setCurrentIndex(min(current_index, self._tabs.count() - 1))
         if self._current_session_path:
@@ -1501,6 +1993,288 @@ class SessionViewer(QtWidgets.QMainWindow):
         table.resizeColumnsToContents()
         layout.addWidget(table)
 
+        return widget
+
+    def _build_beam_vs_r_tab(self, session):
+        widget = QtWidgets.QWidget()
+        layout = QtWidgets.QVBoxLayout(widget)
+
+        batches = session.get("r_candidate_accuracy_batches", []) or []
+        if not batches:
+            layout.addWidget(
+                QtWidgets.QLabel(
+                    "Beam vs r-candidate data not found. Run analysis batches to populate it."
+                )
+            )
+            return widget
+
+        rows = []
+        mean_pairs = []
+        max_pairs = []
+        near_100 = 0
+        for idx, batch in enumerate(batches, start=1):
+            candidates = batch.get("candidates", []) or []
+            accuracies = [
+                entry.get("accuracy_pct")
+                for entry in candidates
+                if isinstance(entry.get("accuracy_pct"), (int, float))
+            ]
+            mean_acc, stddev_acc, min_acc, max_acc = compute_basic_stats(accuracies)
+            beam_match = batch.get("beam_match_pct")
+            beam_ones = batch.get("beam_ones_match_pct")
+            beam_score = batch.get("beam_score")
+            beam_bits = batch.get("beam_bit_width")
+            if isinstance(beam_match, (int, float)) and isinstance(mean_acc, (int, float)):
+                mean_pairs.append((float(beam_match), float(mean_acc)))
+            if isinstance(beam_match, (int, float)) and isinstance(max_acc, (int, float)):
+                max_pairs.append((float(beam_match), float(max_acc)))
+            if isinstance(beam_match, (int, float)) and beam_match >= 99.0:
+                near_100 += 1
+
+            rows.append(
+                {
+                    "batch": batch.get("context", f"batch_{idx}"),
+                    "beam_match": beam_match,
+                    "beam_ones": beam_ones,
+                    "beam_score": beam_score,
+                    "beam_bits": beam_bits,
+                    "r_mean": mean_acc,
+                    "r_max": max_acc,
+                    "r_min": min_acc,
+                    "r_stddev": stddev_acc,
+                    "candidate_count": len(candidates),
+                }
+            )
+
+        corr_mean = pearson_corr(mean_pairs)
+        corr_max = pearson_corr(max_pairs)
+        summary_lines = [
+            f"Batches with beam match >= 99%: {near_100} / {len(batches)}"
+        ]
+        if corr_mean is not None:
+            summary_lines.append(f"Correlation (beam match vs r mean): {corr_mean:.3f}")
+        else:
+            summary_lines.append("Correlation (beam match vs r mean): N/A")
+        if corr_max is not None:
+            summary_lines.append(f"Correlation (beam match vs r max): {corr_max:.3f}")
+        else:
+            summary_lines.append("Correlation (beam match vs r max): N/A")
+
+        layout.addWidget(QtWidgets.QLabel("\n".join(summary_lines)))
+
+        table = QtWidgets.QTableWidget(len(rows), 10)
+        table.setHorizontalHeaderLabels(
+            [
+                "Batch",
+                "Beam Match %",
+                "Beam Ones %",
+                "Beam Score",
+                "Beam Bits",
+                "R Mean %",
+                "R Max %",
+                "R Min %",
+                "R Stddev",
+                "Candidates",
+            ]
+        )
+        table.verticalHeader().setVisible(False)
+        table.setEditTriggers(QtWidgets.QAbstractItemView.EditTrigger.NoEditTriggers)
+
+        for row_idx, row in enumerate(rows):
+            table.setItem(row_idx, 0, QtWidgets.QTableWidgetItem(str(row["batch"])))
+            table.setItem(
+                row_idx,
+                1,
+                QtWidgets.QTableWidgetItem(
+                    f"{row['beam_match']:.2f}" if isinstance(row["beam_match"], (int, float)) else ""
+                ),
+            )
+            table.setItem(
+                row_idx,
+                2,
+                QtWidgets.QTableWidgetItem(
+                    f"{row['beam_ones']:.2f}" if isinstance(row["beam_ones"], (int, float)) else ""
+                ),
+            )
+            table.setItem(
+                row_idx,
+                3,
+                QtWidgets.QTableWidgetItem(
+                    f"{row['beam_score']:.4f}" if isinstance(row["beam_score"], (int, float)) else ""
+                ),
+            )
+            table.setItem(
+                row_idx,
+                4,
+                QtWidgets.QTableWidgetItem(
+                    str(row["beam_bits"]) if row["beam_bits"] is not None else ""
+                ),
+            )
+            table.setItem(
+                row_idx,
+                5,
+                QtWidgets.QTableWidgetItem(
+                    f"{row['r_mean']:.2f}" if isinstance(row["r_mean"], (int, float)) else ""
+                ),
+            )
+            table.setItem(
+                row_idx,
+                6,
+                QtWidgets.QTableWidgetItem(
+                    f"{row['r_max']:.2f}" if isinstance(row["r_max"], (int, float)) else ""
+                ),
+            )
+            table.setItem(
+                row_idx,
+                7,
+                QtWidgets.QTableWidgetItem(
+                    f"{row['r_min']:.2f}" if isinstance(row["r_min"], (int, float)) else ""
+                ),
+            )
+            table.setItem(
+                row_idx,
+                8,
+                QtWidgets.QTableWidgetItem(
+                    f"{row['r_stddev']:.2f}" if isinstance(row["r_stddev"], (int, float)) else ""
+                ),
+            )
+            table.setItem(
+                row_idx,
+                9,
+                QtWidgets.QTableWidgetItem(str(row["candidate_count"])),
+            )
+
+        table.resizeColumnsToContents()
+        layout.addWidget(table)
+        return widget
+
+    def _build_bitflow_tab(self, session):
+        widget = QtWidgets.QWidget()
+        layout = QtWidgets.QVBoxLayout(widget)
+
+        runs = session.get("bitflow_runs", []) or []
+        candidates = session.get("bitflow_candidates", []) or []
+        if not runs and not candidates:
+            layout.addWidget(QtWidgets.QLabel("No bitflow events recorded."))
+            return widget
+
+        run_lookup = {run.get("run_id"): run for run in runs if run.get("run_id")}
+        combo = QtWidgets.QComboBox()
+        combo.addItem("All runs")
+        for run_id in run_lookup:
+            combo.addItem(run_id)
+
+        summary_label = QtWidgets.QLabel("")
+
+        run_table = QtWidgets.QTableWidget(0, 2)
+        run_table.setHorizontalHeaderLabels(["Field", "Value"])
+        run_table.verticalHeader().setVisible(False)
+        run_table.setEditTriggers(QtWidgets.QAbstractItemView.EditTrigger.NoEditTriggers)
+
+        candidate_table = QtWidgets.QTableWidget(0, 7)
+        candidate_table.setHorizontalHeaderLabels(
+            [
+                "Run",
+                "Iter",
+                "Trial",
+                "Partition",
+                "Inverted",
+                "Ones %",
+                "Bits",
+            ]
+        )
+        candidate_table.verticalHeader().setVisible(False)
+        candidate_table.setEditTriggers(QtWidgets.QAbstractItemView.EditTrigger.NoEditTriggers)
+
+        def populate():
+            run_table.setRowCount(0)
+            selected = combo.currentText()
+            if selected != "All runs" and selected in run_lookup:
+                run = run_lookup[selected]
+                fields = [
+                    ("Run ID", run.get("run_id")),
+                    ("Bit Width", run.get("bit_width")),
+                    ("Min Partition", run.get("min_partition_size")),
+                    ("Max Partition", run.get("max_partition_size")),
+                    ("Progression", run.get("progression")),
+                    ("Max Iterations", run.get("max_iterations")),
+                    ("Max Partitions/Flip", run.get("max_partitions_to_flip")),
+                    ("Trials/Candidate", run.get("per_candidate_trials")),
+                    ("Seed", run.get("seed")),
+                    ("Pow Mod Base", run.get("pow_mod_base")),
+                    ("Pow Mod Modulus", run.get("pow_mod_modulus")),
+                    ("Message Bits", bits_to_preview(run.get("message_bits"), 96)),
+                ]
+                for key, value in fields:
+                    row = run_table.rowCount()
+                    run_table.insertRow(row)
+                    run_table.setItem(row, 0, QtWidgets.QTableWidgetItem(str(key)))
+                    run_table.setItem(row, 1, QtWidgets.QTableWidgetItem(str(value)))
+                run_table.resizeColumnsToContents()
+                filtered = [c for c in candidates if c.get("run_id") == selected]
+            else:
+                summary = [
+                    ("Run Count", len(run_lookup)),
+                    ("Candidate Count", len(candidates)),
+                ]
+                for key, value in summary:
+                    row = run_table.rowCount()
+                    run_table.insertRow(row)
+                    run_table.setItem(row, 0, QtWidgets.QTableWidgetItem(str(key)))
+                    run_table.setItem(row, 1, QtWidgets.QTableWidgetItem(str(value)))
+                run_table.resizeColumnsToContents()
+                filtered = candidates
+
+            candidate_table.setRowCount(0)
+            for candidate in filtered:
+                row = candidate_table.rowCount()
+                candidate_table.insertRow(row)
+                bits = candidate.get("bits", [])
+                candidate_table.setItem(
+                    row, 0, QtWidgets.QTableWidgetItem(candidate.get("run_id", ""))
+                )
+                candidate_table.setItem(
+                    row, 1, QtWidgets.QTableWidgetItem(str(candidate.get("iteration", "")))
+                )
+                candidate_table.setItem(
+                    row, 2, QtWidgets.QTableWidgetItem(str(candidate.get("trial", "")))
+                )
+                candidate_table.setItem(
+                    row,
+                    3,
+                    QtWidgets.QTableWidgetItem(str(candidate.get("partition_size", ""))),
+                )
+                candidate_table.setItem(
+                    row,
+                    4,
+                    QtWidgets.QTableWidgetItem(
+                        ",".join(str(v) for v in candidate.get("inverted_partitions", []))
+                    ),
+                )
+                candidate_table.setItem(
+                    row,
+                    5,
+                    QtWidgets.QTableWidgetItem(f"{bit_ones_pct(bits):.1f}"),
+                )
+                candidate_table.setItem(
+                    row,
+                    6,
+                    QtWidgets.QTableWidgetItem(bits_to_preview(bits, 96)),
+                )
+            candidate_table.resizeColumnsToContents()
+            summary_label.setText(
+                f"Runs: {len(run_lookup)} | Candidates: {len(filtered)}"
+            )
+
+        combo.currentIndexChanged.connect(populate)
+
+        layout.addWidget(combo)
+        layout.addWidget(summary_label)
+        layout.addWidget(QtWidgets.QLabel("Run Details"))
+        layout.addWidget(run_table)
+        layout.addWidget(QtWidgets.QLabel("Candidates"))
+        layout.addWidget(candidate_table, 1)
+        populate()
         return widget
 
     def _capture_bit_similarity_settings(self):

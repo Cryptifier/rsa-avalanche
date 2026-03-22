@@ -45,7 +45,7 @@
         "oracle_accuracy_threshold" : 51.0,
         "use_hamming_distance" : false,
         "reuse_r_candidates" : true,
-        "reuse_r_candidates_path" : "data/rgen_grid/rgen_grid_pct_40.csv",
+        "reuse_r_candidates_path" : "data/rgen_grid/rgen_grid_pct_5.csv",
         "reuse_r_candidates_append_only" : false,
         "r_candidate_mode" : "small_primes",
         "r_candidate_small_primes" : [117, 1009, 1103, 1913],
@@ -60,12 +60,12 @@
         "analysis_batch_enable" : true,
         "analysis_batch_messages" : 100000,
         "analysis_batch_candidates" : 50,
-        "analysis_batch_batches" : 1,
+        "analysis_batch_batches" : 10,
         "same_r_batch" : true,
         "ciphertext_modify" : true,
         "enciphered_export_enable" : false,
         "message" : {
-            "is_random" : false,
+            "is_random" : true,
             "bits" : 128,
             "fixed_message" : "HeloWrld12345678"
         }

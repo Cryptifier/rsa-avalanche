@@ -1,0 +1,8 @@
+---
+source: src/avalanche.rs
+expression: snapshot
+---
+level_pair_counts:
+  - 1
+level_similarity_pct:
+  - 12.5

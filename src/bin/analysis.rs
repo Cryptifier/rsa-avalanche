@@ -8,7 +8,8 @@ use std::{
 };
 
 use clap::Parser;
-use rsademo::analytics::{AnalyticsCliArgs, SessionAnalytics, write_session_json};
+use rsademo::analytics::{AnalyticsCliArgs, SessionAnalytics};
+use rsademo::logs::write_session_log;
 use rsademo::config::load_config;
 use rsademo::methods::{DemoArgs, run_demo};
 
@@ -59,6 +60,10 @@ struct Args {
     #[arg(long = "true")]
     true_match: bool,
 
+    /// Expected bit width for decrypted values
+    #[arg(long = "bits-decrypt", value_parser = clap::value_parser!(u32).range(1..=8192))]
+    bits_decrypt: Option<u32>,
+
     /// Number of r-candidate accuracy batches to run
     #[arg(long, value_parser = clap::value_parser!(u64).range(1..))]
     batches: Option<u64>,
@@ -78,6 +83,10 @@ struct Args {
     /// Sort avalanche candidates by Hamming distance
     #[arg(long = "use-hamming-distance")]
     use_hamming_distance: bool,
+
+    /// Add bitwise-inverted avalanche candidates to the Hamming-distance grid
+    #[arg(long = "mirror-invert-candidates")]
+    mirror_invert_candidates: bool,
 }
 
 /// Entry point for the RSA round-trip demo CLI.
@@ -112,6 +121,9 @@ fn main() -> Result<(), Box<dyn Error>> {
     if args.use_hamming_distance {
         config.engine.use_hamming_distance = true;
     }
+    if args.mirror_invert_candidates {
+        config.engine.mirror_invert_candidates = true;
+    }
     let analytics = Arc::new(Mutex::new(SessionAnalytics::new(AnalyticsCliArgs {
         bits: args.bits,
         message_override: args.message.clone(),
@@ -125,6 +137,8 @@ fn main() -> Result<(), Box<dyn Error>> {
         shift: args.shift,
         ciphertext_modify: args.ciphertext_modify,
         use_hamming_distance: args.use_hamming_distance,
+        mirror_invert_candidates: args.mirror_invert_candidates,
+        bits_decrypt: args.bits_decrypt,
     })));
 
     let analytics_for_handler = Arc::clone(&analytics);
@@ -132,7 +146,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         if let Ok(mut guard) = analytics_for_handler.lock() {
             guard.finish(Some("interrupted".to_string()));
             let output_path = guard.session_json_path().to_string();
-            if let Err(err) = write_session_json(&output_path, &guard) {
+            if let Err(err) = write_session_log(&output_path, &guard) {
                 eprintln!("Failed to write {}: {}", output_path, err);
             }
         }
@@ -149,13 +163,14 @@ fn main() -> Result<(), Box<dyn Error>> {
         export: args.export,
         shift: args.shift,
         true_match: args.true_match,
+        bits_decrypt: args.bits_decrypt,
     };
 
     let result = run_demo(demo_args, config, &analytics);
     if let Ok(mut guard) = analytics.lock() {
         guard.finish(result.as_ref().err().map(|err| err.to_string()));
         let output_path = guard.session_json_path().to_string();
-        if let Err(err) = write_session_json(&output_path, &guard) {
+        if let Err(err) = write_session_log(&output_path, &guard) {
             eprintln!("Failed to write {}: {}", output_path, err);
         }
     }

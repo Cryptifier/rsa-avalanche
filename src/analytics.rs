@@ -35,10 +35,14 @@ pub struct AnalyticsCliArgs {
     pub ciphertext_modify: bool,
     /// Whether avalanche candidates are sorted by Hamming distance.
     pub use_hamming_distance: bool,
+    /// Whether bitwise-inverted avalanche candidates are mirrored into the grid.
+    pub mirror_invert_candidates: bool,
+    /// Expected bit width for decryptions.
+    pub bits_decrypt: Option<u32>,
 }
 
 #[derive(Debug, Serialize)]
-struct AnalyticsCliInfo {
+pub(crate) struct AnalyticsCliInfo {
     bits: u32,
     message_override: Option<String>,
     public_exponent: u64,
@@ -51,6 +55,8 @@ struct AnalyticsCliInfo {
     shift: bool,
     ciphertext_modify: bool,
     use_hamming_distance: bool,
+    mirror_invert_candidates: bool,
+    bits_decrypt: Option<u32>,
 }
 
 /// Timing entry for a named step.
@@ -183,6 +189,14 @@ pub struct RCandidateAccuracyBatch {
     pub tonelli_shanks_ciphertexts: Vec<String>,
     /// Per-candidate accuracy entries.
     pub candidates: Vec<RCandidateAccuracyEntry>,
+    /// Beam search match percentage for the batch (per-bit accuracy).
+    pub beam_match_pct: Option<f64>,
+    /// Beam search ones-match percentage for the batch.
+    pub beam_ones_match_pct: Option<f64>,
+    /// Beam search score for the top candidate.
+    pub beam_score: Option<f64>,
+    /// Bit width of the beam search candidate.
+    pub beam_bit_width: Option<usize>,
 }
 
 /// Trace payload for r candidates evaluated against a specific message.
@@ -209,16 +223,16 @@ pub struct RCandidateTraceBatch {
 /// Top-level analytics session payload.
 #[derive(Debug, Serialize)]
 pub struct SessionAnalytics {
-    started_unix_ms: u128,
-    finished_unix_ms: Option<u128>,
-    cli: AnalyticsCliInfo,
-    steps: Vec<StepTiming>,
-    step_summaries: Vec<StepSummary>,
-    features: Vec<FeatureAnalytics>,
-    r_candidate_batches: Vec<RCandidateBatchAnalytics>,
-    r_candidate_accuracy_batches: Vec<RCandidateAccuracyBatch>,
-    r_candidate_traces: Vec<RCandidateTraceBatch>,
-    errors: Vec<String>,
+    pub(crate) started_unix_ms: u128,
+    pub(crate) finished_unix_ms: Option<u128>,
+    pub(crate) cli: AnalyticsCliInfo,
+    pub(crate) steps: Vec<StepTiming>,
+    pub(crate) step_summaries: Vec<StepSummary>,
+    pub(crate) features: Vec<FeatureAnalytics>,
+    pub(crate) r_candidate_batches: Vec<RCandidateBatchAnalytics>,
+    pub(crate) r_candidate_accuracy_batches: Vec<RCandidateAccuracyBatch>,
+    pub(crate) r_candidate_traces: Vec<RCandidateTraceBatch>,
+    pub(crate) errors: Vec<String>,
 }
 
 impl SessionAnalytics {
@@ -249,6 +263,8 @@ impl SessionAnalytics {
                 shift: args.shift,
                 ciphertext_modify: args.ciphertext_modify,
                 use_hamming_distance: args.use_hamming_distance,
+                mirror_invert_candidates: args.mirror_invert_candidates,
+                bits_decrypt: args.bits_decrypt,
             },
             steps: Vec::new(),
             step_summaries: Vec::new(),
@@ -535,15 +551,6 @@ pub fn generate_r_candidates_with_analytics(
 ///
 /// # Expected Output
 /// - Writes a JSON file to `path`.
-pub fn write_session_json(
-    path: &str,
-    session: &SessionAnalytics,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let serialized = serde_json::to_string_pretty(session)?;
-    std::fs::write(path, serialized)?;
-    Ok(())
-}
-
 /// Gets the current UNIX time in milliseconds.
 ///
 /// # Parameters

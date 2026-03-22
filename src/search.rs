@@ -42,6 +42,41 @@ pub struct BeamSearchBeamResult {
     pub evaluated: usize,
 }
 
+/// Errors returned by `viterbi_decode` for invalid inputs.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ViterbiError {
+    EmptyObservations,
+    EmptyStates,
+    InvalidTransitionMatrix,
+    InvalidEmissionMatrix,
+    ObservationOutOfRange,
+}
+
+impl std::fmt::Display for ViterbiError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ViterbiError::EmptyObservations => write!(f, "observations cannot be empty"),
+            ViterbiError::EmptyStates => write!(f, "state count must be >= 1"),
+            ViterbiError::InvalidTransitionMatrix => {
+                write!(f, "transition matrix must be square and match state count")
+            }
+            ViterbiError::InvalidEmissionMatrix => {
+                write!(f, "emission matrix must match state count and observation symbols")
+            }
+            ViterbiError::ObservationOutOfRange => write!(f, "observation index out of range"),
+        }
+    }
+}
+
+impl std::error::Error for ViterbiError {}
+
+/// Result of a Viterbi decode run.
+#[derive(Debug, Clone)]
+pub struct ViterbiResult {
+    pub path: Vec<usize>,
+    pub log_prob: f64,
+}
+
 #[derive(Debug, Clone)]
 struct ScoredCandidate {
     vector: Vec<f64>,
@@ -198,6 +233,103 @@ where
     })
 }
 
+/// Runs the Viterbi algorithm over log-probability matrices.
+///
+/// # Parameters
+/// - `observations`: Observation symbol indices for each time step.
+/// - `start_log_probs`: Log probabilities for the initial state distribution.
+/// - `transition_log_probs`: Log transition probabilities, indexed `[from][to]`.
+/// - `emission_log_probs`: Log emission probabilities, indexed `[state][symbol]`.
+///
+/// # Returns
+/// - `Result<ViterbiResult, ViterbiError>`: Best path and its log probability.
+///
+/// # Expected Output
+/// - Returns decoded path; no stdout/stderr output.
+pub fn viterbi_decode(
+    observations: &[usize],
+    start_log_probs: &[f64],
+    transition_log_probs: &[Vec<f64>],
+    emission_log_probs: &[Vec<f64>],
+) -> Result<ViterbiResult, ViterbiError> {
+    if observations.is_empty() {
+        return Err(ViterbiError::EmptyObservations);
+    }
+    let num_states = start_log_probs.len();
+    if num_states == 0 {
+        return Err(ViterbiError::EmptyStates);
+    }
+    if transition_log_probs.len() != num_states
+        || transition_log_probs
+            .iter()
+            .any(|row| row.len() != num_states)
+    {
+        return Err(ViterbiError::InvalidTransitionMatrix);
+    }
+    if emission_log_probs.len() != num_states {
+        return Err(ViterbiError::InvalidEmissionMatrix);
+    }
+    let max_obs = observations.iter().copied().max().unwrap_or(0);
+    if emission_log_probs
+        .iter()
+        .any(|row| row.len() <= max_obs)
+    {
+        return Err(ViterbiError::ObservationOutOfRange);
+    }
+    let first_obs = observations[0];
+    let mut dp_prev = vec![f64::NEG_INFINITY; num_states];
+    for state in 0..num_states {
+        let start = sanitize_score(start_log_probs[state]);
+        let emission = sanitize_score(emission_log_probs[state][first_obs]);
+        dp_prev[state] = start + emission;
+    }
+
+    let mut backpointers = vec![vec![0usize; num_states]; observations.len()];
+
+    for (t, obs) in observations.iter().enumerate().skip(1) {
+        let mut dp_curr = vec![f64::NEG_INFINITY; num_states];
+        let mut back = vec![0usize; num_states];
+        for state in 0..num_states {
+            let mut best_score = f64::NEG_INFINITY;
+            let mut best_state = 0usize;
+            for prev_state in 0..num_states {
+                let transition = sanitize_score(transition_log_probs[prev_state][state]);
+                let candidate_score = dp_prev[prev_state] + transition;
+                if candidate_score > best_score {
+                    best_score = candidate_score;
+                    best_state = prev_state;
+                }
+            }
+            let emission = sanitize_score(emission_log_probs[state][*obs]);
+            dp_curr[state] = best_score + emission;
+            back[state] = best_state;
+        }
+        dp_prev = dp_curr;
+        backpointers[t] = back;
+    }
+
+    let mut best_state = 0usize;
+    let mut best_score = f64::NEG_INFINITY;
+    for (state, score) in dp_prev.iter().enumerate() {
+        if *score > best_score {
+            best_score = *score;
+            best_state = state;
+        }
+    }
+
+    let mut path = vec![0usize; observations.len()];
+    let last_idx = observations.len() - 1;
+    path[last_idx] = best_state;
+    if observations.len() > 1 {
+        for t in (1..=last_idx).rev() {
+            let prev_state = backpointers[t][path[t]];
+            path[t - 1] = prev_state;
+        }
+    }
+
+    Ok(ViterbiResult { path, log_prob: best_score })
+}
+
 /// Scores a list of candidates and normalizes scores for ordering.
 ///
 /// # Parameters
@@ -263,7 +395,7 @@ fn select_top_k(candidates: &mut Vec<ScoredCandidate>, k: usize) {
 
 #[cfg(test)]
 mod tests {
-    use super::{beam_search, BeamSearchError};
+    use super::{beam_search, viterbi_decode, BeamSearchError, ViterbiError};
 
     #[test]
     fn beam_search_finds_best_candidate() {
@@ -317,5 +449,36 @@ mod tests {
 
         let err = beam_search(vec![vec![0.0]], 1, 0, expand, score).expect_err("expected error");
         assert_eq!(err, BeamSearchError::ZeroMaxSteps);
+    }
+
+    #[test]
+    fn viterbi_decodes_expected_path() {
+        let observations = vec![0usize, 1, 2];
+        let start = vec![0.6f64.ln(), 0.4f64.ln()];
+        let transition = vec![
+            vec![0.7f64.ln(), 0.3f64.ln()],
+            vec![0.4f64.ln(), 0.6f64.ln()],
+        ];
+        let emission = vec![
+            vec![0.1f64.ln(), 0.4f64.ln(), 0.5f64.ln()],
+            vec![0.6f64.ln(), 0.3f64.ln(), 0.1f64.ln()],
+        ];
+
+        let result = viterbi_decode(&observations, &start, &transition, &emission)
+            .expect("viterbi failed");
+
+        assert_eq!(result.path, vec![1, 0, 0]);
+    }
+
+    #[test]
+    fn viterbi_rejects_empty_observations() {
+        let observations: Vec<usize> = Vec::new();
+        let start = vec![0.0];
+        let transition = vec![vec![0.0]];
+        let emission = vec![vec![0.0]];
+
+        let err = viterbi_decode(&observations, &start, &transition, &emission)
+            .expect_err("expected error");
+        assert_eq!(err, ViterbiError::EmptyObservations);
     }
 }

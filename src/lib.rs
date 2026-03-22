@@ -1,8 +1,11 @@
 pub mod analytics;
 pub mod avalanche;
+pub mod bitflow;
 pub mod combiner;
 pub mod config;
 pub mod dsp;
+pub mod helpers;
+pub mod logs;
 pub mod math;
 pub mod methods;
 pub mod polynomial_fields;

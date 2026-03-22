@@ -71,7 +71,7 @@ for i in $(seq 1 "${RUNS}"); do
   echo ""
   echo "===== RUN ${i} (seed ${seed}) ====="
   set +e
-  cargo run --bin analysis -- --same-r-batch --true --bits 56 --seed "${seed}" -c "${CONFIG}" --tests --crypto-rng --session-json "${session_path}" \
+  cargo run --bin analysis -- --same-r-batch --true --bits 56 --bits-decrypt 128 --seed "${seed}" -c "${CONFIG}" --tests --crypto-rng --session-json "${session_path}" \
     --batches "${ANALYSIS_BATCHES}" --batch-size "${ANALYSIS_BATCH_SIZE}" "${TEST_ARGS[@]}" "${EXTRA_ARGS[@]}" \
     2>&1 | tee -a "${ANALYSIS_LOG}" | tee "${run_output}" > /dev/null
   status=$?
@@ -124,6 +124,7 @@ for i in $(seq 1 "${RUNS}"); do
   else
     echo "Run ${i} summary: ${RED}FAILED (exit ${status})${RESET}, match ${match_color}${match_pct:-N/A}%${RESET}, verdict ${verdict_color}${verdict:-UNKNOWN}${RESET}, duration ${duration_s}s"
   fi
+  echo "Session JSON: ${session_path}"
 
   beam_block=$(awk '
     /Avalanche beam search top/ {print; capture=1; next}
@@ -159,6 +160,9 @@ echo "===== SUMMARY ====="
 echo "Match % stats: mean ${mean}, std dev ${stddev}, min ${min}, max ${max}, n ${count}"
 echo "Verdicts: PASS ${pass_count}, FAIL ${fail_count}"
 echo "Average duration per run: ${avg_time_s}s"
+if [[ -n "${session_path:-}" ]]; then
+  echo "Viewer: python3 scripts/session_viewer.py ${session_path} (Beam vs R tab)"
+fi
 
 if [[ "${RUN_PCA}" == "1" && -n "${session_path:-}" ]]; then
   echo ""

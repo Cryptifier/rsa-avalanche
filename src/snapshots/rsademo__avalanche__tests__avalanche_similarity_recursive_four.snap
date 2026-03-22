@@ -2,9 +2,9 @@
 source: src/avalanche.rs
 expression: snapshot
 ---
-biases:
-  - 4
+level_pair_counts:
   - 2
-message_bits:
-  - false
-  - false
+  - 1
+level_similarity_pct:
+  - 50
+  - 0
