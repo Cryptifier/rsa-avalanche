@@ -60,7 +60,7 @@ pub async fn start(canvas_id: &str) -> Result<(), JsValue> {
     eframe::WebRunner::new()
         .start(canvas_id, web_options, Box::new(|_cc| Box::new(app)))
         .await
-        .map_err(|err| JsValue::from_str(&format!("{err}")))
+        .map_err(|err| JsValue::from_str(&format!("{err:?}")))
 }
 
 #[derive(Debug)]

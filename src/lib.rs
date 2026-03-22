@@ -12,4 +12,5 @@ pub mod polynomial_fields;
 pub mod r_candidates;
 pub mod rng;
 pub mod search;
+#[cfg(not(target_arch = "wasm32"))]
 pub mod zmq_status;
