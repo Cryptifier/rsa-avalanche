@@ -1,15 +1,32 @@
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
+#[cfg(not(target_arch = "wasm32"))]
 use std::fs::File;
+#[cfg(not(target_arch = "wasm32"))]
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 use eframe::egui;
 use egui_extras::{Column, TableBuilder};
 use egui_plot::{Plot, PlotPoints, Points};
+use serde::Deserialize;
 use serde_json::{Map, Value};
 
+#[cfg(target_arch = "wasm32")]
+use js_sys::encode_uri_component;
+#[cfg(target_arch = "wasm32")]
+use wasm_bindgen::prelude::*;
+#[cfg(target_arch = "wasm32")]
+use wasm_bindgen::JsCast;
+#[cfg(target_arch = "wasm32")]
+use wasm_bindgen_futures::{spawn_local, JsFuture};
+#[cfg(target_arch = "wasm32")]
+use web_sys::{window, Response};
+
 /// Entry point for the egui-based session viewer.
+#[cfg(not(target_arch = "wasm32"))]
 fn main() -> eframe::Result<()> {
     let args = ViewerArgs::parse();
     let native_options = eframe::NativeOptions::default();
@@ -18,6 +35,32 @@ fn main() -> eframe::Result<()> {
         native_options,
         Box::new(|_cc| Box::new(ViewerApp::new(args))),
     )
+}
+
+/// Stub entry point for wasm builds.
+#[cfg(target_arch = "wasm32")]
+fn main() {}
+
+/// Starts the egui viewer in a web canvas.
+///
+/// # Parameters
+/// - `canvas_id`: DOM id for the canvas element.
+///
+/// # Returns
+/// - `Result<(), JsValue>`: `Ok(())` on success.
+///
+/// # Expected Output
+/// - Attaches the viewer to the target canvas.
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen]
+pub async fn start(canvas_id: &str) -> Result<(), JsValue> {
+    let args = ViewerArgs::web_default();
+    let app = ViewerApp::new(args);
+    let web_options = eframe::WebOptions::default();
+    eframe::WebRunner::new()
+        .start(canvas_id, web_options, Box::new(|_cc| Box::new(app)))
+        .await
+        .map_err(|err| JsValue::from_str(&format!("{err}")))
 }
 
 #[derive(Debug)]
@@ -53,6 +96,14 @@ impl ViewerArgs {
         Self {
             session_path,
             log_dir,
+        }
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    fn web_default() -> Self {
+        Self {
+            session_path: PathBuf::from("session.log"),
+            log_dir: PathBuf::from("logs"),
         }
     }
 }
@@ -93,16 +144,38 @@ impl BitSimilaritySort {
     }
 }
 
+#[derive(Debug, Clone, Deserialize)]
+struct LogEntry {
+    name: String,
+    #[serde(default)]
+    size: u64,
+    #[serde(default)]
+    modified_ms: Option<u64>,
+}
+
+#[derive(Debug, Default)]
+struct PendingUpdates {
+    log_entries: Option<Vec<LogEntry>>,
+    session_text: Option<String>,
+    session_name: Option<String>,
+    select_log: Option<String>,
+    status: Option<String>,
+}
+
 #[derive(Debug)]
 struct ViewerApp {
     session: Session,
     session_path: PathBuf,
     log_dir: PathBuf,
-    log_paths: Vec<PathBuf>,
-    selected_path: Option<PathBuf>,
+    log_entries: Vec<LogEntry>,
+    selected_log: Option<String>,
     status: String,
     last_poll: Instant,
     last_scan: Instant,
+    #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
+    last_log_fetch: Instant,
+    #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
+    last_session_fetch: Instant,
     ndjson_mode: bool,
     offset: u64,
     buffer: String,
@@ -114,19 +187,29 @@ struct ViewerApp {
     bit_similarity_hide_shifted: bool,
     bit_similarity_start: usize,
     bit_similarity_rows: usize,
+    pending: Rc<RefCell<PendingUpdates>>,
+    #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
+    log_request_in_flight: Rc<Cell<bool>>,
+    #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
+    session_request_in_flight: Rc<Cell<bool>>,
 }
 
 impl ViewerApp {
     fn new(args: ViewerArgs) -> Self {
+        let pending = Rc::new(RefCell::new(PendingUpdates::default()));
+        let log_request_in_flight = Rc::new(Cell::new(false));
+        let session_request_in_flight = Rc::new(Cell::new(false));
         let mut app = Self {
             session: Session::default(),
             session_path: args.session_path,
             log_dir: args.log_dir,
-            log_paths: Vec::new(),
-            selected_path: None,
+            log_entries: Vec::new(),
+            selected_log: None,
             status: String::new(),
             last_poll: Instant::now(),
             last_scan: Instant::now(),
+            last_log_fetch: Instant::now(),
+            last_session_fetch: Instant::now(),
             ndjson_mode: false,
             offset: 0,
             buffer: String::new(),
@@ -138,38 +221,77 @@ impl ViewerApp {
             bit_similarity_hide_shifted: true,
             bit_similarity_start: 0,
             bit_similarity_rows: 50,
+            pending,
+            log_request_in_flight,
+            session_request_in_flight,
         };
         app.refresh_logs(true);
         app
     }
 
     fn refresh_logs(&mut self, select_default: bool) {
-        self.log_paths = collect_log_paths(&self.session_path, &self.log_dir);
-        if select_default {
-            let selected = self
-                .log_paths
-                .first()
-                .cloned()
-                .or_else(|| Some(self.session_path.clone()));
-            if let Some(path) = selected {
-                let _ = self.load_session(&path);
+        #[cfg(target_arch = "wasm32")]
+        {
+            self.request_log_list(select_default);
+            return;
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            self.log_entries = collect_log_entries(&self.session_path, &self.log_dir);
+            if let Some(selected) = self.selected_log.clone() {
+                if !self.log_entries.iter().any(|entry| entry.name == selected) {
+                    self.selected_log = None;
+                }
+            }
+            if select_default && self.selected_log.is_none() {
+                if let Some(entry) = self.log_entries.first() {
+                    let name = entry.name.clone();
+                    let _ = self.load_session(&name);
+                }
             }
         }
     }
 
-    fn load_session(&mut self, path: &Path) -> Result<(), String> {
-        let (session, ndjson) = load_session_with_mode(path)?;
-        self.session = session;
-        self.ndjson_mode = ndjson;
-        self.offset = file_size(path).unwrap_or(0);
-        self.buffer.clear();
-        self.selected_path = Some(path.to_path_buf());
-        self.status = format!("Loaded {}", path.display());
-        Ok(())
+    fn load_session(&mut self, path: &str) -> Result<(), String> {
+        #[cfg(target_arch = "wasm32")]
+        {
+            self.selected_log = Some(path.to_string());
+            self.request_session(path);
+            return Ok(());
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let path_obj = Path::new(path);
+            let (session, ndjson) = load_session_from_path(path_obj)?;
+            self.session = session;
+            self.ndjson_mode = ndjson;
+            self.offset = file_size(path_obj).unwrap_or(0);
+            self.buffer.clear();
+            self.selected_log = Some(path.to_string());
+            self.status = format!("Loaded {}", path_obj.display());
+            Ok(())
+        }
     }
 
     fn poll_updates(&mut self) {
+        self.apply_pending();
         let now = Instant::now();
+        #[cfg(target_arch = "wasm32")]
+        {
+            if now.duration_since(self.last_log_fetch) > Duration::from_secs(2) {
+                self.request_log_list(false);
+                self.last_log_fetch = now;
+            }
+            if let Some(selected) = self.selected_log.clone() {
+                if now.duration_since(self.last_session_fetch) > Duration::from_secs(2) {
+                    self.request_session(&selected);
+                    self.last_session_fetch = now;
+                }
+            }
+            return;
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        {
         if now.duration_since(self.last_scan) > Duration::from_secs(2) {
             self.refresh_logs(false);
             self.last_scan = now;
@@ -181,17 +303,64 @@ impl ViewerApp {
         if !self.ndjson_mode {
             return;
         }
-        let Some(path) = self.selected_path.clone() else {
+        let Some(path) = self.selected_log.clone() else {
             return;
         };
         let updated = self.ingest_tail(&path);
         if updated {
-            self.status = format!("Updated {}", path.display());
+            self.status = format!("Updated {}", path);
+        }
         }
     }
 
-    fn ingest_tail(&mut self, path: &Path) -> bool {
-        let Ok(mut file) = File::open(path) else {
+    fn apply_pending(&mut self) {
+        let mut pending = self.pending.borrow_mut();
+        let status = pending.status.take();
+        if let Some(entries) = pending.log_entries.take() {
+            self.log_entries = entries;
+            if let Some(selected) = self.selected_log.clone() {
+                if !self.log_entries.iter().any(|entry| entry.name == selected) {
+                    self.selected_log = None;
+                }
+            }
+            if self.selected_log.is_none() {
+                if let Some(entry) = self.log_entries.first() {
+                    pending.select_log = Some(entry.name.clone());
+                }
+            }
+        }
+        let select = pending.select_log.take();
+        let session_text = pending.session_text.take();
+        let session_name = pending.session_name.take();
+        drop(pending);
+
+        if let Some(status) = status {
+            self.status = status;
+        }
+        if let Some(select) = select {
+            let _ = self.load_session(&select);
+        }
+        if let Some(text) = session_text {
+            match parse_session_from_str(&text) {
+                Ok((session, ndjson)) => {
+                    self.session = session;
+                    self.ndjson_mode = ndjson;
+                    if let Some(name) = session_name {
+                        self.selected_log = Some(name.clone());
+                        self.status = format!("Loaded {}", name);
+                    }
+                }
+                Err(err) => {
+                    self.status = format!("Failed to parse session: {err}");
+                }
+            }
+        }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn ingest_tail(&mut self, path: &str) -> bool {
+        let path_obj = Path::new(path);
+        let Ok(mut file) = File::open(path_obj) else {
             return false;
         };
         let Ok(size) = file.metadata().map(|meta| meta.len()) else {
@@ -239,6 +408,79 @@ impl ViewerApp {
             }
         }
         updated
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    fn request_log_list(&self, select_default: bool) {
+        if self.log_request_in_flight.get() {
+            return;
+        }
+        self.log_request_in_flight.set(true);
+        let pending = Rc::clone(&self.pending);
+        let in_flight = Rc::clone(&self.log_request_in_flight);
+        let current = self.selected_log.clone();
+        spawn_local(async move {
+            let result = fetch_text("/api/logs").await;
+            in_flight.set(false);
+            let mut pending = pending.borrow_mut();
+            match result {
+                Ok(text) => match serde_json::from_str::<Vec<LogEntry>>(&text) {
+                    Ok(mut entries) => {
+                        entries.sort_by(|a, b| {
+                            b.modified_ms
+                                .unwrap_or(0)
+                                .cmp(&a.modified_ms.unwrap_or(0))
+                                .then_with(|| a.name.cmp(&b.name))
+                        });
+                        pending.log_entries = Some(entries.clone());
+                        if select_default && current.is_none() {
+                            pending.select_log =
+                                entries.first().map(|entry| entry.name.clone());
+                        } else if let Some(current) = current {
+                            if !entries.iter().any(|entry| entry.name == current) {
+                                pending.select_log =
+                                    entries.first().map(|entry| entry.name.clone());
+                            }
+                        }
+                    }
+                    Err(err) => {
+                        pending.status = Some(format!("Failed to decode log list: {err}"));
+                    }
+                },
+                Err(err) => {
+                    pending.status = Some(format!("Failed to fetch log list: {err:?}"));
+                }
+            }
+        });
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    fn request_session(&self, name: &str) {
+        if self.session_request_in_flight.get() {
+            return;
+        }
+        self.session_request_in_flight.set(true);
+        let pending = Rc::clone(&self.pending);
+        let in_flight = Rc::clone(&self.session_request_in_flight);
+        let name = name.to_string();
+        spawn_local(async move {
+            let encoded = encode_uri_component(&name)
+                .as_string()
+                .unwrap_or_else(|| name.clone());
+            let url = format!("/api/logs/{encoded}");
+            let result = fetch_text(&url).await;
+            in_flight.set(false);
+            let mut pending = pending.borrow_mut();
+            match result {
+                Ok(text) => {
+                    pending.session_text = Some(text);
+                    pending.session_name = Some(name);
+                }
+                Err(err) => {
+                    pending.status = Some(format!("Failed to fetch session: {err:?}"));
+                }
+            }
+        });
     }
 
     fn draw_summary(&self, ui: &mut egui::Ui) {
@@ -837,14 +1079,14 @@ impl eframe::App for ViewerApp {
         egui::TopBottomPanel::top("top_bar").show(ctx, |ui| {
             ui.horizontal(|ui| {
                 ui.label("Session:");
-                if let Some(path) = &self.selected_path {
-                    ui.monospace(path.display().to_string());
+                if let Some(name) = &self.selected_log {
+                    ui.monospace(name);
                 } else {
                     ui.monospace("none");
                 }
                 if ui.button("Reload").clicked() {
-                    if let Some(path) = self.selected_path.clone() {
-                        let _ = self.load_session(&path);
+                    if let Some(name) = self.selected_log.clone() {
+                        let _ = self.load_session(&name);
                     }
                 }
                 ui.label(&self.status);
@@ -861,7 +1103,7 @@ impl eframe::App for ViewerApp {
             });
         });
 
-        let mut selected_path = None;
+        let mut selected_log = None;
         egui::SidePanel::left("log_list")
             .default_width(220.0)
             .show(ctx, |ui| {
@@ -869,24 +1111,24 @@ impl eframe::App for ViewerApp {
                 egui::ScrollArea::vertical()
                     .id_source("log_list_scroll")
                     .show(ui, |ui| {
-                    for path in &self.log_paths {
-                        let label = path
-                            .file_name()
-                            .map(|name| name.to_string_lossy().to_string())
-                            .unwrap_or_else(|| path.display().to_string());
+                    for entry in &self.log_entries {
+                        let label = log_label(entry);
                         let selected = self
-                            .selected_path
+                            .selected_log
                             .as_ref()
-                            .map(|p| p == path)
+                            .map(|name| name == &entry.name)
                             .unwrap_or(false);
-                        if ui.selectable_label(selected, label).clicked() {
-                            selected_path = Some(path.clone());
+                        let response = ui.selectable_label(selected, label);
+                        let clicked = response.clicked();
+                        let _response = response.on_hover_text(format!("{} bytes", entry.size));
+                        if clicked {
+                            selected_log = Some(entry.name.clone());
                         }
                     }
                 });
             });
-        if let Some(path) = selected_path {
-            let _ = self.load_session(&path);
+        if let Some(name) = selected_log {
+            let _ = self.load_session(&name);
         }
 
         egui::CentralPanel::default().show(ctx, |ui| match self.tab {
@@ -1158,7 +1400,8 @@ struct BitSimilarityData {
     shift_levels_used: u64,
 }
 
-fn collect_log_paths(session_path: &Path, log_dir: &Path) -> Vec<PathBuf> {
+#[cfg(not(target_arch = "wasm32"))]
+fn collect_log_entries(session_path: &Path, log_dir: &Path) -> Vec<LogEntry> {
     let mut results = Vec::new();
     let mut seen = HashMap::new();
     let candidates = vec![
@@ -1167,8 +1410,12 @@ fn collect_log_paths(session_path: &Path, log_dir: &Path) -> Vec<PathBuf> {
         PathBuf::from("session.log"),
     ];
     for path in candidates {
-        if path.exists() && seen.insert(path.clone(), ()).is_none() {
-            results.push(path);
+        if path.exists() {
+            if let Some(entry) = log_entry_from_path(&path) {
+                if seen.insert(entry.name.clone(), ()).is_none() {
+                    results.push(entry);
+                }
+            }
         }
     }
     if log_dir.is_dir() {
@@ -1184,37 +1431,97 @@ fn collect_log_paths(session_path: &Path, log_dir: &Path) -> Vec<PathBuf> {
                         continue;
                     }
                 }
-                let modified = entry
-                    .metadata()
-                    .and_then(|meta| meta.modified())
-                    .ok();
-                entries.push((modified, path));
+                if let Some(item) = log_entry_from_path(&path) {
+                    entries.push(item);
+                }
             }
         }
-        entries.sort_by_key(|(mtime, _)| *mtime);
-        entries.reverse();
-        for (_, path) in entries {
-            if seen.insert(path.clone(), ()).is_none() {
-                results.push(path);
+        entries.sort_by(|a, b| {
+            b.modified_ms
+                .unwrap_or(0)
+                .cmp(&a.modified_ms.unwrap_or(0))
+                .then_with(|| a.name.cmp(&b.name))
+        });
+        for entry in entries {
+            if seen.insert(entry.name.clone(), ()).is_none() {
+                results.push(entry);
             }
         }
     }
     results
 }
 
+#[cfg(not(target_arch = "wasm32"))]
+fn log_entry_from_path(path: &Path) -> Option<LogEntry> {
+    let meta = std::fs::metadata(path).ok()?;
+    let modified_ms = meta
+        .modified()
+        .ok()
+        .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|duration| duration.as_millis() as u64);
+    Some(LogEntry {
+        name: path.to_string_lossy().to_string(),
+        size: meta.len(),
+        modified_ms,
+    })
+}
+
+fn log_label(entry: &LogEntry) -> String {
+    if cfg!(target_arch = "wasm32") {
+        entry.name.clone()
+    } else {
+        Path::new(&entry.name)
+            .file_name()
+            .map(|name| name.to_string_lossy().to_string())
+            .unwrap_or_else(|| entry.name.clone())
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
 fn file_size(path: &Path) -> Option<u64> {
     std::fs::metadata(path).ok().map(|meta| meta.len())
 }
 
-fn load_session_with_mode(path: &Path) -> Result<(Session, bool), String> {
+#[cfg(target_arch = "wasm32")]
+/// Fetches text content over HTTP from the viewer server.
+///
+/// # Parameters
+/// - `url`: Relative URL to fetch.
+///
+/// # Returns
+/// - `Result<String, JsValue>`: The response body as a string on success.
+///
+/// # Expected Output
+/// - Performs an HTTP GET request; no other side effects.
+async fn fetch_text(url: &str) -> Result<String, JsValue> {
+    let window = window().ok_or_else(|| JsValue::from_str("Missing window"))?;
+    let response_value = JsFuture::from(window.fetch_with_str(url)).await?;
+    let response: Response = response_value.dyn_into()?;
+    if !response.ok() {
+        return Err(JsValue::from_str(&format!(
+            "HTTP {} for {}",
+            response.status(),
+            url
+        )));
+    }
+    let text = JsFuture::from(response.text()?).await?;
+    Ok(text.as_string().unwrap_or_default())
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn load_session_from_path(path: &Path) -> Result<(Session, bool), String> {
     let mut file = File::open(path).map_err(|err| err.to_string())?;
     let mut raw = String::new();
     file.read_to_string(&mut raw)
         .map_err(|err| err.to_string())?;
+    parse_session_from_str(&raw)
+}
+
+fn parse_session_from_str(raw: &str) -> Result<(Session, bool), String> {
     if raw.trim().is_empty() {
         return Ok((Session::default(), false));
     }
-    if let Ok(value) = serde_json::from_str::<Value>(&raw) {
+    if let Ok(value) = serde_json::from_str::<Value>(raw) {
         if let Some(obj) = value.as_object() {
             if obj.contains_key("event") && obj.contains_key("payload") {
                 return Ok((build_session_from_events(&[obj.clone()]), true));

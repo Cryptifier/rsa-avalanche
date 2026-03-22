@@ -27,9 +27,17 @@ ctrlc = "3.4.5"
 eframe = "0.27"
 egui_extras = "0.27"
 egui_plot = "0.27"
+tiny_http = "0.12"
+urlencoding = "2.1"
 
 [dev-dependencies]
 insta = { version = "1.38.0", features = ["yaml"] }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+js-sys = "0.3"
+wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4"
+web-sys = { version = "0.3", features = ["Response", "Window"] }
 
 [features]
 default = []
