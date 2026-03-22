@@ -135,7 +135,7 @@ impl ViewerApp {
             bitflow_selected: None,
             bit_similarity_sort: BitSimilaritySort::Original,
             bit_similarity_show_all: true,
-            bit_similarity_hide_shifted: false,
+            bit_similarity_hide_shifted: true,
             bit_similarity_start: 0,
             bit_similarity_rows: 50,
         };
@@ -346,10 +346,10 @@ impl ViewerApp {
         ui.scope(|ui| {
             let mut style = ui.style().as_ref().clone();
             if let Some(text_style) = style.text_styles.get_mut(&egui::TextStyle::Body) {
-                text_style.size = 16.0;
+                text_style.size = 10.0;
             }
             if let Some(text_style) = style.text_styles.get_mut(&egui::TextStyle::Monospace) {
-                text_style.size = 15.0;
+                text_style.size = 9.0;
             }
             ui.set_style(style);
             ui.push_id("candidates_table", |ui| {
@@ -361,7 +361,7 @@ impl ViewerApp {
                     .column(Column::initial(320.0).resizable(true))
                     .column(Column::initial(90.0).resizable(true))
                     .column(Column::remainder())
-                    .header(26.0, |mut header| {
+                    .header(14.0, |mut header| {
                         header.col(|ui| {
                             ui.label("Context");
                         });
@@ -383,7 +383,7 @@ impl ViewerApp {
                     })
                     .body(|mut body| {
                         for row in rows {
-                            body.row(26.0, |mut row_ui| {
+                            body.row(16.0, |mut row_ui| {
                                 row_ui.col(|ui| {
                                     ui.label(row.context);
                                 });
