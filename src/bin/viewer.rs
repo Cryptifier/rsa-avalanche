@@ -6,7 +6,10 @@ use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
+#[cfg(not(target_arch = "wasm32"))]
 use std::time::{Duration, Instant};
+#[cfg(target_arch = "wasm32")]
+use web_time::{Duration, Instant};
 
 use eframe::egui;
 use egui_extras::{Column, TableBuilder};
