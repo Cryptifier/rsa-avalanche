@@ -68,6 +68,31 @@ enum Tab {
     Bitflow,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BitSimilaritySort {
+    Original,
+    MatchDesc,
+    MatchAsc,
+}
+
+impl BitSimilaritySort {
+    fn label(&self) -> &'static str {
+        match self {
+            BitSimilaritySort::Original => "Original order",
+            BitSimilaritySort::MatchDesc => "Match % (Descending)",
+            BitSimilaritySort::MatchAsc => "Match % (Ascending)",
+        }
+    }
+
+    fn all() -> [BitSimilaritySort; 3] {
+        [
+            BitSimilaritySort::Original,
+            BitSimilaritySort::MatchDesc,
+            BitSimilaritySort::MatchAsc,
+        ]
+    }
+}
+
 #[derive(Debug)]
 struct ViewerApp {
     session: Session,
@@ -84,6 +109,11 @@ struct ViewerApp {
     tab: Tab,
     bit_true_bit_idx: usize,
     bitflow_selected: Option<String>,
+    bit_similarity_sort: BitSimilaritySort,
+    bit_similarity_show_all: bool,
+    bit_similarity_hide_shifted: bool,
+    bit_similarity_start: usize,
+    bit_similarity_rows: usize,
 }
 
 impl ViewerApp {
@@ -103,6 +133,11 @@ impl ViewerApp {
             tab: Tab::Summary,
             bit_true_bit_idx: 0,
             bitflow_selected: None,
+            bit_similarity_sort: BitSimilaritySort::Original,
+            bit_similarity_show_all: true,
+            bit_similarity_hide_shifted: false,
+            bit_similarity_start: 0,
+            bit_similarity_rows: 50,
         };
         app.refresh_logs(true);
         app
@@ -208,68 +243,96 @@ impl ViewerApp {
 
     fn draw_summary(&self, ui: &mut egui::Ui) {
         ui.heading("Summary");
-        let mut rows = Vec::new();
-        rows.push(("Started", format_unix_ms(self.session.started_unix_ms)));
-        rows.push(("Finished", format_unix_ms(self.session.finished_unix_ms)));
-        if let (Some(start), Some(end)) = (self.session.started_unix_ms, self.session.finished_unix_ms)
-        {
-            rows.push(("Duration (ms)", (end - start).to_string()));
-        }
-        rows.push(("Bits", self.session.cli.bits.to_string()));
-        rows.push(("Config", self.session.cli.config_path.clone()));
-        rows.push(("Seed", opt_to_string(self.session.cli.seed.map(|v| v as u128))));
-        rows.push(("Crypto RNG", self.session.cli.crypto_rng.to_string()));
-        rows.push(("Tests", self.session.cli.tests.to_string()));
-        rows.push(("Export", self.session.cli.export.to_string()));
-        rows.push(("Shift", self.session.cli.shift.to_string()));
-        rows.push(("Errors", self.session.errors.len().to_string()));
-
-        TableBuilder::new(ui)
-            .columns(Column::auto(), 2)
-            .striped(true)
-            .header(20.0, |mut header| {
-                header.col(|ui| {
-                    ui.label("Metric");
-                });
-                header.col(|ui| {
-                    ui.label("Value");
-                });
-            })
-            .body(|mut body| {
-                for (metric, value) in rows {
-                    body.row(20.0, |mut row| {
-                        row.col(|ui| {
-                            ui.label(metric);
-                        });
-                        row.col(|ui| {
-                            ui.label(value);
-                        });
-                    });
+        egui::ScrollArea::vertical()
+            .id_source("summary_scroll")
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                let mut rows = Vec::new();
+                rows.push(("Started", format_unix_ms(self.session.started_unix_ms)));
+                rows.push(("Finished", format_unix_ms(self.session.finished_unix_ms)));
+                if let (Some(start), Some(end)) =
+                    (self.session.started_unix_ms, self.session.finished_unix_ms)
+                {
+                    rows.push(("Duration (ms)", (end - start).to_string()));
                 }
-            });
+                rows.push(("Bits", self.session.cli.bits.to_string()));
+                rows.push(("Config", self.session.cli.config_path.clone()));
+                rows.push(("Seed", opt_to_string(self.session.cli.seed.map(|v| v as u128))));
+                rows.push(("Crypto RNG", self.session.cli.crypto_rng.to_string()));
+                rows.push(("Tests", self.session.cli.tests.to_string()));
+                rows.push(("Export", self.session.cli.export.to_string()));
+                rows.push(("Shift", self.session.cli.shift.to_string()));
+                rows.push(("Errors", self.session.errors.len().to_string()));
 
-        ui.add_space(12.0);
-        ui.heading("Feature Summary");
-        TableBuilder::new(ui)
-            .columns(Column::auto(), 4)
-            .striped(true)
-            .header(20.0, |mut header| {
-                header.col(|ui| ui.label("Feature"));
-                header.col(|ui| ui.label("Enabled"));
-                header.col(|ui| ui.label("Duration (ms)"));
-                header.col(|ui| ui.label("Notes"));
-            })
-            .body(|mut body| {
-                for feature in &self.session.features {
-                    body.row(20.0, |mut row| {
-                        row.col(|ui| ui.label(&feature.name));
-                        row.col(|ui| ui.label(feature.enabled.to_string()));
-                        row.col(|ui| {
-                            ui.label(opt_to_string(feature.duration_ms.map(|v| v as u128)))
+                ui.push_id("summary_table", |ui| {
+                    TableBuilder::new(ui)
+                        .striped(true)
+                        .column(Column::initial(160.0).resizable(true))
+                        .column(Column::remainder())
+                        .header(22.0, |mut header| {
+                            header.col(|ui| {
+                                ui.label("Metric");
+                            });
+                            header.col(|ui| {
+                                ui.label("Value");
+                            });
+                        })
+                        .body(|mut body| {
+                            for (metric, value) in rows {
+                                body.row(22.0, |mut row| {
+                                    row.col(|ui| {
+                                        ui.label(metric);
+                                    });
+                                    row.col(|ui| {
+                                        ui.label(value);
+                                    });
+                                });
+                            }
                         });
-                        row.col(|ui| ui.label(feature.notes.join("; ")));
-                    });
-                }
+                });
+
+                ui.add_space(12.0);
+                ui.heading("Feature Summary");
+                ui.push_id("feature_table", |ui| {
+                    TableBuilder::new(ui)
+                        .striped(true)
+                        .column(Column::initial(180.0).resizable(true))
+                        .column(Column::initial(80.0).resizable(true))
+                        .column(Column::initial(130.0).resizable(true))
+                        .column(Column::remainder())
+                        .header(22.0, |mut header| {
+                            header.col(|ui| {
+                                ui.label("Feature");
+                            });
+                            header.col(|ui| {
+                                ui.label("Enabled");
+                            });
+                            header.col(|ui| {
+                                ui.label("Duration (ms)");
+                            });
+                            header.col(|ui| {
+                                ui.label("Notes");
+                            });
+                        })
+                        .body(|mut body| {
+                            for feature in &self.session.features {
+                                body.row(22.0, |mut row| {
+                                    row.col(|ui| {
+                                        ui.label(&feature.name);
+                                    });
+                                    row.col(|ui| {
+                                        ui.label(feature.enabled.to_string());
+                                    });
+                                    row.col(|ui| {
+                                        ui.label(opt_to_string(feature.duration_ms.map(|v| v as u128)));
+                                    });
+                                    row.col(|ui| {
+                                        ui.label(feature.notes.join("; "));
+                                    });
+                                });
+                            }
+                        });
+                });
             });
     }
 
@@ -280,29 +343,70 @@ impl ViewerApp {
             ui.label("No r-candidate batches recorded.");
             return;
         }
-        TableBuilder::new(ui)
-            .columns(Column::auto(), 6)
-            .striped(true)
-            .header(20.0, |mut header| {
-                header.col(|ui| ui.label("Context"));
-                header.col(|ui| ui.label("Mode"));
-                header.col(|ui| ui.label("Index"));
-                header.col(|ui| ui.label("r"));
-                header.col(|ui| ui.label("Bits"));
-                header.col(|ui| ui.label("Factors"));
-            })
-            .body(|mut body| {
-                for row in rows {
-                    body.row(20.0, |mut row_ui| {
-                        row_ui.col(|ui| ui.label(row.context));
-                        row_ui.col(|ui| ui.label(row.mode));
-                        row_ui.col(|ui| ui.label(row.index.to_string()));
-                        row_ui.col(|ui| ui.label(row.r));
-                        row_ui.col(|ui| ui.label(row.r_bits.to_string()));
-                        row_ui.col(|ui| ui.label(row.factors));
+        ui.scope(|ui| {
+            let mut style = ui.style().as_ref().clone();
+            if let Some(text_style) = style.text_styles.get_mut(&egui::TextStyle::Body) {
+                text_style.size = 16.0;
+            }
+            if let Some(text_style) = style.text_styles.get_mut(&egui::TextStyle::Monospace) {
+                text_style.size = 15.0;
+            }
+            ui.set_style(style);
+            ui.push_id("candidates_table", |ui| {
+            TableBuilder::new(ui)
+                    .striped(true)
+                    .column(Column::initial(200.0).resizable(true))
+                    .column(Column::initial(110.0).resizable(true))
+                    .column(Column::initial(70.0).resizable(true))
+                    .column(Column::initial(320.0).resizable(true))
+                    .column(Column::initial(90.0).resizable(true))
+                    .column(Column::remainder())
+                    .header(26.0, |mut header| {
+                        header.col(|ui| {
+                            ui.label("Context");
+                        });
+                        header.col(|ui| {
+                            ui.label("Mode");
+                        });
+                        header.col(|ui| {
+                            ui.label("Index");
+                        });
+                        header.col(|ui| {
+                            ui.label("r");
+                        });
+                        header.col(|ui| {
+                            ui.label("Bits");
+                        });
+                        header.col(|ui| {
+                            ui.label("Factors");
+                        });
+                    })
+                    .body(|mut body| {
+                        for row in rows {
+                            body.row(26.0, |mut row_ui| {
+                                row_ui.col(|ui| {
+                                    ui.label(row.context);
+                                });
+                                row_ui.col(|ui| {
+                                    ui.label(row.mode);
+                                });
+                                row_ui.col(|ui| {
+                                    ui.label(row.index.to_string());
+                                });
+                                row_ui.col(|ui| {
+                                    ui.label(row.r);
+                                });
+                                row_ui.col(|ui| {
+                                    ui.label(row.r_bits.to_string());
+                                });
+                                row_ui.col(|ui| {
+                                    ui.label(row.factors);
+                                });
+                            });
+                        }
                     });
-                }
             });
+        });
     }
 
     fn draw_beam_vs_r(&self, ui: &mut egui::Ui) {
@@ -383,40 +487,42 @@ impl ViewerApp {
                 plot_ui.points(Points::new(points_max).name("Beam vs R max"));
             });
 
-        TableBuilder::new(ui)
-            .columns(Column::auto(), 10)
-            .striped(true)
-            .header(20.0, |mut header| {
-                header.col(|ui| ui.label("Batch"));
-                header.col(|ui| ui.label("Beam Match %"));
-                header.col(|ui| ui.label("Beam Ones %"));
-                header.col(|ui| ui.label("Beam Score"));
-                header.col(|ui| ui.label("Beam Bits"));
-                header.col(|ui| ui.label("R Mean %"));
-                header.col(|ui| ui.label("R Max %"));
-                header.col(|ui| ui.label("R Min %"));
-                header.col(|ui| ui.label("R Stddev"));
-                header.col(|ui| ui.label("Candidates"));
-            })
-            .body(|mut body| {
-                for row in rows {
-                    body.row(20.0, |mut row_ui| {
-                        row_ui.col(|ui| ui.label(row.batch));
-                        row_ui.col(|ui| ui.label(format_opt_f64(row.beam_match)));
-                        row_ui.col(|ui| ui.label(format_opt_f64(row.beam_ones)));
-                        row_ui.col(|ui| ui.label(format_opt_f64(row.beam_score)));
-                        row_ui.col(|ui| ui.label(opt_to_string(row.beam_bits.map(|v| v as u128))));
-                        row_ui.col(|ui| ui.label(format_opt_f64(row.r_mean)));
-                        row_ui.col(|ui| ui.label(format_opt_f64(row.r_max)));
-                        row_ui.col(|ui| ui.label(format_opt_f64(row.r_min)));
-                        row_ui.col(|ui| ui.label(format_opt_f64(row.r_stddev)));
-                        row_ui.col(|ui| ui.label(row.candidate_count.to_string()));
-                    });
-                }
-            });
+        ui.push_id("beam_vs_r_table", |ui| {
+            TableBuilder::new(ui)
+                .columns(Column::auto(), 10)
+                .striped(true)
+                .header(20.0, |mut header| {
+                    header.col(|ui| { ui.label("Batch"); });
+                    header.col(|ui| { ui.label("Beam Match %"); });
+                    header.col(|ui| { ui.label("Beam Ones %"); });
+                    header.col(|ui| { ui.label("Beam Score"); });
+                    header.col(|ui| { ui.label("Beam Bits"); });
+                    header.col(|ui| { ui.label("R Mean %"); });
+                    header.col(|ui| { ui.label("R Max %"); });
+                    header.col(|ui| { ui.label("R Min %"); });
+                    header.col(|ui| { ui.label("R Stddev"); });
+                    header.col(|ui| { ui.label("Candidates"); });
+                })
+                .body(|mut body| {
+                    for row in rows {
+                        body.row(20.0, |mut row_ui| {
+                            row_ui.col(|ui| { ui.label(row.batch); });
+                            row_ui.col(|ui| { ui.label(format_opt_f64(row.beam_match)); });
+                            row_ui.col(|ui| { ui.label(format_opt_f64(row.beam_ones)); });
+                            row_ui.col(|ui| { ui.label(format_opt_f64(row.beam_score)); });
+                            row_ui.col(|ui| { ui.label(opt_to_string(row.beam_bits.map(|v| v as u128))); });
+                            row_ui.col(|ui| { ui.label(format_opt_f64(row.r_mean)); });
+                            row_ui.col(|ui| { ui.label(format_opt_f64(row.r_max)); });
+                            row_ui.col(|ui| { ui.label(format_opt_f64(row.r_min)); });
+                            row_ui.col(|ui| { ui.label(format_opt_f64(row.r_stddev)); });
+                            row_ui.col(|ui| { ui.label(row.candidate_count.to_string()); });
+                        });
+                    }
+                });
+        });
     }
 
-    fn draw_bit_similarity(&self, ui: &mut egui::Ui) {
+    fn draw_bit_similarity(&mut self, ui: &mut egui::Ui) {
         ui.heading("Bit Similarity");
         let Some(feature) = self.session.feature("information_sufficiency") else {
             ui.label("Bit similarity data not found.");
@@ -430,73 +536,117 @@ impl ViewerApp {
             ui.label("Bit similarity data not found.");
             return;
         };
-        let bit_width = value_as_usize(map.get("bit_width"));
-        let shift_configured = value_as_u64(map.get("shift_levels_configured"));
-        let shift_used = value_as_u64(map.get("shift_levels_used"));
-        let original_hex = value_as_string(map.get("original_hex"));
-        let match_counts = value_as_vec_u64(map.get("match_counts_per_bit"));
-        let candidates = map
-            .get("candidates")
-            .and_then(|v| v.as_array())
-            .cloned()
-            .unwrap_or_default();
-
-        ui.label(format!("Bit width: {}", bit_width));
-        ui.label(format!(
-            "Shift levels: configured {}, used {}",
-            shift_configured, shift_used
-        ));
-        ui.label(format!("Original hex: {}", original_hex));
-        ui.add_space(8.0);
-
-        if !match_counts.is_empty() {
-            let points = match_counts
-                .iter()
-                .enumerate()
-                .map(|(idx, count)| [idx as f64, *count as f64])
-                .collect::<PlotPoints>();
-            Plot::new("bit_similarity_counts").show(ui, |plot_ui| {
-                plot_ui.points(Points::new(points).name("Match counts per bit"));
-            });
-        }
-
-        ui.add_space(8.0);
-        if candidates.is_empty() {
+        let data = parse_bit_similarity_data(map);
+        if data.entries.is_empty() {
             ui.label("No bit similarity candidates recorded.");
             return;
         }
-        TableBuilder::new(ui)
-            .columns(Column::auto(), 9)
-            .striped(true)
-            .header(20.0, |mut header| {
-                header.col(|ui| ui.label("Index"));
-                header.col(|ui| ui.label("Shift"));
-                header.col(|ui| ui.label("r"));
-                header.col(|ui| ui.label("x"));
-                header.col(|ui| ui.label("Match %"));
-                header.col(|ui| ui.label("Adj Match %"));
-                header.col(|ui| ui.label("Masked Bits"));
-                header.col(|ui| ui.label("Base Match %"));
-                header.col(|ui| ui.label("Candidate Hex"));
-            })
-            .body(|mut body| {
-                for candidate in candidates {
-                    let Some(obj) = candidate.as_object() else {
-                        continue;
-                    };
-                    body.row(20.0, |mut row| {
-                        row.col(|ui| ui.label(value_as_u64(obj.get("index")).to_string()));
-                        row.col(|ui| ui.label(value_as_u64(obj.get("shift")).to_string()));
-                        row.col(|ui| ui.label(value_as_string(obj.get("r"))));
-                        row.col(|ui| ui.label(value_as_string(obj.get("x"))));
-                        row.col(|ui| ui.label(format_opt_f64(value_as_opt_f64(obj.get("match_pct")))));
-                        row.col(|ui| ui.label(format_opt_f64(value_as_opt_f64(obj.get("adjusted_match_pct")))));
-                        row.col(|ui| ui.label(value_as_u64(obj.get("masked_bits")).to_string()));
-                        row.col(|ui| ui.label(format_opt_f64(value_as_opt_f64(obj.get("base_match_pct")))));
-                        row.col(|ui| ui.label(value_as_string(obj.get("candidate_hex"))));
-                    });
-                }
-            });
+
+        ui.horizontal(|ui| {
+            ui.label("Sort:");
+            egui::ComboBox::from_id_source("bit_similarity_sort")
+                .selected_text(self.bit_similarity_sort.label())
+                .show_ui(ui, |ui| {
+                    for option in BitSimilaritySort::all() {
+                        ui.selectable_value(
+                            &mut self.bit_similarity_sort,
+                            option,
+                            option.label(),
+                        );
+                    }
+                });
+            ui.checkbox(&mut self.bit_similarity_show_all, "Show all rows");
+            ui.checkbox(&mut self.bit_similarity_hide_shifted, "Hide shifted rows");
+        });
+
+        let grouped = build_bit_similarity_rows(
+            &data.entries,
+            self.bit_similarity_hide_shifted,
+            self.bit_similarity_sort,
+        );
+        let total = grouped.len();
+        if total == 0 {
+            ui.label("No bit similarity entries available.");
+            return;
+        }
+        let default_rows = total.min(50).max(1);
+        if self.bit_similarity_rows == 0 {
+            self.bit_similarity_rows = default_rows;
+        }
+        if self.bit_similarity_start >= total {
+            self.bit_similarity_start = 0;
+        }
+        if !self.bit_similarity_show_all && self.bit_similarity_rows > total {
+            self.bit_similarity_rows = default_rows;
+        }
+
+        ui.horizontal(|ui| {
+            ui.label("Start index:");
+            ui.add_enabled(
+                !self.bit_similarity_show_all,
+                egui::DragValue::new(&mut self.bit_similarity_start)
+                    .clamp_range(0..=total.saturating_sub(1)),
+            );
+            ui.label("Rows:");
+            ui.add_enabled(
+                !self.bit_similarity_show_all,
+                egui::DragValue::new(&mut self.bit_similarity_rows)
+                    .clamp_range(1..=total),
+            );
+            ui.add_space(12.0);
+            ui.label(format!(
+                "Bit width: {} | Shift levels: configured {}, used {}",
+                data.bit_width, data.shift_levels_configured, data.shift_levels_used
+            ));
+        });
+
+        let (start, count) = if self.bit_similarity_show_all {
+            (0, total)
+        } else {
+            let start = self.bit_similarity_start.min(total.saturating_sub(1));
+            let count = self.bit_similarity_rows.min(total - start).max(1);
+            (start, count)
+        };
+        let end = (start + count).min(total);
+        ui.label(format!(
+            "Showing {}-{} of {} entries | bit order: {}",
+            start + 1,
+            end,
+            total,
+            data.bit_order
+        ));
+
+        let rows = &grouped[start..end];
+        let max_shift = rows
+            .iter()
+            .flat_map(|row| row.entries.iter().map(|entry| entry.shift))
+            .max()
+            .unwrap_or(0);
+        let original_bits = hex_to_bits_le(&data.original_hex, data.bit_width);
+        let match_counts = if data.match_counts.len() == data.bit_width
+            && !self.bit_similarity_hide_shifted
+        {
+            data.match_counts.clone()
+        } else {
+            build_match_counts(&data.entries, &original_bits, data.bit_width)
+        };
+
+        ui.add_space(8.0);
+        let palette = bit_similarity_palette(ui);
+        draw_bit_similarity_canvas(
+            ui,
+            rows,
+            data.bit_width,
+            &original_bits,
+            &match_counts,
+            max_shift,
+            &palette,
+        );
+
+        ui.add_space(8.0);
+        ui.label(
+            "Green = matches original, Yellow = matches original + previous, Black = masked bits. LSB-first bit order.",
+        );
     }
 
     fn draw_bit_true_timeline(&mut self, ui: &mut egui::Ui) {
@@ -637,41 +787,45 @@ impl ViewerApp {
             filtered_candidates.len()
         ));
 
-        TableBuilder::new(ui)
-            .columns(Column::auto(), 7)
-            .striped(true)
-            .header(20.0, |mut header| {
-                header.col(|ui| ui.label("Run"));
-                header.col(|ui| ui.label("Iter"));
-                header.col(|ui| ui.label("Trial"));
-                header.col(|ui| ui.label("Partition"));
-                header.col(|ui| ui.label("Inverted"));
-                header.col(|ui| ui.label("Ones %"));
-                header.col(|ui| ui.label("Bits"));
-            })
-            .body(|mut body| {
-                for candidate in filtered_candidates {
-                    let ones_pct = bits_ones_pct(&candidate.bits);
-                    body.row(20.0, |mut row| {
-                        row.col(|ui| ui.label(candidate.run_id));
-                        row.col(|ui| ui.label(candidate.iteration.to_string()));
-                        row.col(|ui| ui.label(candidate.trial.to_string()));
-                        row.col(|ui| ui.label(candidate.partition_size.to_string()));
-                        row.col(|ui| {
-                            ui.label(
-                                candidate
-                                    .inverted_partitions
-                                    .iter()
-                                    .map(|v| v.to_string())
-                                    .collect::<Vec<_>>()
-                                    .join(","),
-                            )
+        ui.push_id("bitflow_table", |ui| {
+            TableBuilder::new(ui)
+                .columns(Column::auto(), 7)
+                .striped(true)
+                .header(20.0, |mut header| {
+                    header.col(|ui| { ui.label("Run"); });
+                    header.col(|ui| { ui.label("Iter"); });
+                    header.col(|ui| { ui.label("Trial"); });
+                    header.col(|ui| { ui.label("Partition"); });
+                    header.col(|ui| { ui.label("Inverted"); });
+                    header.col(|ui| { ui.label("Ones %"); });
+                    header.col(|ui| { ui.label("Bits"); });
+                })
+                .body(|mut body| {
+                    for candidate in filtered_candidates {
+                        let ones_pct = bits_ones_pct(&candidate.bits);
+                        body.row(20.0, |mut row| {
+                            row.col(|ui| { ui.label(candidate.run_id); });
+                            row.col(|ui| { ui.label(candidate.iteration.to_string()); });
+                            row.col(|ui| { ui.label(candidate.trial.to_string()); });
+                            row.col(|ui| { ui.label(candidate.partition_size.to_string()); });
+                            row.col(|ui| {
+                                ui.label(
+                                    candidate
+                                        .inverted_partitions
+                                        .iter()
+                                        .map(|v| v.to_string())
+                                        .collect::<Vec<_>>()
+                                        .join(","),
+                                );
+                            });
+                            row.col(|ui| {
+                                ui.label(format!("{ones_pct:.1}"));
+                            });
+                            row.col(|ui| { ui.label(bits_preview(&candidate.bits, 96)); });
                         });
-                        row.col(|ui| ui.label(format!("{ones_pct:.1}")));
-                        row.col(|ui| ui.label(bits_preview(&candidate.bits, 96)));
-                    });
-                }
-            });
+                    }
+                });
+        });
     }
 }
 
@@ -707,11 +861,14 @@ impl eframe::App for ViewerApp {
             });
         });
 
+        let mut selected_path = None;
         egui::SidePanel::left("log_list")
             .default_width(220.0)
             .show(ctx, |ui| {
                 ui.heading("Logs");
-                egui::ScrollArea::vertical().show(ui, |ui| {
+                egui::ScrollArea::vertical()
+                    .id_source("log_list_scroll")
+                    .show(ui, |ui| {
                     for path in &self.log_paths {
                         let label = path
                             .file_name()
@@ -723,11 +880,14 @@ impl eframe::App for ViewerApp {
                             .map(|p| p == path)
                             .unwrap_or(false);
                         if ui.selectable_label(selected, label).clicked() {
-                            let _ = self.load_session(path);
+                            selected_path = Some(path.clone());
                         }
                     }
                 });
             });
+        if let Some(path) = selected_path {
+            let _ = self.load_session(&path);
+        }
 
         egui::CentralPanel::default().show(ctx, |ui| match self.tab {
             Tab::Summary => self.draw_summary(ui),
@@ -771,6 +931,7 @@ impl Session {
 }
 
 #[derive(Debug, Default, Clone)]
+#[allow(dead_code)]
 struct CliInfo {
     bits: u64,
     message_override: Option<String>,
@@ -789,12 +950,14 @@ struct CliInfo {
 }
 
 #[derive(Debug, Default, Clone)]
+#[allow(dead_code)]
 struct StepTiming {
     name: String,
     duration_ms: u128,
 }
 
 #[derive(Debug, Default, Clone)]
+#[allow(dead_code)]
 struct StepSummary {
     name: String,
     count: u64,
@@ -812,6 +975,7 @@ struct Feature {
 }
 
 #[derive(Debug, Default, Clone)]
+#[allow(dead_code)]
 struct RCandidateFactor {
     prime: String,
     exponent: u64,
@@ -826,6 +990,7 @@ struct RCandidateEntry {
 }
 
 #[derive(Debug, Default, Clone)]
+#[allow(dead_code)]
 struct RCandidateBatch {
     context: Option<String>,
     mode: Option<String>,
@@ -844,6 +1009,7 @@ struct RCandidateBatch {
 }
 
 #[derive(Debug, Default, Clone)]
+#[allow(dead_code)]
 struct RCandidateAccuracyEntry {
     r: String,
     r_bits: u64,
@@ -854,6 +1020,7 @@ struct RCandidateAccuracyEntry {
 }
 
 #[derive(Debug, Default, Clone)]
+#[allow(dead_code)]
 struct RCandidateAccuracyBatch {
     context: Option<String>,
     messages: Vec<String>,
@@ -870,6 +1037,7 @@ struct RCandidateAccuracyBatch {
 }
 
 #[derive(Debug, Default, Clone)]
+#[allow(dead_code)]
 struct RCandidateTraceEntry {
     r: String,
     r_bits: u64,
@@ -878,6 +1046,7 @@ struct RCandidateTraceEntry {
 }
 
 #[derive(Debug, Default, Clone)]
+#[allow(dead_code)]
 struct RCandidateTraceBatch {
     context: Option<String>,
     message: String,
@@ -890,6 +1059,7 @@ struct RCandidateTraceBatch {
 }
 
 #[derive(Debug, Default, Clone)]
+#[allow(dead_code)]
 struct BitflowRun {
     run_id: String,
     bit_width: u64,
@@ -945,6 +1115,47 @@ struct BasicStats {
     stddev: Option<f64>,
     min: Option<f64>,
     max: Option<f64>,
+}
+
+#[derive(Debug, Clone)]
+#[allow(dead_code)]
+struct BitSimilarityEntry {
+    orig_index: usize,
+    index: usize,
+    shift: usize,
+    r: String,
+    e: Option<String>,
+    x: Option<String>,
+    candidate_hex: String,
+    match_pct: f64,
+    matching_bits: u64,
+    adjusted_match_pct: f64,
+    adjusted_matching_bits: u64,
+    masked_bits: usize,
+    base_match_pct: f64,
+    base_matching_bits: u64,
+}
+
+#[derive(Debug, Clone)]
+struct BitSimilarityRow {
+    index: usize,
+    r: String,
+    e: Option<String>,
+    x: Option<String>,
+    base_match_pct: f64,
+    base_matching_bits: u64,
+    entries: Vec<BitSimilarityEntry>,
+}
+
+#[derive(Debug, Clone)]
+struct BitSimilarityData {
+    entries: Vec<BitSimilarityEntry>,
+    bit_width: usize,
+    original_hex: String,
+    bit_order: String,
+    match_counts: Vec<u64>,
+    shift_levels_configured: u64,
+    shift_levels_used: u64,
 }
 
 fn collect_log_paths(session_path: &Path, log_dir: &Path) -> Vec<PathBuf> {
@@ -1632,4 +1843,606 @@ fn bits_ones_pct(bits: &[u8]) -> f64 {
     }
     let ones = bits.iter().filter(|bit| **bit != 0).count();
     100.0 * ones as f64 / bits.len() as f64
+}
+
+fn parse_bit_similarity_data(map: &Map<String, Value>) -> BitSimilarityData {
+    let bit_width = value_as_usize(map.get("bit_width"));
+    let original_hex = value_as_string(map.get("original_hex"));
+    let bit_order = value_as_string(map.get("bit_order"));
+    let match_counts = value_as_vec_u64(map.get("match_counts_per_bit"));
+    let shift_levels_configured = value_as_u64(map.get("shift_levels_configured"));
+    let shift_levels_used = value_as_u64(map.get("shift_levels_used"));
+    let mut entries = Vec::new();
+    if let Some(list) = map.get("candidates").and_then(|v| v.as_array()) {
+        for (idx, entry) in list.iter().enumerate() {
+            let Some(entry) = entry.as_object() else {
+                continue;
+            };
+            let match_pct = value_as_f64(entry.get("match_pct"));
+            let base_match_pct = if entry.get("base_match_pct").is_some() {
+                value_as_f64(entry.get("base_match_pct"))
+            } else {
+                match_pct
+            };
+            let matching_bits = value_as_u64(entry.get("matching_bits"));
+            let base_matching_bits = if entry.get("base_matching_bits").is_some() {
+                value_as_u64(entry.get("base_matching_bits"))
+            } else {
+                matching_bits
+            };
+            entries.push(BitSimilarityEntry {
+                orig_index: idx,
+                index: value_as_usize(entry.get("index")),
+                shift: value_as_usize(entry.get("shift")),
+                r: value_as_string(entry.get("r")),
+                e: value_as_opt_string(entry.get("e")),
+                x: value_as_opt_string(entry.get("x")),
+                candidate_hex: value_as_string(entry.get("candidate_hex")),
+                match_pct,
+                matching_bits,
+                adjusted_match_pct: value_as_f64(entry.get("adjusted_match_pct")),
+                adjusted_matching_bits: value_as_u64(entry.get("adjusted_matching_bits")),
+                masked_bits: value_as_usize(entry.get("masked_bits")),
+                base_match_pct,
+                base_matching_bits,
+            });
+        }
+    }
+    BitSimilarityData {
+        entries,
+        bit_width,
+        original_hex,
+        bit_order: if bit_order.is_empty() {
+            "lsb0".to_string()
+        } else {
+            bit_order
+        },
+        match_counts,
+        shift_levels_configured,
+        shift_levels_used,
+    }
+}
+
+fn build_bit_similarity_rows(
+    entries: &[BitSimilarityEntry],
+    hide_shifted: bool,
+    sort_mode: BitSimilaritySort,
+) -> Vec<BitSimilarityRow> {
+    let filtered = if hide_shifted {
+        entries
+            .iter()
+            .cloned()
+            .filter(|entry| entry.shift == 0)
+            .collect::<Vec<_>>()
+    } else {
+        entries.to_vec()
+    };
+    let mut by_index: HashMap<usize, Vec<BitSimilarityEntry>> = HashMap::new();
+    for entry in filtered {
+        by_index.entry(entry.index).or_default().push(entry);
+    }
+    let mut rows = Vec::new();
+    for (idx, mut entries) in by_index {
+        entries.sort_by_key(|entry| entry.shift);
+        let base_entry = entries
+            .iter()
+            .find(|entry| entry.shift == 0)
+            .unwrap_or_else(|| &entries[0]);
+        rows.push(BitSimilarityRow {
+            index: idx,
+            r: base_entry.r.clone(),
+            e: base_entry.e.clone(),
+            x: base_entry.x.clone(),
+            base_match_pct: base_entry.base_match_pct,
+            base_matching_bits: base_entry.base_matching_bits,
+            entries,
+        });
+    }
+
+    match sort_mode {
+        BitSimilaritySort::MatchDesc => {
+            rows.sort_by(|a, b| {
+                b.base_match_pct
+                    .total_cmp(&a.base_match_pct)
+                    .then_with(|| a.index.cmp(&b.index))
+            });
+        }
+        BitSimilaritySort::MatchAsc => {
+            rows.sort_by(|a, b| {
+                a.base_match_pct
+                    .total_cmp(&b.base_match_pct)
+                    .then_with(|| a.index.cmp(&b.index))
+            });
+        }
+        BitSimilaritySort::Original => {
+            rows.sort_by_key(|row| row.index);
+        }
+    }
+    rows
+}
+
+fn build_match_counts(
+    entries: &[BitSimilarityEntry],
+    original_bits: &[bool],
+    bit_width: usize,
+) -> Vec<u64> {
+    if bit_width == 0 {
+        return Vec::new();
+    }
+    let mut counts = vec![0u64; bit_width];
+    for entry in entries {
+        let candidate_bits = hex_to_bits_le(&entry.candidate_hex, bit_width);
+        for bit_idx in 0..bit_width {
+            let cand_idx = bit_idx + entry.shift;
+            if cand_idx >= bit_width {
+                continue;
+            }
+            if candidate_bits
+                .get(cand_idx)
+                .copied()
+                .unwrap_or(false)
+                == original_bits.get(bit_idx).copied().unwrap_or(false)
+            {
+                counts[bit_idx] += 1;
+            }
+        }
+    }
+    counts
+}
+
+fn draw_bit_similarity_canvas(
+    ui: &mut egui::Ui,
+    rows: &[BitSimilarityRow],
+    bit_width: usize,
+    original_bits: &[bool],
+    match_counts: &[u64],
+    max_shift: usize,
+    palette: &BitSimilarityPalette,
+) {
+    let _ = match_counts;
+    let margin = 8.0;
+    let bit_size = 10.0;
+    let bit_spacing = 1.0;
+    let row_spacing = 8.0;
+    let header_height = 26.0;
+    let header_gap = header_height * 0.75;
+    let row_padding = 22.0;
+    let row_gap = bit_spacing + 8.0;
+    let box_offset = 0.0;
+    let label_width = 320.0;
+
+    let content_width =
+        margin * 2.0
+            + label_width
+            + (bit_width + max_shift) as f32 * (bit_size + bit_spacing)
+            + label_width;
+    let mut content_height = margin * 2.0;
+    for row in rows {
+        content_height +=
+            row_height_for(
+                row,
+                bit_size,
+                row_gap,
+                header_height,
+                header_gap,
+                row_padding,
+                box_offset,
+            );
+        content_height += row_spacing;
+    }
+    if !rows.is_empty() {
+        content_height -= row_spacing;
+    }
+
+    egui::ScrollArea::both()
+        .id_source("bit_similarity_canvas")
+        .auto_shrink([false, false])
+        .show(ui, |ui| {
+            let (rect, _) =
+                ui.allocate_exact_size(egui::vec2(content_width, content_height), egui::Sense::hover());
+            let painter = ui.painter_at(rect);
+            let mut y = rect.min.y + margin;
+            for row in rows {
+                let row_height = row_height_for(
+                    row,
+                    bit_size,
+                    row_gap,
+                    header_height,
+                    header_gap,
+                    row_padding,
+                    box_offset,
+                );
+                draw_bit_similarity_row(
+                    &painter,
+                    rect.min.x + margin,
+                    y,
+                    label_width,
+                    bit_width,
+                    original_bits,
+                    row,
+                    bit_size,
+                    bit_spacing,
+                    row_gap,
+                    header_height,
+                    header_gap,
+                    box_offset,
+                    palette,
+                );
+                y += row_height + row_spacing;
+            }
+        });
+}
+
+fn draw_bit_similarity_row(
+    painter: &egui::Painter,
+    origin_x: f32,
+    origin_y: f32,
+    label_width: f32,
+    bit_width: usize,
+    original_bits: &[bool],
+    row: &BitSimilarityRow,
+    bit_size: f32,
+    bit_spacing: f32,
+    row_gap: f32,
+    header_height: f32,
+    header_gap: f32,
+    box_offset: f32,
+    palette: &BitSimilarityPalette,
+) {
+    if row.entries.is_empty() || bit_width == 0 {
+        painter.text(
+            egui::pos2(origin_x, origin_y),
+            egui::Align2::LEFT_TOP,
+            "No entries",
+            egui::FontId::proportional(12.0),
+            palette.label_color,
+        );
+        return;
+    }
+
+    let header_y = origin_y + header_height - 4.0;
+    let bits_top = origin_y + header_height + header_gap;
+    let boxes_top = bits_top + box_offset;
+    let boxes_start = origin_x + label_width;
+    let label_x = origin_x;
+    let suffix = match (&row.e, &row.x) {
+        (Some(e), Some(x)) if !e.is_empty() && !x.is_empty() => format!(" | e={e} | x={x}"),
+        _ => String::new(),
+    };
+    let header_text = format!(
+        "#{} | r={} | match={:.2}% | matching bits={}{}",
+        row.index, row.r, row.base_match_pct, row.base_matching_bits, suffix
+    );
+    painter.text(
+        egui::pos2(origin_x, header_y),
+        egui::Align2::LEFT_TOP,
+        header_text,
+        egui::FontId::proportional(12.0),
+        palette.label_color,
+    );
+
+    painter.text(
+        egui::pos2(label_x, bits_top),
+        egui::Align2::LEFT_TOP,
+        "Original",
+        egui::FontId::proportional(11.0),
+        palette.label_color,
+    );
+
+    let base_bits = hex_to_bits_le(&row.entries[0].candidate_hex, bit_width);
+    let bit_font = egui::FontId::proportional(7.0);
+    for bit_idx in 0..bit_width {
+        let orig_bit = original_bits.get(bit_idx).copied().unwrap_or(false);
+        let cand_bit = base_bits.get(bit_idx).copied().unwrap_or(false);
+        let matches = orig_bit == cand_bit;
+        let base_color = if matches {
+            palette.match_color
+        } else {
+            palette.mismatch_color
+        };
+        let color = if orig_bit {
+            base_color
+        } else {
+            lighten_color(base_color, 0.45)
+        };
+        let x = boxes_start + bit_idx as f32 * (bit_size + bit_spacing);
+        let rect = egui::Rect::from_min_size(
+            egui::pos2(x, boxes_top),
+            egui::vec2(bit_size, bit_size),
+        );
+        painter.rect_filled(rect, 0.0, color);
+        painter.rect_stroke(rect, 0.0, palette.stroke);
+        let text_color = text_color_for(color);
+        painter.text(
+            rect.center(),
+            egui::Align2::CENTER_CENTER,
+            if orig_bit { "1" } else { "0" },
+            bit_font.clone(),
+            text_color,
+        );
+    }
+
+    let mut prev_bits: Option<Vec<bool>> = None;
+    for (entry_idx, entry) in row.entries.iter().enumerate() {
+        let shift = entry.shift;
+        let masked_bits = if entry.masked_bits == 0 { shift } else { entry.masked_bits };
+        let mut label = if shift == 0 {
+            "Candidate".to_string()
+        } else {
+            format!("Candidate << {shift}")
+        };
+        if let (Some(e), Some(x)) = (&entry.e, &entry.x) {
+            if !e.is_empty() && !x.is_empty() {
+                label.push_str(&format!(" | e={e} | x={x}"));
+            }
+        }
+        let adjusted_denom = bit_width.saturating_sub(masked_bits).max(1) as u64;
+        let line = format!(
+            "{label} | adj={:.2}% ({}/{})",
+            entry.adjusted_match_pct, entry.adjusted_matching_bits, adjusted_denom
+        );
+        let y = bits_top + bit_size + row_gap + entry_idx as f32 * (bit_size + row_gap);
+        let y_boxes = y + box_offset;
+        painter.text(
+            egui::pos2(label_x, y),
+            egui::Align2::LEFT_TOP,
+            line,
+            egui::FontId::proportional(11.0),
+            palette.label_color,
+        );
+
+        let candidate_bits = hex_to_bits_le(&entry.candidate_hex, bit_width);
+        for bit_idx in 0..bit_width {
+            let cand_idx = bit_idx + shift;
+            let masked = cand_idx >= bit_width;
+            let cand_bit = if !masked {
+                candidate_bits.get(cand_idx).copied().unwrap_or(false)
+            } else {
+                false
+            };
+            let matches_original = !masked
+                && cand_bit == original_bits.get(bit_idx).copied().unwrap_or(false);
+            let matches_prev = if let (false, Some(prev_bits)) = (masked, &prev_bits) {
+                prev_bits
+                    .get(cand_idx)
+                    .copied()
+                    .unwrap_or(false)
+                    == cand_bit
+            } else {
+                false
+            };
+            let base_candidate = if matches_original && matches_prev {
+                palette.multi_match_color
+            } else if matches_original {
+                palette.match_color
+            } else {
+                palette.mismatch_color
+            };
+            let color = if masked {
+                palette.masked_fill
+            } else if !cand_bit {
+                lighten_color(base_candidate, 0.45)
+            } else {
+                base_candidate
+            };
+            let x = boxes_start + bit_idx as f32 * (bit_size + bit_spacing);
+            let rect = egui::Rect::from_min_size(
+                egui::pos2(x, y_boxes),
+                egui::vec2(bit_size, bit_size),
+            );
+            painter.rect_filled(rect, 0.0, color);
+            painter.rect_stroke(rect, 0.0, palette.stroke);
+            let (text, text_color) = if masked {
+                let masked_bit = candidate_bits.get(bit_idx).copied().unwrap_or(false);
+                (
+                    if masked_bit { "1" } else { "0" },
+                    palette.masked_text,
+                )
+            } else {
+                (
+                    if cand_bit { "1" } else { "0" },
+                    text_color_for(color),
+                )
+            };
+            painter.text(
+                rect.center(),
+                egui::Align2::CENTER_CENTER,
+                text,
+                bit_font.clone(),
+                text_color,
+            );
+        }
+        prev_bits = Some(candidate_bits);
+    }
+
+    let mut majority_votes = vec![0u64; bit_width];
+    let mut majority_ones = vec![0u64; bit_width];
+    for entry in &row.entries {
+        let candidate_bits = hex_to_bits_le(&entry.candidate_hex, bit_width);
+        for bit_idx in 0..bit_width {
+            let cand_idx = bit_idx + entry.shift;
+            if cand_idx >= bit_width {
+                continue;
+            }
+            if candidate_bits.get(cand_idx).copied().unwrap_or(false) {
+                majority_ones[bit_idx] += 1;
+            }
+            majority_votes[bit_idx] += 1;
+        }
+    }
+    let mut majority_bits = vec![false; bit_width];
+    for bit_idx in 0..bit_width {
+        let votes = majority_votes[bit_idx];
+        if votes == 0 {
+            continue;
+        }
+        let ones = majority_ones[bit_idx];
+        let zeros = votes - ones;
+        majority_bits[bit_idx] = ones >= zeros;
+    }
+    let mut majority_matches = 0u64;
+    let mut majority_unmasked = 0u64;
+    for bit_idx in 0..bit_width {
+        if majority_votes[bit_idx] == 0 {
+            continue;
+        }
+        majority_unmasked += 1;
+        if majority_bits[bit_idx] == original_bits.get(bit_idx).copied().unwrap_or(false) {
+            majority_matches += 1;
+        }
+    }
+    let majority_denom = majority_unmasked.max(1);
+    let majority_pct = majority_matches as f64 / majority_denom as f64 * 100.0;
+    let majority_y =
+        bits_top + bit_size + row_gap + row.entries.len() as f32 * (bit_size + row_gap);
+    let majority_boxes_y = majority_y + box_offset;
+    painter.text(
+        egui::pos2(label_x, majority_y),
+        egui::Align2::LEFT_TOP,
+        format!(
+            "Majority vote | adj={majority_pct:.2}% ({majority_matches}/{majority_denom})"
+        ),
+        egui::FontId::proportional(11.0),
+        palette.label_color,
+    );
+    for bit_idx in 0..bit_width {
+        let votes = majority_votes[bit_idx];
+        let masked = votes == 0;
+        let majority_bit = majority_bits[bit_idx];
+        let matches_original = !masked
+            && majority_bit == original_bits.get(bit_idx).copied().unwrap_or(false);
+        let base_candidate = if matches_original && votes > 1 {
+            palette.multi_match_color
+        } else if matches_original {
+            palette.match_color
+        } else {
+            palette.mismatch_color
+        };
+        let color = if masked {
+            palette.masked_fill
+        } else if !majority_bit {
+            lighten_color(base_candidate, 0.45)
+        } else {
+            base_candidate
+        };
+        let x = boxes_start + bit_idx as f32 * (bit_size + bit_spacing);
+        let rect = egui::Rect::from_min_size(
+            egui::pos2(x, majority_boxes_y),
+            egui::vec2(bit_size, bit_size),
+        );
+        painter.rect_filled(rect, 0.0, color);
+        painter.rect_stroke(rect, 0.0, palette.stroke);
+        let text_color = if masked {
+            palette.masked_text
+        } else {
+            text_color_for(color)
+        };
+        painter.text(
+            rect.center(),
+            egui::Align2::CENTER_CENTER,
+            if majority_bit { "1" } else { "0" },
+            bit_font.clone(),
+            text_color,
+        );
+    }
+}
+
+fn row_height_for(
+    row: &BitSimilarityRow,
+    bit_size: f32,
+    row_gap: f32,
+    header_height: f32,
+    header_gap: f32,
+    row_padding: f32,
+    box_offset: f32,
+) -> f32 {
+    let entries = row.entries.len();
+    header_height
+        + header_gap
+        + bit_size
+        + box_offset
+        + (entries as f32 + 1.0) * (bit_size + row_gap)
+        + row_padding
+}
+
+fn hex_to_bits_le(hex_str: &str, bit_width: usize) -> Vec<bool> {
+    if bit_width == 0 {
+        return Vec::new();
+    }
+    let mut cleaned = hex_str.trim().to_string();
+    if cleaned.starts_with("0x") || cleaned.starts_with("0X") {
+        cleaned = cleaned[2..].to_string();
+    }
+    if cleaned.len() % 2 == 1 {
+        cleaned = format!("0{cleaned}");
+    }
+    let bytes = match hex::decode(&cleaned) {
+        Ok(bytes) => bytes,
+        Err(_) => Vec::new(),
+    };
+    let mut bits = Vec::with_capacity(bit_width);
+    for bit_idx in 0..bit_width {
+        let byte_pos = bit_idx / 8;
+        let bit_in_byte = bit_idx % 8;
+        let idx_from_end = bytes.len().saturating_sub(1 + byte_pos);
+        let bit = if idx_from_end < bytes.len() {
+            (bytes[idx_from_end] >> bit_in_byte) & 1 == 1
+        } else {
+            false
+        };
+        bits.push(bit);
+    }
+    bits
+}
+
+fn lighten_color(color: egui::Color32, factor: f32) -> egui::Color32 {
+    let factor = factor.clamp(0.0, 1.0);
+    let r = color.r() as f32 + (255.0 - color.r() as f32) * factor;
+    let g = color.g() as f32 + (255.0 - color.g() as f32) * factor;
+    let b = color.b() as f32 + (255.0 - color.b() as f32) * factor;
+    egui::Color32::from_rgb(r as u8, g as u8, b as u8)
+}
+
+struct BitSimilarityPalette {
+    match_color: egui::Color32,
+    mismatch_color: egui::Color32,
+    multi_match_color: egui::Color32,
+    masked_fill: egui::Color32,
+    masked_text: egui::Color32,
+    label_color: egui::Color32,
+    stroke: egui::Stroke,
+}
+
+fn bit_similarity_palette(ui: &egui::Ui) -> BitSimilarityPalette {
+    if ui.visuals().dark_mode {
+        BitSimilarityPalette {
+            match_color: egui::Color32::from_rgb(72, 196, 118),
+            mismatch_color: egui::Color32::from_rgb(232, 96, 96),
+            multi_match_color: egui::Color32::from_rgb(255, 214, 102),
+            masked_fill: egui::Color32::from_rgb(28, 28, 28),
+            masked_text: egui::Color32::from_rgb(146, 230, 176),
+            label_color: egui::Color32::from_rgb(220, 220, 220),
+            stroke: egui::Stroke::new(1.0, egui::Color32::from_rgb(90, 90, 90)),
+        }
+    } else {
+        BitSimilarityPalette {
+            match_color: egui::Color32::from_rgb(46, 160, 67),
+            mismatch_color: egui::Color32::from_rgb(220, 72, 72),
+            multi_match_color: egui::Color32::from_rgb(242, 201, 76),
+            masked_fill: egui::Color32::from_rgb(0, 0, 0),
+            masked_text: egui::Color32::from_rgb(46, 160, 67),
+            label_color: egui::Color32::from_rgb(40, 40, 40),
+            stroke: egui::Stroke::new(1.0, egui::Color32::from_rgb(160, 160, 160)),
+        }
+    }
+}
+
+fn text_color_for(color: egui::Color32) -> egui::Color32 {
+    let luminance =
+        0.2126 * color.r() as f32 + 0.7152 * color.g() as f32 + 0.0722 * color.b() as f32;
+    if luminance > 140.0 {
+        egui::Color32::BLACK
+    } else {
+        egui::Color32::WHITE
+    }
 }
