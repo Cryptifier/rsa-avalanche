@@ -1,0 +1,440 @@
+---
+- name: Launch Spot instance, attach persistent /mnt/code volume, and update private DNS
+  hosts: localhost
+  gather_facts: false
+  collections:
+    - amazon.aws
+
+  vars:
+    aws_region: us-west-2
+    aws_profile: default
+
+    instance_name: spot-rust-dev
+    availability_zone: us-west-2b
+
+    ami_id: ami-0eaad8e6a673be41c
+    instance_type: c7gd.2xlarge
+    key_name: keypair-4
+
+    subnet_id: subnet-063d51c99d3f31af1
+    security_group_ids:
+      - sg-01940f39e1b3e164a
+
+    ssh_private_key_file: ~/.ssh/keypair-4.pem
+    ssh_user: ubuntu
+
+    spot_price: "0.11"
+
+    # Root device from the AMI. Adjust if your AMI uses a different root device.
+    root_device_name: /dev/sda1
+
+    # Persistent code volume
+    code_volume_name_tag: code_drive
+    code_volume_size_gib: 32
+    code_volume_type: gp3
+    code_device_name: /dev/sdf
+
+    # Private Route53 DNS
+    private_dns_zone_name: cryptifier.dev.
+    private_dns_record_name: code.cryptifier.dev.
+    private_dns_ttl: 60
+
+  tasks:
+    - name: Request Spot instance with root volume deleted on termination
+      amazon.aws.ec2_spot_instance:
+        profile: "{{ aws_profile }}"
+        region: "{{ aws_region }}"
+        state: present
+        spot_price: "{{ spot_price }}"
+        spot_type: one-time
+        interruption: terminate
+        tags:
+          Name: "{{ instance_name }}"
+          Role: rust-dev-spot
+        launch_specification:
+          image_id: "{{ ami_id }}"
+          instance_type: "{{ instance_type }}"
+          key_name: "{{ key_name }}"
+          placement:
+            availability_zone: "{{ availability_zone }}"
+          network_interfaces:
+            - device_index: 0
+              subnet_id: "{{ subnet_id }}"
+              groups: "{{ security_group_ids }}"
+              associate_public_ip_address: true
+              delete_on_termination: true
+      register: spot_request
+
+    - name: Wait for Spot request to become active
+      amazon.aws.ec2_spot_instance_info:
+        profile: "{{ aws_profile }}"
+        region: "{{ aws_region }}"
+        spot_instance_request_ids:
+          - "{{ spot_request.spot_request.spot_instance_request_id }}"
+      register: spot_info
+      until:
+        - spot_info.spot_request | length > 0
+        - spot_info.spot_request[0].state == "active"
+        - spot_info.spot_request[0].instance_id is defined
+      retries: 40
+      delay: 15
+
+    - name: Tag the launched Spot instance (actual EC2 instance)
+      amazon.aws.ec2_instance:
+        profile: "{{ aws_profile }}"
+        region: "{{ aws_region }}"
+        instance_ids:
+          - "{{ instance_info.instances[0].instance_id }}"
+        tags:
+          Name: "{{ instance_name }}"
+          Role: rust-dev-spot
+        purge_tags: false
+
+    - name: Gather launched instance details
+      amazon.aws.ec2_instance_info:
+        profile: "{{ aws_profile }}"
+        region: "{{ aws_region }}"
+        instance_ids:
+          - "{{ spot_info.spot_request[0].instance_id }}"
+      register: instance_info
+
+    - name: Set launched instance facts
+      ansible.builtin.set_fact:
+        launched_instance_id: "{{ instance_info.instances[0].instance_id }}"
+        launched_private_ip: "{{ instance_info.instances[0].private_ip_address }}"
+        launched_public_ip: "{{ instance_info.instances[0].public_ip_address | default('') }}"
+        launched_az: "{{ instance_info.instances[0].placement.availability_zone }}"
+        launched_vpc_id: "{{ instance_info.instances[0].vpc_id }}"
+
+    - name: Find existing persistent code volume by tag in same AZ
+      amazon.aws.ec2_vol_info:
+        profile: "{{ aws_profile }}"
+        region: "{{ aws_region }}"
+        filters:
+          "tag:Name": "{{ code_volume_name_tag }}"
+          availability-zone: "{{ launched_az }}"
+      register: code_volumes
+
+    - name: Fail if more than one matching code volume exists
+      ansible.builtin.fail:
+        msg: >-
+          More than one EBS volume matched Name={{ code_volume_name_tag }}
+          in {{ launched_az }}. Narrow the tagging strategy before continuing.
+      when: code_volumes.volumes | length > 1
+
+    - name: Create persistent code volume if it does not exist
+      amazon.aws.ec2_vol:
+        profile: "{{ aws_profile }}"
+        region: "{{ aws_region }}"
+        zone: "{{ launched_az }}"
+        volume_size: "{{ code_volume_size_gib }}"
+        volume_type: "{{ code_volume_type }}"
+        encrypted: false
+        tags:
+          Name: "{{ code_volume_name_tag }}"
+          Purpose: persistent-code
+        state: present
+      register: created_code_volume
+      when: code_volumes.volumes | length == 0
+
+    - name: Determine code volume ID
+      ansible.builtin.set_fact:
+        code_volume_id: >-
+          {{
+            (code_volumes.volumes[0].id
+             if (code_volumes.volumes | length) > 0
+             else created_code_volume.volume_id)
+          }}
+
+    - name: Attach code volume to launched instance
+      amazon.aws.ec2_vol:
+        profile: "{{ aws_profile }}"
+        region: "{{ aws_region }}"
+        instance: "{{ launched_instance_id }}"
+        id: "{{ code_volume_id }}"
+        device_name: "{{ code_device_name }}"
+        delete_on_termination: false
+        state: present
+      register: attached_code_volume
+
+    - name: Look up hosted zones by DNS name
+      amazon.aws.route53_info:
+        profile: "{{ aws_profile }}"
+        query: hosted_zone
+        hosted_zone_method: list_by_name
+        dns_name: "{{ private_dns_zone_name }}"
+      register: cryptifier_zone_info
+
+    - name: Select matching private hosted zone
+      ansible.builtin.set_fact:
+        cryptifier_private_zone_id: >-
+          {{
+            (
+              cryptifier_zone_info.HostedZones
+              | selectattr('Config.PrivateZone', 'equalto', true)
+              | map(attribute='Id')
+              | map('regex_replace', '^/hostedzone/', '')
+              | list
+            )[0]
+          }}
+      when: >
+        (
+          cryptifier_zone_info.HostedZones
+          | selectattr('Config.PrivateZone', 'equalto', true)
+          | list
+          | length
+        ) > 0
+
+    - name: Fail if no private hosted zone was found for cryptifier.dev
+      ansible.builtin.fail:
+        msg: "No private hosted zone found for {{ private_dns_zone_name }}"
+      when: cryptifier_private_zone_id is not defined
+
+    - name: Upsert code.cryptifier.dev in the private hosted zone
+      amazon.aws.route53:
+        profile: "{{ aws_profile }}"
+        state: present
+        zone: "{{ private_dns_zone_name }}"
+        hosted_zone_id: "{{ cryptifier_private_zone_id }}"
+        record: "{{ private_dns_record_name }}"
+        type: A
+        ttl: "{{ private_dns_ttl }}"
+        value:
+          - "{{ launched_private_ip }}"
+        overwrite: true
+        private_zone: true
+        vpc_id: "{{ launched_vpc_id }}"
+        wait: true
+
+    - name: Add launched instance to in-memory inventory
+      ansible.builtin.add_host:
+        name: launched_spot
+        groups: launched_spot
+        ansible_host: >-
+          {{
+            launched_public_ip
+            if launched_public_ip | length > 0
+            else launched_private_ip
+          }}
+        ansible_user: "{{ ssh_user }}"
+        ansible_ssh_private_key_file: "{{ ssh_private_key_file }}"
+        ansible_ssh_common_args: "-o StrictHostKeyChecking=no"
+
+    - name: Wait for SSH to come up
+      ansible.builtin.wait_for:
+        host: >-
+          {{
+            launched_public_ip
+            if launched_public_ip | length > 0
+            else launched_private_ip
+          }}
+        port: 22
+        delay: 10
+        timeout: 600
+
+    - name: Update apt cache and perform dist-upgrade
+      ansible.builtin.apt:
+        update_cache: yes
+        upgrade: dist
+      become: true
+
+- name: Configure /mnt/code and reinstall Rust tools
+  hosts: launched_spot
+  gather_facts: true
+  become: true
+  collections:
+    - ansible.posix
+    - community.general
+
+  vars:
+    code_mount_point: /mnt/code
+    code_fstype: xfs
+    rustup_toolchain: stable
+
+    rust_system_packages_debian:
+      - build-essential
+      - pkg-config
+      - libssl-dev
+      - curl
+      - git
+      - cmake
+      - gcc
+      - g++
+      - make
+
+    rust_system_packages_redhat:
+      - gcc
+      - gcc-c++
+      - make
+      - openssl-devel
+      - pkgconf-pkg-config
+      - curl
+      - git
+      - cmake
+
+  tasks:
+    - name: Wait for Ansible connection
+      ansible.builtin.wait_for_connection:
+        timeout: 600
+
+    - name: Install XFS tools on Debian
+      ansible.builtin.package:
+        name: xfsprogs
+        state: present
+      when:
+        - code_fstype == 'xfs'
+        - ansible_os_family == "Debian"
+
+    - name: Install XFS tools on RedHat
+      ansible.builtin.package:
+        name: xfsprogs
+        state: present
+      when:
+        - code_fstype == 'xfs'
+        - ansible_os_family == "RedHat"
+
+    - name: Install Rust build prerequisites on Debian family
+      ansible.builtin.package:
+        name: "{{ rust_system_packages_debian }}"
+        state: present
+      when: ansible_os_family == "Debian"
+
+    - name: Install Rust build prerequisites on RedHat family
+      ansible.builtin.package:
+        name: "{{ rust_system_packages_redhat }}"
+        state: present
+      when: ansible_os_family == "RedHat"
+
+    - name: Create mount point
+      ansible.builtin.file:
+        path: "{{ code_mount_point }}"
+        state: directory
+        mode: "0755"
+
+    - name: Wait for non-root disk devices to appear
+      ansible.builtin.shell: |
+        set -o pipefail
+        for i in $(seq 1 30); do
+          lsblk -dnpo NAME,TYPE | awk '$2=="disk"{print $1}' | wc -l | grep -q '^[2-9][0-9]*\|^2$' && exit 0
+          sleep 2
+        done
+        exit 1
+      args:
+        executable: /bin/bash
+      changed_when: false
+
+    - name: Find root source
+      ansible.builtin.command: findmnt -n -o SOURCE /
+      register: root_source
+      changed_when: false
+
+    - name: Find root parent disk
+      ansible.builtin.command: lsblk -nro PKNAME "{{ root_source.stdout }}"
+      register: root_parent
+      changed_when: false
+
+    - name: Find candidate non-root disk
+      ansible.builtin.shell: |
+        set -o pipefail
+        lsblk -dnpo NAME,TYPE | awk '$2=="disk"{print $1}' | grep -vx "/dev/{{ root_parent.stdout }}" | head -n 1
+      args:
+        executable: /bin/bash
+      register: code_disk_candidate
+      changed_when: false
+
+    - name: Fail if no candidate code disk was found
+      ansible.builtin.fail:
+        msg: "No non-root attached disk found for /mnt/code."
+      when: code_disk_candidate.stdout | trim == ""
+
+    - name: Set code disk fact
+      ansible.builtin.set_fact:
+        code_disk: "{{ code_disk_candidate.stdout | trim }}"
+
+    - name: Check existing filesystem on code disk
+      ansible.builtin.command: blkid -o value -s TYPE "{{ code_disk }}"
+      register: existing_fs
+      failed_when: false
+      changed_when: false
+
+    - name: Create filesystem if the code disk is blank
+      community.general.filesystem:
+        dev: "{{ code_disk }}"
+        fstype: "{{ code_fstype }}"
+      when: existing_fs.rc != 0
+
+    - name: Read code disk UUID
+      ansible.builtin.command: blkid -o value -s UUID "{{ code_disk }}"
+      register: code_uuid
+      changed_when: false
+
+    - name: Mount persistent code disk
+      ansible.posix.mount:
+        path: "{{ code_mount_point }}"
+        src: "UUID={{ code_uuid.stdout }}"
+        fstype: "{{ code_fstype }}"
+        opts: "defaults,nofail"
+        state: mounted
+
+    - name: Create rustup home on persistent disk
+      ansible.builtin.file:
+        path: "{{ code_mount_point }}/.rustup"
+        state: directory
+        owner: "{{ ansible_user_id }}"
+        group: "{{ ansible_user_gid }}"
+        mode: "0755"
+      become: false
+
+    - name: Create cargo home on persistent disk
+      ansible.builtin.file:
+        path: "{{ code_mount_point }}/.cargo"
+        state: directory
+        owner: "{{ ansible_user_id }}"
+        group: "{{ ansible_user_gid }}"
+        mode: "0755"
+      become: false
+
+    - name: Install rustup and Rust toolchain for instance user
+      ansible.builtin.shell: |
+        set -euo pipefail
+        curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | \
+          sh -s -- -y --default-toolchain {{ rustup_toolchain }}
+      args:
+        executable: /bin/bash
+        creates: "/mnt/code/.cargo/bin/rustup"
+      become: false
+      environment:
+        RUSTUP_HOME: "{{ code_mount_point }}/.rustup"
+        CARGO_HOME: "{{ code_mount_point }}/.cargo"
+
+    - name: Ensure cargo environment loads for future shells
+      ansible.builtin.lineinfile:
+        path: "/home/{{ ansible_user_id }}/.bashrc"
+        line: 'source "{{ code_mount_point }}/.cargo/env"'
+        state: present
+        create: true
+      become: false
+
+    - name: Install common Rust components
+      ansible.builtin.shell: |
+        set -euo pipefail
+        "{{ code_mount_point }}/.cargo/bin/rustup" component add rustfmt clippy
+      args:
+        executable: /bin/bash
+      become: false
+      environment:
+        RUSTUP_HOME: "{{ code_mount_point }}/.rustup"
+        CARGO_HOME: "{{ code_mount_point }}/.cargo"
+
+    - name: Verify rustc is installed
+      ansible.builtin.command: "{{ code_mount_point }}/.cargo/bin/rustc --version"
+      register: rustc_version
+      changed_when: false
+      become: false
+      environment:
+        RUSTUP_HOME: "{{ code_mount_point }}/.rustup"
+        CARGO_HOME: "{{ code_mount_point }}/.cargo"
+
+    - name: Show installed rustc version
+      ansible.builtin.debug:
+        msg: "{{ rustc_version.stdout }}"
