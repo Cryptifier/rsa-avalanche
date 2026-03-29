@@ -22,6 +22,8 @@
 
     ssh_private_key_file: ~/.ssh/keypair-4.pem
     ssh_user: ubuntu
+    dev_user_id: 1000
+    dev_user_gid: 1000
 
     spot_price: "0.11"
 
@@ -79,17 +81,6 @@
       retries: 40
       delay: 15
 
-    - name: Tag the launched Spot instance (actual EC2 instance)
-      amazon.aws.ec2_instance:
-        profile: "{{ aws_profile }}"
-        region: "{{ aws_region }}"
-        instance_ids:
-          - "{{ instance_info.instances[0].instance_id }}"
-        tags:
-          Name: "{{ instance_name }}"
-          Role: rust-dev-spot
-        purge_tags: false
-
     - name: Gather launched instance details
       amazon.aws.ec2_instance_info:
         profile: "{{ aws_profile }}"
@@ -105,6 +96,17 @@
         launched_public_ip: "{{ instance_info.instances[0].public_ip_address | default('') }}"
         launched_az: "{{ instance_info.instances[0].placement.availability_zone }}"
         launched_vpc_id: "{{ instance_info.instances[0].vpc_id }}"
+
+    - name: Tag the launched Spot instance (actual EC2 instance)
+      amazon.aws.ec2_instance:
+        profile: "{{ aws_profile }}"
+        region: "{{ aws_region }}"
+        instance_ids:
+          - "{{ instance_info.instances[-1].instance_id }}"
+        tags:
+          Name: "{{ instance_name }}"
+          Role: rust-dev-spot
+        purge_tags: true
 
     - name: Find existing persistent code volume by tag in same AZ
       amazon.aws.ec2_vol_info:
@@ -232,12 +234,6 @@
         delay: 10
         timeout: 600
 
-    - name: Update apt cache and perform dist-upgrade
-      ansible.builtin.apt:
-        update_cache: yes
-        upgrade: dist
-      become: true
-
 - name: Configure /mnt/code and reinstall Rust tools
   hosts: launched_spot
   gather_facts: true
@@ -276,6 +272,12 @@
     - name: Wait for Ansible connection
       ansible.builtin.wait_for_connection:
         timeout: 600
+
+    - name: Update apt cache and perform dist-upgrade
+      ansible.builtin.apt:
+        update_cache: yes
+        upgrade: dist
+      become: true
 
     - name: Install XFS tools on Debian
       ansible.builtin.package:
@@ -376,6 +378,25 @@
         opts: "defaults,nofail"
         state: mounted
 
+    - name: Ensure /mnt/code is owned by the instance user
+      ansible.builtin.file:
+        path: "{{ code_mount_point }}"
+        state: directory
+        owner: "{{ ansible_user_id }}"
+        group: "{{ ansible_user_gid }}"
+        mode: "0755"
+        recurse: true
+      become: true
+
+    - name: Set ownership recursively
+      ansible.builtin.command:
+        argv:
+          - chown
+          - -R
+          - "{{ansible_user_id}}:{{ansible_user_gid}}"
+          - /mnt/code
+      become: true
+
     - name: Create rustup home on persistent disk
       ansible.builtin.file:
         path: "{{ code_mount_point }}/.rustup"
@@ -389,8 +410,8 @@
       ansible.builtin.file:
         path: "{{ code_mount_point }}/.cargo"
         state: directory
-        owner: "{{ ansible_user_id }}"
-        group: "{{ ansible_user_gid }}"
+        owner: "{{ dev_user_id }}"
+        group: "{{ dev_user_gid }}"
         mode: "0755"
       become: false
 
