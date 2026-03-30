@@ -222,6 +222,22 @@
         ansible_ssh_private_key_file: "{{ ssh_private_key_file }}"
         ansible_ssh_common_args: "-o StrictHostKeyChecking=no"
 
+    - name: Select connection IP
+      ansible.builtin.set_fact:
+        instance_ip: >-
+          {{
+            instance_info.instances[0].public_ip_address
+            | default(instance_info.instances[0].private_ip_address)
+          }}
+
+    - name: Write inventory file
+      ansible.builtin.copy:
+        dest: ./inventory.ini
+        content: |
+          [launched_spot]
+          {{ instance_ip }} ansible_user={{ ssh_user }} ansible_ssh_private_key_file={{ ssh_private_key_file }}
+        mode: "0644"
+
     - name: Wait for SSH to come up
       ansible.builtin.wait_for:
         host: >-
@@ -378,9 +394,18 @@
         opts: "defaults,nofail"
         state: mounted
 
+    - name: Create /mnt/code/user and hand ownership to login user
+      ansible.builtin.file:
+        path: "{{ code_mount_point }}/user"
+        state: directory
+        owner: "{{ ansible_user_id }}"
+        group: "{{ ansible_user_gid }}"
+        mode: "0755"
+      become: true
+
     - name: Ensure /mnt/code is owned by the instance user
       ansible.builtin.file:
-        path: "{{ code_mount_point }}"
+        path: "{{ code_mount_point }}/user"
         state: directory
         owner: "{{ ansible_user_id }}"
         group: "{{ ansible_user_gid }}"
@@ -388,18 +413,9 @@
         recurse: true
       become: true
 
-    - name: Set ownership recursively
-      ansible.builtin.command:
-        argv:
-          - chown
-          - -R
-          - "{{ansible_user_id}}:{{ansible_user_gid}}"
-          - /mnt/code
-      become: true
-
     - name: Create rustup home on persistent disk
       ansible.builtin.file:
-        path: "{{ code_mount_point }}/.rustup"
+        path: "{{ code_mount_point }}/user/.rustup"
         state: directory
         owner: "{{ ansible_user_id }}"
         group: "{{ ansible_user_gid }}"
@@ -408,7 +424,7 @@
 
     - name: Create cargo home on persistent disk
       ansible.builtin.file:
-        path: "{{ code_mount_point }}/.cargo"
+        path: "{{ code_mount_point }}/user/.cargo"
         state: directory
         owner: "{{ dev_user_id }}"
         group: "{{ dev_user_gid }}"
@@ -422,16 +438,16 @@
           sh -s -- -y --default-toolchain {{ rustup_toolchain }}
       args:
         executable: /bin/bash
-        creates: "/mnt/code/.cargo/bin/rustup"
+        creates: "/mnt/code/user/.cargo/bin/rustup"
       become: false
       environment:
-        RUSTUP_HOME: "{{ code_mount_point }}/.rustup"
-        CARGO_HOME: "{{ code_mount_point }}/.cargo"
+        RUSTUP_HOME: "{{ code_mount_point }}/user/.rustup"
+        CARGO_HOME: "{{ code_mount_point }}/user/.cargo"
 
     - name: Ensure cargo environment loads for future shells
       ansible.builtin.lineinfile:
         path: "/home/{{ ansible_user_id }}/.bashrc"
-        line: 'source "{{ code_mount_point }}/.cargo/env"'
+        line: 'source "{{ code_mount_point }}/user/.cargo/env"'
         state: present
         create: true
       become: false
@@ -439,23 +455,37 @@
     - name: Install common Rust components
       ansible.builtin.shell: |
         set -euo pipefail
-        "{{ code_mount_point }}/.cargo/bin/rustup" component add rustfmt clippy
+        "{{ code_mount_point }}/user/.cargo/bin/rustup" component add rustfmt clippy
       args:
         executable: /bin/bash
       become: false
       environment:
-        RUSTUP_HOME: "{{ code_mount_point }}/.rustup"
-        CARGO_HOME: "{{ code_mount_point }}/.cargo"
+        RUSTUP_HOME: "{{ code_mount_point }}/user/.rustup"
+        CARGO_HOME: "{{ code_mount_point }}/user/.cargo"
 
     - name: Verify rustc is installed
-      ansible.builtin.command: "{{ code_mount_point }}/.cargo/bin/rustc --version"
+      ansible.builtin.command: "{{ code_mount_point }}/user/.cargo/bin/rustc --version"
       register: rustc_version
       changed_when: false
       become: false
       environment:
-        RUSTUP_HOME: "{{ code_mount_point }}/.rustup"
-        CARGO_HOME: "{{ code_mount_point }}/.cargo"
+        RUSTUP_HOME: "{{ code_mount_point }}/user/.rustup"
+        CARGO_HOME: "{{ code_mount_point }}/user/.cargo"
 
     - name: Show installed rustc version
       ansible.builtin.debug:
         msg: "{{ rustc_version.stdout }}"
+
+    - name: Install GMP, NTL, FLINT and build dependencies
+      ansible.builtin.apt:
+        name:
+          - libgmp-dev
+          - libflint-dev
+          - libntl-dev
+          - build-essential
+          - cmake
+          - pkg-config
+          - libssl-dev
+        state: present
+        update_cache: true
+      become: true
