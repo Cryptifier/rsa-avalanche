@@ -1,0 +1,112 @@
+---
+- name: Tear down Spot dev environment
+  hosts: localhost
+  gather_facts: false
+  collections:
+    - amazon.aws
+
+  vars:
+    aws_region: us-west-2
+    aws_profile: default
+
+    instance_name: spot-rust-dev
+    code_volume_name_tag: code_drive
+
+    private_dns_zone_name: cryptifier.dev.
+    private_dns_record_name: code.cryptifier.dev.
+    private_dns_ttl: 60
+
+    # Set to true when you want to delete the persistent /mnt/code EBS volume too.
+    delete_code_volume: false
+
+  tasks:
+    - name: Find Spot requests by tag/name via matching instances
+      amazon.aws.ec2_instance_info:
+        profile: "{{ aws_profile }}"
+        region: "{{ aws_region }}"
+        filters:
+          "tag:Name": "{{ instance_name }}"
+          "instance-state-name":
+            - pending
+            - running
+            - stopping
+            - stopped
+      register: existing_instances
+
+    - name: Collect instance IDs
+      ansible.builtin.set_fact:
+        instance_ids: "{{ existing_instances.instances | map(attribute='instance_id') | list }}"
+        private_ips: "{{ existing_instances.instances | map(attribute='private_ip_address') | list }}"
+
+    - name: Terminate matching instances
+      amazon.aws.ec2_instance:
+        profile: "{{ aws_profile }}"
+        region: "{{ aws_region }}"
+        instance_ids: "{{ instance_ids }}"
+        state: absent
+      when: instance_ids | length > 0
+
+    - name: Find open Spot instance requests
+      amazon.aws.ec2_spot_instance_info:
+        profile: "{{ aws_profile }}"
+        region: "{{ aws_region }}"
+      register: all_spot_requests
+
+    - name: Select matching Spot request IDs
+      ansible.builtin.set_fact:
+        matching_spot_request_ids: >-
+          {{
+            all_spot_requests.spot_request
+            | selectattr('instance_id', 'defined')
+            | selectattr('instance_id', 'in', instance_ids | default([]))
+            | map(attribute='spot_instance_request_id')
+            | list
+          }}
+
+    - name: Cancel matching Spot requests
+      amazon.aws.ec2_spot_instance:
+        profile: "{{ aws_profile }}"
+        region: "{{ aws_region }}"
+        spot_instance_request_ids: "{{ matching_spot_request_ids }}"
+        state: absent
+      when: matching_spot_request_ids | length > 0
+
+    - name: Remove private DNS record for code.cryptifier.dev
+      amazon.aws.route53:
+        profile: "{{ aws_profile }}"
+        state: absent
+        zone: "{{ private_dns_zone_name }}"
+        record: "{{ private_dns_record_name }}"
+        type: A
+        ttl: "{{ private_dns_ttl }}"
+        value: "{{ private_ips }}"
+        overwrite: true
+        private_zone: true
+      when: private_ips | length > 0
+
+    - name: Find persistent code volume
+      amazon.aws.ec2_vol_info:
+        profile: "{{ aws_profile }}"
+        region: "{{ aws_region }}"
+        filters:
+          "tag:Name": "{{ code_volume_name_tag }}"
+      register: code_volumes
+
+    - name: Fail if more than one code volume matched
+      ansible.builtin.fail:
+        msg: >-
+          More than one EBS volume matched Name={{ code_volume_name_tag }}.
+          Refine the tags before teardown.
+      when:
+        - delete_code_volume
+        - code_volumes.volumes | length > 1
+
+    - name: Delete persistent code volume
+      amazon.aws.ec2_vol:
+        profile: "{{ aws_profile }}"
+        region: "{{ aws_region }}"
+        id: "{{ code_volumes.volumes[0].id }}"
+        state: absent
+      when:
+        - delete_code_volume
+        - code_volumes.volumes | length == 1
