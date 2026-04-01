@@ -16,3 +16,4 @@ enciphered_bins2_frames/
 snapshots/*
 old-logs/
 *.bkp
+*.wasm
