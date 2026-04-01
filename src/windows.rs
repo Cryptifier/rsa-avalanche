@@ -307,7 +307,7 @@ impl WindowPartitionSet {
 pub struct WindowPartitionSetBuilder {
     total_bits: usize,
     requested_count: usize,
-    max_width: usize,
+    max_width: Option<usize>,
     seed: u64,
     overlap_policy: WindowOverlapPolicy,
 }
@@ -327,7 +327,7 @@ impl WindowPartitionSetBuilder {
         Self {
             total_bits,
             requested_count: 0,
-            max_width: total_bits.max(1),
+            max_width: None,
             seed: DEFAULT_WINDOW_SEED,
             overlap_policy: WindowOverlapPolicy::AllowOverlap,
         }
@@ -374,7 +374,7 @@ impl WindowPartitionSetBuilder {
     /// # Expected Output
     /// - Returns an updated builder; no side effects.
     pub fn max_width(mut self, max_width: usize) -> Self {
-        self.max_width = max_width;
+        self.max_width = Some(max_width);
         self
     }
 
@@ -434,7 +434,10 @@ impl WindowPartitionSetBuilder {
     pub fn generate(self) -> Result<WindowPartitionSet, WindowBuildError> {
         validate_builder(&self)?;
 
-        let effective_max_width = self.max_width.min(self.total_bits);
+        let effective_max_width = self
+            .max_width
+            .expect("validated builder must contain max_width")
+            .min(self.total_bits);
         let mut rng = ChaCha20Rng::seed_from_u64(self.seed);
         let mut partitions = match self.overlap_policy {
             WindowOverlapPolicy::AllowOverlap => build_requested_partitions_with_overlap(
@@ -478,6 +481,7 @@ impl WindowPartitionSetBuilder {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum WindowBuildError {
     TotalBitsMustBePositive,
+    MaxWidthMustBeSpecified,
     MaxWidthMustBePositive,
     RequestedCountExceedsTotalBits {
         requested_count: usize,
@@ -490,6 +494,9 @@ impl fmt::Display for WindowBuildError {
         match self {
             Self::TotalBitsMustBePositive => {
                 write!(f, "total_bits must be positive")
+            }
+            Self::MaxWidthMustBeSpecified => {
+                write!(f, "max_width must be specified by the builder")
             }
             Self::MaxWidthMustBePositive => {
                 write!(f, "max_width must be positive")
@@ -630,7 +637,11 @@ fn validate_builder(builder: &WindowPartitionSetBuilder) -> Result<(), WindowBui
         return Err(WindowBuildError::TotalBitsMustBePositive);
     }
 
-    if builder.max_width == 0 {
+    let max_width = builder
+        .max_width
+        .ok_or(WindowBuildError::MaxWidthMustBeSpecified)?;
+
+    if max_width == 0 {
         return Err(WindowBuildError::MaxWidthMustBePositive);
     }
 
@@ -973,5 +984,17 @@ mod tests {
                 total_bits: 8,
             }
         );
+    }
+
+    #[test]
+    fn builder_requires_explicit_max_width() {
+        let error = WindowPartitionSet::build(32)
+            .seed(5)
+            .count(4)
+            .disallow_overlap()
+            .generate()
+            .expect_err("configuration should be rejected");
+
+        assert_eq!(error, WindowBuildError::MaxWidthMustBeSpecified);
     }
 }
