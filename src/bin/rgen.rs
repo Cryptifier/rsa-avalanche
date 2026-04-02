@@ -12,7 +12,9 @@ use clap::{Parser, ValueEnum};
 use num_bigint::BigUint;
 use rsademo::config::{Config, EngineConfig, load_config};
 use rsademo::math::random_prime_with_bits;
-use rsademo::r_candidates::{RCandidateMode, RCandidateSettings, generate_r_candidates};
+use rsademo::r_candidates::{
+    RCandidate, RCandidateMode, RCandidateSettings, generate_r_candidates,
+};
 use rsademo::rng::{RngChoice, RngMode};
 
 #[derive(Parser, Debug)]
@@ -411,7 +413,7 @@ fn resolve_target_bit_length_override(
 /// - Writes to disk at `path`; may create or append the file.
 fn write_candidates_csv(
     path: &str,
-    entries: &[(BigUint, Vec<(BigUint, u64)>)],
+    entries: &[RCandidate],
     append: bool,
     header_lines: &[String],
 ) -> Result<usize, Box<dyn Error>> {
@@ -439,9 +441,9 @@ fn write_candidates_csv(
         }
     }
 
-    for (r, factors) in entries {
-        let factors_str = format_factors_csv(factors);
-        writeln!(file, "{r},{factors_str}")?;
+    for candidate in entries {
+        let factors_str = format_factors_csv(&candidate.factors);
+        writeln!(file, "{},{factors_str}", candidate.r)?;
     }
 
     Ok(entries.len())
@@ -455,16 +457,16 @@ fn write_candidates_csv(
 /// - `append`: Whether to load existing entries for deduplication.
 ///
 /// # Returns
-/// - `Result<(Vec<(BigUint, Vec<(BigUint, u64)>)>, usize, usize), Box<dyn Error>>`:
+/// - `Result<(Vec<RCandidate>, usize, usize), Box<dyn Error>>`:
 ///   Filtered candidates, count of skipped duplicates, and count of existing entries.
 ///
 /// # Expected Output
 /// - Reads the existing CSV when `append` is true; no other side effects.
 fn dedup_candidates(
     path: &str,
-    entries: Vec<(BigUint, Vec<(BigUint, u64)>)>,
+    entries: Vec<RCandidate>,
     append: bool,
-) -> Result<(Vec<(BigUint, Vec<(BigUint, u64)>)>, usize, usize), Box<dyn Error>> {
+) -> Result<(Vec<RCandidate>, usize, usize), Box<dyn Error>> {
     let mut seen = if append {
         load_existing_candidate_keys(path)?
     } else {
@@ -474,10 +476,10 @@ fn dedup_candidates(
 
     let mut skipped = 0usize;
     let mut filtered = Vec::with_capacity(entries.len());
-    for (r, factors) in entries.into_iter() {
-        let key = r.to_string();
+    for candidate in entries.into_iter() {
+        let key = candidate.r.to_string();
         if seen.insert(key) {
-            filtered.push((r, factors));
+            filtered.push(candidate);
         } else {
             skipped += 1;
         }
@@ -802,7 +804,7 @@ mod tests {
         fs::write(&path, existing).expect("write failed");
 
         let entries = vec![
-            (
+            RCandidate::new(
                 BigUint::from(105u64),
                 vec![
                     (BigUint::from(3u8), 1),
@@ -810,7 +812,7 @@ mod tests {
                     (BigUint::from(7u8), 1),
                 ],
             ),
-            (
+            RCandidate::new(
                 BigUint::from(1155u64),
                 vec![
                     (BigUint::from(3u8), 1),
@@ -826,7 +828,7 @@ mod tests {
         assert_eq!(existing_count, 1);
         assert_eq!(skipped, 1);
         assert_eq!(filtered.len(), 1);
-        assert_eq!(filtered[0].0, BigUint::from(1155u64));
+        assert_eq!(filtered[0].r, BigUint::from(1155u64));
 
         let _ = fs::remove_file(&path);
     }

@@ -1,7 +1,9 @@
 use crate::math::{
-    factor_composite_with_timeout, is_probable_prime_big, pollard_rho, random_biguint_below,
-    random_biguint_bits,
+    coalesce_factors, factor_composite_with_timeout, is_probable_prime_big,
+    next_prime_from_biguint_pow_bigdecimal, pollard_rho, random_bigdecimal_partition_with_min,
+    random_biguint_below, random_biguint_bits,
 };
+use bigdecimal::BigDecimal;
 use num_bigint::BigUint;
 use num_traits::{One, Zero};
 use rand::RngCore;
@@ -32,6 +34,38 @@ impl Default for RCandidateMode {
     }
 }
 
+/// Mutable r-candidate metadata used by speculative-oracle flows.
+#[derive(Debug, Clone)]
+pub struct RCandidate {
+    /// Candidate modulus value.
+    pub r: BigUint,
+    /// Prime-power factorization for `r`.
+    pub factors: Vec<(BigUint, u64)>,
+    /// Decimal target exponent used when retargeting this candidate.
+    pub target_exponent: BigDecimal,
+}
+
+impl RCandidate {
+    /// Builds an `RCandidate` with an unset target exponent.
+    ///
+    /// # Parameters
+    /// - `r`: Candidate modulus value.
+    /// - `factors`: Prime-power factorization metadata.
+    ///
+    /// # Returns
+    /// - `RCandidate`: Candidate wrapper around the supplied values.
+    ///
+    /// # Expected Output
+    /// - Returns a new candidate with `target_exponent = 0`; no side effects.
+    pub fn new(r: BigUint, factors: Vec<(BigUint, u64)>) -> Self {
+        Self {
+            r,
+            factors,
+            target_exponent: BigDecimal::zero(),
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct RCandidateSettings {
     pub mode: RCandidateMode,
@@ -57,7 +91,7 @@ pub struct RCandidateSettings {
 /// - `rng`: Random number generator for sampling candidates.
 ///
 /// # Returns
-/// - `Vec<(BigUint, Vec<(BigUint, u64)>)>`: List of `(r, factors)` pairs.
+/// - `Vec<RCandidate>`: List of mutable candidate records.
 ///
 /// # Expected Output
 /// - Returns an empty list when no candidates are found; may print progress logs.
@@ -65,7 +99,7 @@ pub fn generate_r_candidates(
     n: &BigUint,
     settings: &RCandidateSettings,
     rng: &mut RngChoice,
-) -> Vec<(BigUint, Vec<(BigUint, u64)>)> {
+) -> Vec<RCandidate> {
     match settings.mode {
         RCandidateMode::Factoring => generate_r_candidates_via_factoring(n, settings, rng),
         RCandidateMode::SmallPrimes => {
@@ -87,7 +121,7 @@ pub fn generate_r_candidates(
 /// - `batch_size`: Target number of candidates to produce.
 ///
 /// # Returns
-/// - `Vec<(BigUint, Vec<(BigUint, u64)>)>`: List of `(r, factors)` pairs.
+/// - `Vec<RCandidate>`: List of mutable candidate records.
 ///
 /// # Expected Output
 /// - Returns a list with up to `batch_size` entries; may print progress logs.
@@ -96,7 +130,7 @@ pub fn generate_r_candidates_batch(
     settings: &RCandidateSettings,
     rng: &mut RngChoice,
     batch_size: usize,
-) -> Vec<(BigUint, Vec<(BigUint, u64)>)> {
+) -> Vec<RCandidate> {
     let target = batch_size.max(1) as u64;
     let mut batch_settings = settings.clone();
     batch_settings.process_count = target;
@@ -113,7 +147,7 @@ pub fn generate_r_candidates_batch(
 /// - `start_exponent`: Initial exponent `x` (increments by one per candidate).
 ///
 /// # Returns
-/// - `Vec<(BigUint, Vec<(BigUint, u64)>)>`: List of `(r, factors)` pairs with empty factor lists.
+/// - `Vec<RCandidate>`: List of candidate records with empty factor lists.
 ///
 /// # Expected Output
 /// - Returns a deterministic sequence; no stdout/stderr output.
@@ -122,7 +156,7 @@ pub fn generate_r_candidates_from_ciphertext_stream(
     n: &BigUint,
     count: usize,
     start_exponent: u64,
-) -> Vec<(BigUint, Vec<(BigUint, u64)>)> {
+) -> Vec<RCandidate> {
     if count == 0 || n.is_zero() {
         return Vec::new();
     }
@@ -131,7 +165,7 @@ pub fn generate_r_candidates_from_ciphertext_stream(
     let mut results = Vec::with_capacity(count);
     for _ in 0..count {
         let r = ciphertext_stream_next(ciphertext, n, &mut exponent);
-        results.push((r, Vec::new()));
+        results.push(RCandidate::new(r, Vec::new()));
     }
     results
 }
@@ -161,14 +195,14 @@ fn ciphertext_stream_next(ciphertext: &BigUint, n: &BigUint, exponent: &mut u64)
 /// - `rng`: Random number generator for shuffling prime selections.
 ///
 /// # Returns
-/// - `Vec<(BigUint, Vec<(BigUint, u64)>)>`: List of `(r, factors)` pairs.
+/// - `Vec<RCandidate>`: List of mutable candidate records.
 ///
 /// # Expected Output
 /// - Returns an empty list if not enough primes are available; may read/write reuse files.
 pub fn generate_r_candidates_from_small_primes(
     settings: &RCandidateSettings,
     rng: &mut RngChoice,
-) -> Vec<(BigUint, Vec<(BigUint, u64)>)> {
+) -> Vec<RCandidate> {
     let count = settings
         .process_count
         .max(settings.process_min_count)
@@ -180,7 +214,7 @@ pub fn generate_r_candidates_from_small_primes(
         .max_factors_per_candidate
         .max(min_small_factors + 1);
 
-    let mut collected: Vec<(BigUint, Vec<(BigUint, u64)>)> = Vec::new();
+    let mut collected: Vec<RCandidate> = Vec::new();
     let mut seen: HashSet<String> = HashSet::new();
 
     let load_reuse = settings.reuse_r_candidates && !settings.reuse_r_candidates_append_only;
@@ -191,9 +225,9 @@ pub fn generate_r_candidates_from_small_primes(
         println!("Reuse enabled; loading r candidates from {}", reuse_path);
         let mut loaded = load_reuse_candidates(reuse_path);
         loaded.shuffle(rng);
-        for (r, factors) in loaded {
-            if seen.insert(r.to_string()) {
-                collected.push((r, factors));
+        for candidate in loaded {
+            if seen.insert(candidate.r.to_string()) {
+                collected.push(candidate);
                 if collected.len() >= target_count {
                     println!(
                         "Loaded {} r candidates from reuse file {}",
@@ -288,7 +322,7 @@ pub fn generate_r_candidates_from_small_primes(
         if collected.len() >= target_count {
             break;
         }
-        if seen.insert(entry.0.to_string()) {
+        if seen.insert(entry.r.to_string()) {
             new_candidates.push(entry.clone());
             collected.push(entry);
         }
@@ -317,7 +351,7 @@ const POLLARD_RHO_PRIMALITY_TIMEOUT_MS: u64 = 25;
 /// - `rng`: Random number generator for selecting primes.
 ///
 /// # Returns
-/// - `Option<(BigUint, Vec<(BigUint, u64)>)>`: Candidate and factor list or `None` if invalid.
+/// - `Option<RCandidate>`: Candidate record or `None` if invalid.
 ///
 /// # Expected Output
 /// - Returns `None` when the constraints cannot be met; no side effects.
@@ -329,7 +363,7 @@ fn build_small_primes_candidate(
     small_factor_count: usize,
     max_factors: usize,
     rng: &mut RngChoice,
-) -> Option<(BigUint, Vec<(BigUint, u64)>)> {
+) -> Option<RCandidate> {
     if small_factor_count == 0 || max_factors <= small_factor_count {
         return None;
     }
@@ -402,7 +436,7 @@ fn build_small_primes_candidate(
     }
 
     factors.sort_by(|a, b| a.0.cmp(&b.0));
-    Some((r, factors))
+    Some(RCandidate::new(r, factors))
 }
 
 /// Samples a prime candidate of the requested bit width and validates it with Pollard Rho.
@@ -461,7 +495,7 @@ fn sample_large_prime_with_pollard(
 /// - `rng`: Random number generator for candidate sampling.
 ///
 /// # Returns
-/// - `Vec<(BigUint, Vec<(BigUint, u64)>)>`: List of `(r, factors)` pairs.
+/// - `Vec<RCandidate>`: List of mutable candidate records.
 ///
 /// # Expected Output
 /// - Returns a list of candidates meeting factor constraints; may print progress logs.
@@ -469,7 +503,7 @@ pub fn generate_r_candidates_via_factoring(
     n: &BigUint,
     settings: &RCandidateSettings,
     rng: &mut RngChoice,
-) -> Vec<(BigUint, Vec<(BigUint, u64)>)> {
+) -> Vec<RCandidate> {
     if let Some(ref override_r) = settings.override_best_r {
         if !override_r.is_zero() {
             if is_probable_prime_big(override_r) {
@@ -482,7 +516,7 @@ pub fn generate_r_candidates_via_factoring(
                         .iter()
                         .all(|(p, _)| p >= &settings.process_min_factor)
                 {
-                    return vec![(override_r.clone(), factors)];
+                    return vec![RCandidate::new(override_r.clone(), factors)];
                 }
             }
         }
@@ -496,7 +530,7 @@ pub fn generate_r_candidates_via_factoring(
         .max(1);
     let target_count = count as usize;
 
-    let mut collected: Vec<(BigUint, Vec<(BigUint, u64)>)> = Vec::new();
+    let mut collected: Vec<RCandidate> = Vec::new();
     let mut seen: HashSet<String> = HashSet::new();
 
     let load_reuse = settings.reuse_r_candidates && !settings.reuse_r_candidates_append_only;
@@ -507,9 +541,9 @@ pub fn generate_r_candidates_via_factoring(
         println!("Reuse enabled; loading r candidates from {}", reuse_path);
         let mut loaded = load_reuse_candidates(reuse_path);
         loaded.shuffle(rng);
-        for (r, factors) in loaded {
-            if seen.insert(r.to_string()) {
-                collected.push((r, factors));
+        for candidate in loaded {
+            if seen.insert(candidate.r.to_string()) {
+                collected.push(candidate);
                 if collected.len() >= target_count {
                     println!(
                         "Loaded {} r candidates from reuse file {}",
@@ -580,14 +614,14 @@ pub fn generate_r_candidates_via_factoring(
                 "Generated r candidate: {}, factors {:?}",
                 candidate, factors
             );
-            Some((candidate, factors))
+            Some(RCandidate::new(candidate, factors))
         })
         .collect::<Vec<_>>();
 
     let mut new_candidates = Vec::new();
-    for (r, factors) in generated {
-        if seen.insert(r.to_string()) {
-            new_candidates.push((r, factors));
+    for candidate in generated {
+        if seen.insert(candidate.r.to_string()) {
+            new_candidates.push(candidate);
         }
     }
 
@@ -607,11 +641,11 @@ pub fn generate_r_candidates_via_factoring(
 /// - `path`: Path to the reuse CSV file.
 ///
 /// # Returns
-/// - `Vec<(BigUint, Vec<(BigUint, u64)>)>`: Parsed `(r, factors)` entries.
+/// - `Vec<RCandidate>`: Parsed candidate records.
 ///
 /// # Expected Output
 /// - Returns an empty list on missing/invalid files; may print parsing errors.
-fn load_reuse_candidates(path: &str) -> Vec<(BigUint, Vec<(BigUint, u64)>)> {
+fn load_reuse_candidates(path: &str) -> Vec<RCandidate> {
     let file = match fs::File::open(path) {
         Ok(f) => f,
         Err(err) => {
@@ -677,7 +711,7 @@ fn load_reuse_candidates(path: &str) -> Vec<(BigUint, Vec<(BigUint, u64)>)> {
             continue;
         };
 
-        entries.push((r, factors));
+        entries.push(RCandidate::new(r, factors));
     }
 
     entries
@@ -694,7 +728,7 @@ fn load_reuse_candidates(path: &str) -> Vec<(BigUint, Vec<(BigUint, u64)>)> {
 ///
 /// # Expected Output
 /// - Appends lines to the file when possible; may print I/O errors.
-fn append_reuse_candidates(path: &str, entries: &[(BigUint, Vec<(BigUint, u64)>)]) {
+fn append_reuse_candidates(path: &str, entries: &[RCandidate]) {
     if entries.is_empty() {
         return;
     }
@@ -707,12 +741,64 @@ fn append_reuse_candidates(path: &str, entries: &[(BigUint, Vec<(BigUint, u64)>)
         }
     };
 
-    for (r, factors) in entries {
-        let factors_str = format_factors_csv(factors);
-        if let Err(err) = writeln!(file, "{},{}", r, factors_str) {
-            println!("Failed to write r candidate {} to {}: {}", r, path, err);
+    for candidate in entries {
+        let factors_str = format_factors_csv(&candidate.factors);
+        if let Err(err) = writeln!(file, "{},{}", candidate.r, factors_str) {
+            println!(
+                "Failed to write r candidate {} to {}: {}",
+                candidate.r, path, err
+            );
             break;
         }
+    }
+}
+
+/// Retargets candidates to `N_2 = x * y * z` using random decimal exponent partitions of `2.005`.
+///
+/// # Parameters
+/// - `n`: Original RSA modulus used as the base for `N^a`, `N^b`, and `N^c`.
+/// - `candidates`: Mutable candidate list to rewrite in place.
+/// - `rng`: Random number generator used for the exponent partitioning.
+///
+/// # Returns
+/// - `()`: This function returns nothing.
+///
+/// # Expected Output
+/// - Rewrites each candidate's modulus and factors in place; no stdout/stderr output.
+pub fn retarget_r_candidates_for_speculative_oracles(
+    n: &BigUint,
+    candidates: &mut [RCandidate],
+    rng: &mut RngChoice,
+) {
+    if candidates.is_empty() {
+        return;
+    }
+
+    let target_exponent =
+        BigDecimal::parse_bytes(b"2.005", 10).expect("valid speculative target exponent");
+    let minimum_component =
+        BigDecimal::parse_bytes(b"0.45", 10).expect("valid speculative minimum exponent");
+
+    for candidate in candidates {
+        let parts =
+            random_bigdecimal_partition_with_min(&target_exponent, 3, &minimum_component, rng);
+        if parts.len() != 3 {
+            continue;
+        }
+
+        let mut factors = Vec::with_capacity(parts.len());
+        for part in parts {
+            let prime = next_prime_from_biguint_pow_bigdecimal(n, &part);
+            factors.push((prime, 1));
+        }
+        let factors = coalesce_factors(factors);
+        let r = factors
+            .iter()
+            .fold(BigUint::one(), |acc, (p, e)| acc * p.pow(*e as u32));
+
+        candidate.r = r;
+        candidate.factors = factors;
+        candidate.target_exponent = target_exponent.clone();
     }
 }
 
@@ -827,15 +913,15 @@ mod tests {
         fs::write(&path, content).expect("write failed");
         let entries = load_reuse_candidates(path.to_str().unwrap());
         assert_eq!(entries.len(), 1);
-        assert_eq!(entries[0].0, BigUint::from(105u8));
-        assert_eq!(entries[0].1.len(), 3);
+        assert_eq!(entries[0].r, BigUint::from(105u8));
+        assert_eq!(entries[0].factors.len(), 3);
         let _ = fs::remove_file(&path);
     }
 
     #[test]
     fn test_append_reuse_candidates_writes() {
         let path = temp_path("append");
-        let entries = vec![(
+        let entries = vec![RCandidate::new(
             BigUint::from(105u8),
             vec![
                 (BigUint::from(3u8), 1),
@@ -879,19 +965,20 @@ mod tests {
         let mut rng = RngChoice::from_seed(RngMode::Standard, 42);
         let candidates = generate_r_candidates_from_small_primes(&settings, &mut rng);
         assert!(!candidates.is_empty());
-        let (r, factors) = &candidates[0];
-        let product = factors
+        let candidate = &candidates[0];
+        let product = candidate
+            .factors
             .iter()
             .fold(BigUint::one(), |acc, (p, e)| acc * p.pow(*e as u32));
-        assert_eq!(&product, r);
-        assert!(factors.len() >= settings.small_prime_factors_per_candidate + 1);
+        assert_eq!(product, candidate.r);
+        assert!(candidate.factors.len() >= settings.small_prime_factors_per_candidate + 1);
         let max_small = settings
             .small_primes
             .iter()
             .max()
             .cloned()
             .unwrap_or_else(|| BigUint::from(2u8));
-        assert!(factors.iter().any(|(p, _)| p > &max_small));
+        assert!(candidate.factors.iter().any(|(p, _)| p > &max_small));
     }
 
     #[test]
@@ -958,7 +1045,7 @@ mod tests {
         let mut rng = RngChoice::from_seed(RngMode::Standard, 46);
         let candidates = generate_r_candidates(&BigUint::from(100u8), &settings, &mut rng);
         assert_eq!(candidates.len(), 1);
-        assert_eq!(candidates[0].0, BigUint::from(105u8));
+        assert_eq!(candidates[0].r, BigUint::from(105u8));
     }
 
     #[test]
@@ -982,8 +1069,8 @@ mod tests {
         let candidates =
             generate_r_candidates_via_factoring(&BigUint::from(100u8), &settings, &mut rng);
         assert_eq!(candidates.len(), 1);
-        assert_eq!(candidates[0].0, BigUint::from(105u8));
-        assert!(candidates[0].1.len() >= 3);
+        assert_eq!(candidates[0].r, BigUint::from(105u8));
+        assert!(candidates[0].factors.len() >= 3);
     }
 
     #[test]
@@ -1015,10 +1102,14 @@ mod tests {
         let c = BigUint::from(5u32);
         let candidates = generate_r_candidates_from_ciphertext_stream(&c, &n, 3, 1);
         assert_eq!(candidates.len(), 3);
-        assert_eq!(candidates[0].0, BigUint::from(5u32));
-        assert_eq!(candidates[1].0, BigUint::from(25u32));
-        assert_eq!(candidates[2].0, BigUint::from(28u32));
-        assert!(candidates.iter().all(|(_, factors)| factors.is_empty()));
+        assert_eq!(candidates[0].r, BigUint::from(5u32));
+        assert_eq!(candidates[1].r, BigUint::from(25u32));
+        assert_eq!(candidates[2].r, BigUint::from(28u32));
+        assert!(
+            candidates
+                .iter()
+                .all(|candidate| candidate.factors.is_empty())
+        );
     }
 
     #[test]
@@ -1039,5 +1130,33 @@ mod tests {
         let c = BigUint::from(7u32);
         let candidates = generate_r_candidates_from_ciphertext_stream(&c, &n, 2, 0);
         assert!(candidates.is_empty());
+    }
+
+    #[test]
+    fn test_retarget_r_candidates_for_speculative_oracles() {
+        let mut candidates = vec![RCandidate::new(BigUint::from(21u8), vec![])];
+        let mut rng = RngChoice::from_seed(RngMode::Standard, 48);
+        retarget_r_candidates_for_speculative_oracles(
+            &BigUint::from(1000u16),
+            &mut candidates,
+            &mut rng,
+        );
+
+        assert_eq!(
+            candidates[0].target_exponent,
+            BigDecimal::parse_bytes(b"2.005", 10).expect("valid exponent")
+        );
+        let product = candidates[0]
+            .factors
+            .iter()
+            .fold(BigUint::one(), |acc, (p, e)| acc * p.pow(*e as u32));
+        assert_eq!(product, candidates[0].r);
+        assert!(!candidates[0].factors.is_empty());
+        assert!(
+            candidates[0]
+                .factors
+                .iter()
+                .all(|(p, _)| is_probable_prime_big(p))
+        );
     }
 }

@@ -1,6 +1,7 @@
 /// Eclipse Public License 2.0
 /// SPDX-License-Identifier: EPL-2.0
 /// Copyright (c) 2025 Nicholas LaRoche <nlaroche@cryptifier.dev>
+use bigdecimal::BigDecimal;
 use std::{
     collections::HashSet,
     error::Error,
@@ -47,7 +48,7 @@ use crate::math::{
     is_probable_prime_big, mod_inverse, modular_sqrt, random_biguint_bits, random_prime_with_bits,
     shannon_entropy_bit, to_hex,
 };
-use crate::r_candidates::RCandidateSettings;
+use crate::r_candidates::{RCandidate, RCandidateSettings};
 use crate::rng::{RngChoice, RngMode};
 use crate::search::{beam_search_top_k, viterbi_decode};
 use num_bigint::BigUint;
@@ -1063,6 +1064,7 @@ struct OracleCandidate {
     phi_new: BigUint,
     r_pow_y: BigUint,
     x: BigUint,
+    target_exponent: BigDecimal,
 }
 
 #[derive(Clone, Debug)]
@@ -1289,22 +1291,22 @@ fn collect_speculative_oracle_bits(
     );
 
     let mut oracles = Vec::with_capacity(k_oracles.min(candidates.len()));
-    for (r, factors) in candidates.iter() {
+    for candidate in candidates.iter() {
         if oracles.len() >= k_oracles {
             break;
         }
 
-        let phi_new = compute_totient(&factors);
+        let phi_new = compute_totient(&candidate.factors);
         let Some(d_new) = mod_inverse(&ctx.e, &phi_new) else {
             continue;
         };
 
-        let r_pow_y = r.pow(y);
+        let r_pow_y = candidate.r.pow(y);
         let dm = derive_candidate_message_from_result(
             ctx,
             engine,
             &result_default,
-            &r,
+            &candidate.r,
             &d_new,
             &n_pow_y,
             &r_pow_y,
@@ -1414,18 +1416,18 @@ fn build_oracle_candidates(
     let mut prepared = Vec::with_capacity(target_count);
 
     if engine.same_r_batch {
-        let mut selected: Option<(BigUint, BigUint)> = None;
-        for (r, factors) in candidates {
-            let phi_new = compute_totient(&factors);
+        let mut selected: Option<(RCandidate, BigUint)> = None;
+        for candidate in candidates {
+            let phi_new = compute_totient(&candidate.factors);
             if mod_inverse(&e_big, &phi_new).is_some() {
-                selected = Some((r, phi_new));
+                selected = Some((candidate, phi_new));
                 break;
             }
         }
 
-        let (r, phi_new) =
+        let (candidate, phi_new) =
             selected.ok_or("no valid r candidates available for same-r analysis tests")?;
-        let r_pow_y = r.pow(y);
+        let r_pow_y = candidate.r.pow(y);
 
         let mut instance_idx = 0usize;
         let mut attempts = 0usize;
@@ -1435,11 +1437,12 @@ fn build_oracle_candidates(
             let e_x = &e_big * &x;
             if let Some(d_new) = mod_inverse(&e_x, &phi_new) {
                 prepared.push(OracleCandidate {
-                    r: r.clone(),
+                    r: candidate.r.clone(),
                     d_new,
                     phi_new: phi_new.clone(),
                     r_pow_y: r_pow_y.clone(),
                     x,
+                    target_exponent: candidate.target_exponent.clone(),
                 });
             }
             instance_idx = instance_idx.saturating_add(1);
@@ -1451,16 +1454,17 @@ fn build_oracle_candidates(
             }
         }
     } else {
-        for (r, factors) in candidates {
-            let phi_new = compute_totient(&factors);
+        for candidate in candidates {
+            let phi_new = compute_totient(&candidate.factors);
             if let Some(d_new) = mod_inverse(&e_big, &phi_new) {
-                let r_pow_y = r.pow(y);
+                let r_pow_y = candidate.r.pow(y);
                 prepared.push(OracleCandidate {
-                    r,
+                    r: candidate.r,
                     d_new,
                     phi_new,
                     r_pow_y,
                     x: BigUint::one(),
+                    target_exponent: candidate.target_exponent,
                 });
             }
         }
@@ -3358,20 +3362,20 @@ fn run_enciphered_export(
     if candidates.is_empty() {
         return Err("no r candidates generated for enciphered export".into());
     }
-    let (r, factors) = candidates
+    let candidate = candidates
         .drain(..1)
         .next()
         .ok_or("missing r candidate for enciphered export")?;
-    let phi_new = compute_totient(&factors);
+    let phi_new = compute_totient(&candidate.factors);
     let d_new = mod_inverse(&ctx.e, &phi_new)
         .ok_or("public exponent is not invertible for export r candidate")?;
 
     println!(
         "Enciphered export using r candidate {} with factors {:?}",
-        r, factors
+        candidate.r, candidate.factors
     );
 
-    let r_pow_y = r.pow(y);
+    let r_pow_y = candidate.r.pow(y);
     let mut seeds = Vec::with_capacity(iterations);
     for _ in 0..iterations {
         seeds.push(rng.next_u64());
@@ -3394,7 +3398,7 @@ fn run_enciphered_export(
                 ctx,
                 engine,
                 &ciphertext,
-                &r,
+                &candidate.r,
                 &d_new,
                 &n_pow_y,
                 &r_pow_y,
@@ -4019,18 +4023,18 @@ fn run_message_trial(
                         MatchHistogram::new(),
                     )
                 },
-                |mut acc, (r, factors)| {
-                    let phi_new = compute_totient(factors);
+                |mut acc, candidate| {
+                    let phi_new = compute_totient(&candidate.factors);
                     let Some(d_new) = mod_inverse(&ctx.e, &phi_new) else {
                         return acc;
                     };
 
-                    let r_pow_y = r.pow(y);
+                    let r_pow_y = candidate.r.pow(y);
                     let dm = derive_candidate_message_from_result(
                         ctx,
                         engine,
                         &result_default,
-                        r,
+                        &candidate.r,
                         &d_new,
                         &n_pow_y,
                         &r_pow_y,
@@ -4041,8 +4045,8 @@ fn run_message_trial(
 
                     let (matching_lsb, matching_total) = count_matching_bits(&dm, &msg);
                     let report = TestReport {
-                        best_r: r.clone(),
-                        factors: factors.clone(),
+                        best_r: candidate.r.clone(),
+                        factors: candidate.factors.clone(),
                         matching_lsb,
                         matching_total,
                         message_bits: msg.bits() as usize,
@@ -4617,7 +4621,7 @@ fn record_r_candidate_trace_batch_from_factors(
     ctx: &RSAContext,
     engine: &EngineConfig,
     message: &BigUint,
-    candidates: &[(BigUint, Vec<(BigUint, u64)>)],
+    candidates: &[RCandidate],
     analytics: &Arc<Mutex<SessionAnalytics>>,
     context: &str,
     shift: bool,
@@ -4633,18 +4637,18 @@ fn record_r_candidate_trace_batch_from_factors(
     let result_default = get_larger_number(&shifted, &ctx.n, y, true, false);
 
     let mut entries = Vec::with_capacity(candidates.len());
-    for (r, factors) in candidates {
-        let phi_new = compute_totient(factors);
+    for candidate in candidates {
+        let phi_new = compute_totient(&candidate.factors);
         let Some(d_new) = mod_inverse(&ctx.e, &phi_new) else {
             continue;
         };
-        let r_pow_y = r.pow(y);
-        let hbc_result = hbc(&result_default, r, &n_pow_y, engine);
+        let r_pow_y = candidate.r.pow(y);
+        let hbc_result = hbc(&result_default, &candidate.r, &n_pow_y, engine);
         let dm = derive_candidate_message_from_result(
             ctx,
             engine,
             &result_default,
-            r,
+            &candidate.r,
             &d_new,
             &n_pow_y,
             &r_pow_y,
@@ -4652,8 +4656,9 @@ fn record_r_candidate_trace_batch_from_factors(
             false,
         );
         entries.push(RCandidateTraceEntry {
-            r: r.to_string(),
-            r_bits: r.bits(),
+            r: candidate.r.to_string(),
+            r_bits: candidate.r.bits(),
+            target_exponent: candidate.target_exponent.normalized().to_string(),
             hbc_ciphertext_r: hbc_result.to_string(),
             candidate_decryption: dm.to_string(),
         });
@@ -4730,6 +4735,7 @@ fn record_r_candidate_trace_batch_from_prepared(
         entries.push(RCandidateTraceEntry {
             r: candidate.r.to_string(),
             r_bits: candidate.r.bits(),
+            target_exponent: candidate.target_exponent.normalized().to_string(),
             hbc_ciphertext_r: hbc_result.to_string(),
             candidate_decryption: dm.to_string(),
         });
@@ -4767,6 +4773,7 @@ struct AccuracyCandidate {
     phi_new: BigUint,
     d_new: BigUint,
     r_pow_y: BigUint,
+    target_exponent: BigDecimal,
 }
 
 #[derive(Clone, Debug)]
@@ -4918,18 +4925,19 @@ fn run_r_candidate_accuracy_batches(
     let y = engine.rabin_exponent as u32;
     let e_big = ctx.e.clone();
     let mut prepared = Vec::with_capacity(candidates.len());
-    for (r, factors) in candidates.drain(..) {
-        let phi_new = compute_totient(&factors);
+    for candidate in candidates.drain(..) {
+        let phi_new = compute_totient(&candidate.factors);
         let Some(d_new) = mod_inverse(&e_big, &phi_new) else {
             continue;
         };
-        let r_pow_y = r.pow(y);
+        let r_pow_y = candidate.r.pow(y);
         prepared.push(AccuracyCandidate {
-            r,
-            factors,
+            r: candidate.r,
+            factors: candidate.factors,
             phi_new,
             d_new,
             r_pow_y,
+            target_exponent: candidate.target_exponent,
         });
     }
 
@@ -5041,6 +5049,7 @@ fn run_r_candidate_accuracy_batches(
                 Ok::<_, String>(RCandidateAccuracyEntry {
                     r: candidate.r.to_string(),
                     r_bits: candidate.r.bits(),
+                    target_exponent: candidate.target_exponent.normalized().to_string(),
                     factors: candidate
                         .factors
                         .iter()
@@ -5066,6 +5075,7 @@ fn run_r_candidate_accuracy_batches(
                 phi_new: candidate.phi_new.clone(),
                 r_pow_y: candidate.r_pow_y.clone(),
                 x: BigUint::one(),
+                target_exponent: candidate.target_exponent.clone(),
             })
             .collect();
         let mut beam_match_pct = None;

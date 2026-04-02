@@ -394,12 +394,12 @@ fn run_speculative_decrypt(
 
     let y = engine.rabin_exponent as u32;
     let mut prepared = Vec::with_capacity(candidates.len());
-    for (r, factors) in candidates {
-        let phi_new = compute_totient(&factors);
+    for candidate in candidates {
+        let phi_new = compute_totient(&candidate.factors);
         if mod_inverse(&ctx.e, &phi_new).is_some() {
-            let r_pow_y = r.pow(y);
+            let r_pow_y = candidate.r.pow(y);
             prepared.push(OracleCandidate {
-                r,
+                r: candidate.r,
                 phi_new,
                 r_pow_y,
             });

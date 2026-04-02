@@ -1,3 +1,4 @@
+use bigdecimal::BigDecimal;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
 
@@ -5,7 +6,10 @@ use num_bigint::BigUint;
 use serde::Serialize;
 use serde_json::{Map, Value};
 
-use crate::r_candidates::{RCandidateMode, RCandidateSettings, generate_r_candidates_batch};
+use crate::r_candidates::{
+    RCandidate, RCandidateMode, RCandidateSettings, generate_r_candidates_batch,
+    retarget_r_candidates_for_speculative_oracles,
+};
 use crate::rng::RngChoice;
 
 /// CLI metadata captured for analytics sessions.
@@ -103,6 +107,8 @@ pub struct RCandidateEntry {
     pub r: String,
     /// Bit length of the candidate modulus.
     pub r_bits: u64,
+    /// Decimal target exponent used to retarget the candidate.
+    pub target_exponent: String,
     /// Prime factorization metadata.
     pub factors: Vec<RCandidateFactor>,
 }
@@ -114,6 +120,8 @@ pub struct RCandidateTraceEntry {
     pub r: String,
     /// Bit length of the candidate modulus.
     pub r_bits: u64,
+    /// Decimal target exponent used to retarget the candidate.
+    pub target_exponent: String,
     /// Ciphertext after homomorphic base conversion into `r`.
     pub hbc_ciphertext_r: String,
     /// Candidate-derived plaintext.
@@ -160,6 +168,8 @@ pub struct RCandidateAccuracyEntry {
     pub r: String,
     /// Bit length of the candidate modulus.
     pub r_bits: u64,
+    /// Decimal target exponent used to retarget the candidate.
+    pub target_exponent: String,
     /// Prime factorization metadata.
     pub factors: Vec<RCandidateFactor>,
     /// Mean accuracy percentage across the message batch.
@@ -481,7 +491,7 @@ impl SessionAnalytics {
 /// - `analytics`: Session analytics accumulator for r candidate metadata.
 ///
 /// # Returns
-/// - `Vec<(BigUint, Vec<(BigUint, u64)>)>`: Candidate list and factor tuples.
+/// - `Vec<RCandidate>`: Candidate list with revised modulus metadata.
 ///
 /// # Expected Output
 /// - Records candidate metadata in `analytics`; no stdout/stderr output.
@@ -492,17 +502,20 @@ pub fn generate_r_candidates_with_analytics(
     rng: &mut RngChoice,
     batch_size: usize,
     analytics: &Arc<Mutex<SessionAnalytics>>,
-) -> Vec<(BigUint, Vec<(BigUint, u64)>)> {
+) -> Vec<RCandidate> {
     let start = std::time::Instant::now();
-    let candidates = generate_r_candidates_batch(n, settings, rng, batch_size);
+    let mut candidates = generate_r_candidates_batch(n, settings, rng, batch_size);
+    retarget_r_candidates_for_speculative_oracles(n, &mut candidates, rng);
     let duration = start.elapsed();
 
     let candidate_entries = candidates
         .iter()
-        .map(|(r, factors)| RCandidateEntry {
-            r: r.to_string(),
-            r_bits: r.bits(),
-            factors: factors
+        .map(|candidate| RCandidateEntry {
+            r: candidate.r.to_string(),
+            r_bits: candidate.r.bits(),
+            target_exponent: format_target_exponent(&candidate.target_exponent),
+            factors: candidate
+                .factors
                 .iter()
                 .map(|(p, e)| RCandidateFactor {
                     prime: p.to_string(),
@@ -538,6 +551,20 @@ pub fn generate_r_candidates_with_analytics(
     }
 
     candidates
+}
+
+/// Formats a candidate target exponent for analytics output.
+///
+/// # Parameters
+/// - `target_exponent`: Decimal exponent associated with the candidate.
+///
+/// # Returns
+/// - `String`: Rendered decimal value.
+///
+/// # Expected Output
+/// - Returns a plain string form; no side effects.
+fn format_target_exponent(target_exponent: &BigDecimal) -> String {
+    target_exponent.normalized().to_string()
 }
 
 /// Writes the analytics session JSON to disk.
