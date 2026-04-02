@@ -43,6 +43,8 @@ pub struct AnalyticsCliArgs {
     pub mirror_invert_candidates: bool,
     /// Expected bit width for decryptions.
     pub bits_decrypt: Option<u32>,
+    /// Optional CLI override for speculative r-candidate target exponent.
+    pub r_candidate_target_exponent: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -61,6 +63,7 @@ pub(crate) struct AnalyticsCliInfo {
     use_hamming_distance: bool,
     mirror_invert_candidates: bool,
     bits_decrypt: Option<u32>,
+    r_candidate_target_exponent: Option<String>,
 }
 
 /// Timing entry for a named step.
@@ -275,6 +278,7 @@ impl SessionAnalytics {
                 use_hamming_distance: args.use_hamming_distance,
                 mirror_invert_candidates: args.mirror_invert_candidates,
                 bits_decrypt: args.bits_decrypt,
+                r_candidate_target_exponent: args.r_candidate_target_exponent,
             },
             steps: Vec::new(),
             step_summaries: Vec::new(),
@@ -505,7 +509,12 @@ pub fn generate_r_candidates_with_analytics(
 ) -> Vec<RCandidate> {
     let start = std::time::Instant::now();
     let mut candidates = generate_r_candidates_batch(n, settings, rng, batch_size);
-    retarget_r_candidates_for_speculative_oracles(n, &mut candidates, rng);
+    retarget_r_candidates_for_speculative_oracles(
+        n,
+        &mut candidates,
+        &settings.target_exponent,
+        rng,
+    );
     let duration = start.elapsed();
 
     let candidate_entries = candidates

@@ -357,6 +357,7 @@ fn build_r_candidate_settings(
             .r_bits
             .or(target_bit_length_override)
             .or(engine.r_candidate_bit_length),
+        target_exponent: engine.r_candidate_target_exponent.clone(),
     })
 }
 
@@ -592,6 +593,10 @@ fn build_header_lines(
             .join(",");
         lines.push(format!("# small_primes={}", primes));
         lines.push(format!(
+            "# target_exponent={}",
+            settings.target_exponent.normalized()
+        ));
+        lines.push(format!(
             "# small_prime_factors={}",
             settings.small_prime_factors_per_candidate
         ));
@@ -757,6 +762,7 @@ mod tests {
         assert_eq!(settings.small_prime_factors_per_candidate, 4);
         assert_eq!(settings.max_factors_per_candidate, 12);
         assert_eq!(settings.target_bit_length, Some(80));
+        assert_eq!(settings.target_exponent, engine.r_candidate_target_exponent);
     }
 
     #[test]
@@ -775,12 +781,15 @@ mod tests {
             small_prime_factors_per_candidate: 3,
             max_factors_per_candidate: 6,
             target_bit_length: Some(64),
+            target_exponent: bigdecimal::BigDecimal::parse_bytes(b"2.005", 10)
+                .expect("valid exponent"),
         };
 
         let lines = build_header_lines(None, &settings, 2);
         let joined = lines.join("\n");
         assert!(joined.contains("mode=small_primes"));
         assert!(joined.contains("small_primes=3,5,7"));
+        assert!(joined.contains("target_exponent=2.005"));
         assert!(joined.contains("small_prime_factors=3"));
         assert!(joined.contains("max_factors=6"));
         assert!(joined.contains("target_bits=64"));

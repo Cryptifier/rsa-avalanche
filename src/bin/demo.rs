@@ -937,6 +937,7 @@ fn build_r_candidate_settings(engine: &EngineConfig) -> RCandidateSettings {
         small_prime_factors_per_candidate: engine.r_candidate_small_prime_factors,
         max_factors_per_candidate: engine.r_candidate_max_factors,
         target_bit_length: engine.r_candidate_bit_length,
+        target_exponent: engine.r_candidate_target_exponent.clone(),
     }
 }
 

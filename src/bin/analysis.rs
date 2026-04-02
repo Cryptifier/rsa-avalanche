@@ -6,6 +6,7 @@ use std::{
     sync::{Arc, Mutex},
 };
 
+use bigdecimal::BigDecimal;
 use clap::Parser;
 use rsademo::analytics::{AnalyticsCliArgs, SessionAnalytics};
 use rsademo::config::load_config;
@@ -91,6 +92,10 @@ struct Args {
     /// Add bitwise-inverted avalanche candidates to the Hamming-distance grid
     #[arg(long = "mirror-invert-candidates")]
     mirror_invert_candidates: bool,
+
+    /// Total decimal exponent used when retargeting speculative r candidates
+    #[arg(long = "r-candidate-target-exponent")]
+    r_candidate_target_exponent: Option<BigDecimal>,
 }
 
 /// Entry point for the RSA round-trip demo CLI.
@@ -128,6 +133,9 @@ fn main() -> Result<(), Box<dyn Error>> {
     if args.mirror_invert_candidates {
         config.engine.mirror_invert_candidates = true;
     }
+    if let Some(target_exponent) = &args.r_candidate_target_exponent {
+        config.engine.r_candidate_target_exponent = target_exponent.clone();
+    }
     let analytics = Arc::new(Mutex::new(SessionAnalytics::new(AnalyticsCliArgs {
         bits: args.bits,
         message_override: args.message.clone(),
@@ -143,6 +151,10 @@ fn main() -> Result<(), Box<dyn Error>> {
         use_hamming_distance: args.use_hamming_distance,
         mirror_invert_candidates: args.mirror_invert_candidates,
         bits_decrypt: args.bits_decrypt,
+        r_candidate_target_exponent: args
+            .r_candidate_target_exponent
+            .as_ref()
+            .map(|value| value.normalized().to_string()),
     })));
 
     let analytics_for_handler = Arc::clone(&analytics);

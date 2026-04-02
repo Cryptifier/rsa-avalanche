@@ -2,6 +2,7 @@
 
 use std::{error::Error, fs, path::Path};
 
+use bigdecimal::BigDecimal;
 use num_bigint::BigUint;
 use serde::Deserialize;
 
@@ -146,6 +147,12 @@ pub struct EngineConfig {
     pub r_candidate_max_factors: usize,
     #[serde(default)]
     pub r_candidate_bit_length: Option<u64>,
+    /// Decimal exponent used when retargeting speculative r candidates.
+    #[serde(
+        default = "default_r_candidate_target_exponent",
+        deserialize_with = "deserialize_bigdecimal"
+    )]
+    pub r_candidate_target_exponent: BigDecimal,
     #[serde(default = "default_combiner_enable")]
     pub combiner_enable: bool,
     #[serde(default = "default_combiner_k_oracles")]
@@ -275,6 +282,7 @@ impl Default for EngineConfig {
             r_candidate_small_prime_factors: default_r_candidate_small_prime_factors(),
             r_candidate_max_factors: default_r_candidate_max_factors(),
             r_candidate_bit_length: None,
+            r_candidate_target_exponent: default_r_candidate_target_exponent(),
             combiner_enable: default_combiner_enable(),
             combiner_k_oracles: default_combiner_k_oracles(),
             combiner_match_probability: default_combiner_match_probability(),
@@ -387,6 +395,36 @@ where
             "expected string or number for big integer, got {other}"
         ))),
     }
+}
+
+/// Deserializes a `BigDecimal` from a string or number JSON value.
+///
+/// # Parameters
+/// - `deserializer`: Serde deserializer provided by the caller.
+///
+/// # Returns
+/// - `Result<BigDecimal, D::Error>`: Parsed decimal value or an error when invalid.
+///
+/// # Expected Output
+/// - Returns a parse error if the value is not a string/number or is invalid.
+fn deserialize_bigdecimal<'de, D>(deserializer: D) -> Result<BigDecimal, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::de::Error as DeError;
+
+    let value = serde_json::Value::deserialize(deserializer)?;
+    let raw = match value {
+        serde_json::Value::String(s) => s,
+        serde_json::Value::Number(num) => num.to_string(),
+        other => {
+            return Err(DeError::custom(format!(
+                "expected string or number for decimal value, got {other}"
+            )));
+        }
+    };
+
+    raw.parse::<BigDecimal>().map_err(DeError::custom)
 }
 
 /// Default flag for RSA key generation.
@@ -985,6 +1023,20 @@ fn default_r_candidate_small_prime_factors() -> usize {
 /// - Returns a constant default value; no side effects.
 fn default_r_candidate_max_factors() -> usize {
     6
+}
+
+/// Default speculative target exponent used for retargeted r candidates.
+///
+/// # Parameters
+/// - None.
+///
+/// # Returns
+/// - `BigDecimal`: Default target exponent.
+///
+/// # Expected Output
+/// - Returns a constant default value; no side effects.
+fn default_r_candidate_target_exponent() -> BigDecimal {
+    BigDecimal::parse_bytes(b"2.005", 10).expect("valid default r candidate target exponent")
 }
 
 /// Default flag for enabling the combiner experiment.

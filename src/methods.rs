@@ -3750,6 +3750,7 @@ fn build_r_candidate_settings(engine: &EngineConfig) -> RCandidateSettings {
         small_prime_factors_per_candidate: engine.r_candidate_small_prime_factors,
         max_factors_per_candidate: engine.r_candidate_max_factors,
         target_bit_length: engine.r_candidate_bit_length,
+        target_exponent: engine.r_candidate_target_exponent.clone(),
     }
 }
 
@@ -4557,9 +4558,9 @@ fn derive_candidate_message_from_result(
     r: &BigUint,
     d_new: &BigUint,
     n_pow_y: &BigUint,
-    r_pow_y: &BigUint,
-    y: u32,
-    use_other_root: bool,
+    _r_pow_y: &BigUint,
+    _y: u32,
+    _use_other_root: bool,
 ) -> BigUint {
     let hbc_result = hbc(result_default, r, n_pow_y, engine);
     let recovered_new = if engine.use_rs_decrypt {
@@ -4568,9 +4569,11 @@ fn derive_candidate_message_from_result(
         hbc_result
     };
 
-    let result2_default = get_larger_number(&recovered_new, r, y, true, use_other_root);
-    let hbc_default = hbc(&result2_default, &ctx.n, r_pow_y, engine);
-    let dm_raw = &hbc_default % &ctx.n;
+    //let result2_default = get_larger_number(&recovered_new, r, y, true, use_other_root);
+    //let hbc_default = hbc(&result2_default, &ctx.n, r_pow_y, engine);
+    //let hbc_default = hbc(&recovered_new, &ctx.n, r, engine);
+    //let dm_raw = &hbc_default % &ctx.n;
+    let dm_raw = &recovered_new % &ctx.n;
     let width = dm_raw.bits().max(1);
     let mask = (BigUint::one() << width) - BigUint::one();
     let inverted_dm = &mask ^ &dm_raw;
@@ -5314,6 +5317,7 @@ mod tests {
             use_hamming_distance: false,
             mirror_invert_candidates: false,
             bits_decrypt: None,
+            r_candidate_target_exponent: None,
         })));
         let result = run_message_trial(
             &ctx,
@@ -5371,6 +5375,7 @@ mod tests {
             use_hamming_distance: false,
             mirror_invert_candidates: false,
             bits_decrypt: None,
+            r_candidate_target_exponent: None,
         })));
         let result = run_message_trial(
             &ctx,

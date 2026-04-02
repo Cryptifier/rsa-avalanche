@@ -65,6 +65,7 @@
         "r_candidate_small_prime_factors" : 3,
         "r_candidate_max_factors" : 6,
         "r_candidate_bit_length" : null,
+        "r_candidate_target_exponent" : 2.005,
         "combiner_enable" : true,
         "combiner_k_oracles" : 5,
         "combiner_match_probability" : 0.75,

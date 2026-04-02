@@ -32,6 +32,7 @@ cargo run --bin analysis -- --config config/rsa_config.json
 - `--seed <u64>`: Optional RNG seed for deterministic key generation.
 - `--crypto-rng`: Use cryptographic RNGs for sampling and candidate generation.
 - `-c, --config <PATH>`: JSON/JSON5 config path. Default `config/rsa_config.json`.
+- `--r-candidate-target-exponent <DECIMAL>`: Override the speculative retarget exponent used to build r candidates. Default `2.005`.
 - `--tests`: Run extended analysis tests and sufficiency checks.
 - `--export`: Export oracle entropy timeline charts and enciphered CSV artifacts.
 - `--session-json <PATH>`: Output analytics session JSON. Default `session.json`.
@@ -95,6 +96,7 @@ Notes:
 | `engine.r_candidate_small_prime_factors` | usize | `3` | Number of small prime factors. |
 | `engine.r_candidate_max_factors` | usize | `6` | Maximum total factors per r candidate. |
 | `engine.r_candidate_bit_length` | u64 | `null` | Optional target bit length for r candidates. |
+| `engine.r_candidate_target_exponent` | number | `2.005` | Total exponent budget used when retargeting speculative r candidates. |
 | `engine.combiner_enable` | bool | `true` | Enable speculative combiner. |
 | `engine.combiner_k_oracles` | usize | `5` | Number of oracles to request. |
 | `engine.combiner_match_probability` | number | `0.75` | Target oracle match probability. |
