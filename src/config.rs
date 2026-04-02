@@ -346,7 +346,9 @@ where
 
     let maybe_value = Option::<serde_json::Value>::deserialize(deserializer)?;
     match maybe_value {
-        Some(serde_json::Value::String(s)) => s.parse::<BigUint>().map(Some).map_err(DeError::custom),
+        Some(serde_json::Value::String(s)) => {
+            s.parse::<BigUint>().map(Some).map_err(DeError::custom)
+        }
         Some(serde_json::Value::Number(num)) => num
             .to_string()
             .parse::<BigUint>()
@@ -378,10 +380,9 @@ where
     let value = serde_json::Value::deserialize(deserializer)?;
     match value {
         serde_json::Value::String(s) => s.parse::<BigUint>().map_err(DeError::custom),
-        serde_json::Value::Number(num) => num
-            .to_string()
-            .parse::<BigUint>()
-            .map_err(DeError::custom),
+        serde_json::Value::Number(num) => {
+            num.to_string().parse::<BigUint>().map_err(DeError::custom)
+        }
         other => Err(DeError::custom(format!(
             "expected string or number for big integer, got {other}"
         ))),

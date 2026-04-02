@@ -42,7 +42,9 @@ impl std::fmt::Display for CombinerError {
             CombinerError::EmptyOracles => write!(f, "no oracles provided"),
             CombinerError::InconsistentLengths => write!(f, "oracle bit lengths differ"),
             CombinerError::EmptyMajorityBits => write!(f, "no majority bits provided"),
-            CombinerError::InvalidProbability => write!(f, "match probability must be within [0,1]"),
+            CombinerError::InvalidProbability => {
+                write!(f, "match probability must be within [0,1]")
+            }
             CombinerError::InvalidOracleCount => write!(f, "oracle count must be >= 1"),
         }
     }
@@ -133,7 +135,11 @@ pub fn majority_vote_per_bit(
                     zeros += 1;
                 }
             }
-            if ones == zeros { tie_breaker } else { ones > zeros }
+            if ones == zeros {
+                tie_breaker
+            } else {
+                ones > zeros
+            }
         })
         .collect::<Vec<_>>();
 
@@ -178,7 +184,13 @@ pub fn majority_vote_with_distribution(
     let majority_bits = ones_count
         .iter()
         .zip(zeros_count.iter())
-        .map(|(&ones, &zeros)| if ones == zeros { tie_breaker } else { ones > zeros })
+        .map(|(&ones, &zeros)| {
+            if ones == zeros {
+                tie_breaker
+            } else {
+                ones > zeros
+            }
+        })
         .collect();
 
     Ok(MajorityDistribution {
@@ -271,11 +283,7 @@ mod tests {
 
     #[test]
     fn test_majority_vote_per_bit_basic() {
-        let oracles = vec![
-            vec![true, false],
-            vec![true, true],
-            vec![false, true],
-        ];
+        let oracles = vec![vec![true, false], vec![true, true], vec![false, true]];
         let majority = majority_vote_per_bit(&oracles, false).expect("majority failed");
         assert_eq!(majority, vec![true, true]);
     }
@@ -299,12 +307,18 @@ mod tests {
         assert_eq!(result.ones_count, vec![2, 1, 2]);
         assert_eq!(result.zeros_count, vec![1, 2, 1]);
         assert_eq!(result.majority_bits, vec![true, false, true]);
-        assert_eq!(result.probability_one, vec![2.0 / 3.0, 1.0 / 3.0, 2.0 / 3.0]);
+        assert_eq!(
+            result.probability_one,
+            vec![2.0 / 3.0, 1.0 / 3.0, 2.0 / 3.0]
+        );
     }
 
     #[test]
     fn test_optimal_combiner_high_accuracy() {
-        let bits = vec![true, false, true, false, true, true, false, false, true, false, true, false, true, true, false, true];
+        let bits = vec![
+            true, false, true, false, true, true, false, false, true, false, true, false, true,
+            true, false, true,
+        ];
         let mut rng = RngChoice::from_seed(RngMode::Standard, 3);
         let config = CombinerConfig {
             k_oracles: 5,
@@ -312,7 +326,11 @@ mod tests {
             tie_breaker: true,
         };
         let result = optimal_combiner_test(&bits, &config, &mut rng).expect("combiner failed");
-        assert!(result.accuracy >= 0.6, "accuracy too low: {}", result.accuracy);
+        assert!(
+            result.accuracy >= 0.6,
+            "accuracy too low: {}",
+            result.accuracy
+        );
     }
 
     #[test]

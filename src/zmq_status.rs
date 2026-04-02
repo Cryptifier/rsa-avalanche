@@ -162,7 +162,10 @@ pub fn router_endpoint(handle: &RouterHandle) -> &str {
 /// # Expected Output
 /// - Joins the router thread; no stdout/stderr output.
 pub fn join_router(handle: RouterHandle) -> Result<RouterStats, String> {
-    handle.join.join().map_err(|_| "router thread panicked".to_string())?
+    handle
+        .join
+        .join()
+        .map_err(|_| "router thread panicked".to_string())?
 }
 
 fn start_router<F>(expected_pings: usize, mut on_ping: F) -> Result<RouterHandle, String>

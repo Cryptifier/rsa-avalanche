@@ -13,7 +13,9 @@ impl std::fmt::Display for AvalancheError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             AvalancheError::EmptyCandidates => write!(f, "no avalanche candidates provided"),
-            AvalancheError::InconsistentBitWidth => write!(f, "avalanche bit widths are inconsistent"),
+            AvalancheError::InconsistentBitWidth => {
+                write!(f, "avalanche bit widths are inconsistent")
+            }
         }
     }
 }
@@ -318,7 +320,11 @@ fn combine_candidates(
         let and_bit = left.message_bits[idx] & right.message_bits[idx];
         let bias = if and_bit {
             let sum = left.biases[idx] + right.biases[idx];
-            if sum == 0.0 { 1.0 } else { sum }
+            if sum == 0.0 {
+                1.0
+            } else {
+                sum
+            }
         } else {
             (left.biases[idx] - right.biases[idx]).abs()
         };
@@ -326,7 +332,10 @@ fn combine_candidates(
         biases.push(bias);
     }
 
-    Ok(AvalancheNode { biases, message_bits })
+    Ok(AvalancheNode {
+        biases,
+        message_bits,
+    })
 }
 
 #[cfg(test)]

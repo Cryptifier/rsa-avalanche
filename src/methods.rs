@@ -1,7 +1,6 @@
 /// Eclipse Public License 2.0
 /// SPDX-License-Identifier: EPL-2.0
 /// Copyright (c) 2025 Nicholas LaRoche <nlaroche@cryptifier.dev>
-
 use std::{
     collections::HashSet,
     error::Error,
@@ -14,13 +13,13 @@ use std::{
     time::{Duration, Instant},
 };
 
-use rayon::prelude::*;
 #[cfg(feature = "plots")]
 use plotters::prelude::*;
-#[cfg(feature = "plots")]
-use std::sync::atomic::AtomicUsize;
+use rayon::prelude::*;
 #[cfg(feature = "plots")]
 use std::path::Path;
+#[cfg(feature = "plots")]
+use std::sync::atomic::AtomicUsize;
 
 #[cfg(not(feature = "plots"))]
 type RGBColor = (u8, u8, u8);
@@ -34,29 +33,29 @@ const BLUE: RGBColor = (30, 144, 255);
 #[cfg(not(feature = "plots"))]
 const BLACK: RGBColor = (0, 0, 0);
 
+use crate::analytics::{
+    generate_r_candidates_with_analytics, RCandidateAccuracyBatch, RCandidateAccuracyEntry,
+    RCandidateFactor, RCandidateTraceBatch, RCandidateTraceEntry, SessionAnalytics,
+};
+use crate::avalanche::{search_avalanche_tree, search_avalanche_tree_with_scores, AvalancheNode};
+use crate::combiner::majority_vote_with_distribution;
+use crate::config::{Config, EngineConfig};
+use crate::dsp::{find_ramp_signals_f64, ramp_signal_strength_f64};
+use crate::helpers::{format_beam_float, normalize_avalanche_biases};
+use crate::math::{
+    bit_length, choose_exponent, compute_totient, factor_composite_with_timeout,
+    is_probable_prime_big, mod_inverse, modular_sqrt, random_biguint_bits, random_prime_with_bits,
+    shannon_entropy_bit, to_hex,
+};
+use crate::r_candidates::RCandidateSettings;
+use crate::rng::{RngChoice, RngMode};
+use crate::search::{beam_search_top_k, viterbi_decode};
 use num_bigint::BigUint;
 use num_integer::Integer;
 use num_traits::{One, Zero};
 use rand::RngCore;
 use serde::Serialize;
 use serde_json::json;
-use crate::analytics::{
-    generate_r_candidates_with_analytics, RCandidateAccuracyBatch, RCandidateAccuracyEntry,
-    RCandidateFactor, RCandidateTraceBatch, RCandidateTraceEntry, SessionAnalytics,
-};
-use crate::avalanche::{search_avalanche_tree, search_avalanche_tree_with_scores, AvalancheNode};
-use crate::helpers::{format_beam_float, normalize_avalanche_biases};
-use crate::combiner::majority_vote_with_distribution;
-use crate::config::{Config, EngineConfig};
-use crate::dsp::{find_ramp_signals_f64, ramp_signal_strength_f64};
-use crate::math::{
-    bit_length, choose_exponent, compute_totient, factor_composite_with_timeout,
-    is_probable_prime_big, mod_inverse, modular_sqrt, random_biguint_bits,
-    random_prime_with_bits, shannon_entropy_bit, to_hex,
-};
-use crate::r_candidates::RCandidateSettings;
-use crate::rng::{RngChoice, RngMode};
-use crate::search::{beam_search_top_k, viterbi_decode};
 
 /// Input arguments for the RSA demo and analysis pipeline.
 pub struct DemoArgs {
@@ -135,7 +134,10 @@ pub fn run_demo(
         a.mark_feature("message_select", true);
         a.mark_feature("rsa_roundtrip", true);
         a.mark_feature("combiner", config.engine.combiner_enable);
-        a.mark_feature("test_iterations", config.engine.test_iterations > 0 && args.export);
+        a.mark_feature(
+            "test_iterations",
+            config.engine.test_iterations > 0 && args.export,
+        );
         a.mark_feature("information_sufficiency", args.tests);
         a.mark_feature("enciphered_export", config.engine.enciphered_export_enable);
         a.mark_feature("r_candidate_accuracy", config.engine.analysis_batch_enable);
@@ -157,7 +159,9 @@ pub fn run_demo(
         Some(seed) => RngChoice::from_seed(rng_mode, seed),
         None => RngChoice::from_entropy(rng_mode)?,
     };
-    with_analytics(analytics, |a| a.record_step("rng_init", rng_start.elapsed()));
+    with_analytics(analytics, |a| {
+        a.record_step("rng_init", rng_start.elapsed())
+    });
 
     let key_start = Instant::now();
     let (p, q): (BigUint, BigUint) = if config.rsa_keypair.generate {
@@ -198,7 +202,9 @@ pub fn run_demo(
     let e = choose_exponent(start_e, &phi);
     let d = mod_inverse(&e, &phi)
         .ok_or("public exponent is not invertible; try a different size or exponent")?;
-    with_analytics(analytics, |a| a.record_step("keypair_derive", exponent_start.elapsed()));
+    with_analytics(analytics, |a| {
+        a.record_step("keypair_derive", exponent_start.elapsed())
+    });
 
     let message_start = Instant::now();
     let message = select_message(args.message.clone(), &config.engine, &mut rng);
@@ -262,27 +268,33 @@ pub fn run_demo(
             analytics,
             args.shift,
         ) {
-            Ok(oracles) => match majority_vote_with_distribution(&oracles, config.engine.combiner_tie_breaker) {
-                Ok(distribution) => {
-                    let mut correct = 0usize;
-                    for (a, b) in distribution
-                        .majority_bits
-                        .iter()
-                        .zip(majority_bits.iter())
-                    {
-                        if a == b {
-                            correct += 1;
+            Ok(oracles) => {
+                match majority_vote_with_distribution(&oracles, config.engine.combiner_tie_breaker)
+                {
+                    Ok(distribution) => {
+                        let mut correct = 0usize;
+                        for (a, b) in distribution.majority_bits.iter().zip(majority_bits.iter()) {
+                            if a == b {
+                                correct += 1;
+                            }
                         }
-                    }
-                    let total = majority_bits.len();
-                    let accuracy = correct as f64 / total as f64;
-                    with_analytics(analytics, |a| {
-                        a.set_feature_stat("combiner", "requested_oracles", json!(requested_oracles));
-                        a.set_feature_stat("combiner", "used_oracles", json!(distribution.total_oracles));
-                        a.set_feature_stat("combiner", "bit_width", json!(total));
-                        a.set_feature_stat("combiner", "accuracy_pct", json!(accuracy * 100.0));
-                    });
-                    println!(
+                        let total = majority_bits.len();
+                        let accuracy = correct as f64 / total as f64;
+                        with_analytics(analytics, |a| {
+                            a.set_feature_stat(
+                                "combiner",
+                                "requested_oracles",
+                                json!(requested_oracles),
+                            );
+                            a.set_feature_stat(
+                                "combiner",
+                                "used_oracles",
+                                json!(distribution.total_oracles),
+                            );
+                            a.set_feature_stat("combiner", "bit_width", json!(total));
+                            a.set_feature_stat("combiner", "accuracy_pct", json!(accuracy * 100.0));
+                        });
+                        println!(
                         "Speculative combiner majority vote: accuracy {:.2}% ({} of {} bits) using {} oracles (requested {})",
                         accuracy * 100.0,
                         correct,
@@ -290,8 +302,8 @@ pub fn run_demo(
                         distribution.total_oracles,
                         requested_oracles
                     );
-                    if let Some(stats) = compute_stats(&distribution.probability_one) {
-                        println!(
+                        if let Some(stats) = compute_stats(&distribution.probability_one) {
+                            println!(
                             "Speculative combiner bit probability P(1) stats: mean {:.4}, std dev {:.4}, min {:.4}, max {:.4}, n {}",
                             stats.mean,
                             stats.stddev,
@@ -299,15 +311,19 @@ pub fn run_demo(
                             stats.max,
                             stats.count
                         );
+                        }
+                    }
+                    Err(err) => {
+                        println!("Speculative combiner majority vote failed: {}", err);
+                        with_analytics(analytics, |a| {
+                            a.add_feature_note(
+                                "combiner",
+                                &format!("majority vote failed: {}", err),
+                            );
+                        });
                     }
                 }
-                Err(err) => {
-                    println!("Speculative combiner majority vote failed: {}", err);
-                    with_analytics(analytics, |a| {
-                        a.add_feature_note("combiner", &format!("majority vote failed: {}", err));
-                    });
-                }
-            },
+            }
             Err(err) => {
                 println!("Speculative combiner setup failed: {}", err);
                 with_analytics(analytics, |a| {
@@ -315,7 +331,9 @@ pub fn run_demo(
                 });
             }
         }
-        with_analytics(analytics, |a| a.record_feature_duration("combiner", combiner_start.elapsed()));
+        with_analytics(analytics, |a| {
+            a.record_feature_duration("combiner", combiner_start.elapsed())
+        });
     }
 
     if config.engine.test_iterations > 0 && args.export {
@@ -351,7 +369,11 @@ pub fn run_demo(
             log_progress_every_ten_percent(i + 1, iterations, &mut next_pct, "Test iterations");
         }
         with_analytics(analytics, |a| {
-            a.record_step_summary("test_iterations_run_message_trial", iterations, iteration_total);
+            a.record_step_summary(
+                "test_iterations_run_message_trial",
+                iterations,
+                iteration_total,
+            );
         });
 
         let score = |r: &TestReport| (r.matching_total, r.matching_lsb);
@@ -433,8 +455,7 @@ pub fn run_demo(
             let over_threshold_count = overlaps_pct.iter().filter(|v| **v >= threshold).count();
             println!(
                 "Overlaps >= {:.2}%: count {}",
-                threshold,
-                over_threshold_count
+                threshold, over_threshold_count
             );
             if let Err(err) = plot_overlap_histogram(&overlaps_pct, "test_iterations") {
                 println!("Failed to write overlap histogram: {}", err);
@@ -446,11 +467,7 @@ pub fn run_demo(
         if iterations > 1 {
             println!(
                 "Max matching bits over all test cases: {}",
-                reports
-                    .iter()
-                    .map(|r| r.matching_lsb)
-                    .max()
-                    .unwrap_or(0)
+                reports.iter().map(|r| r.matching_lsb).max().unwrap_or(0)
             );
         }
 
@@ -465,7 +482,10 @@ pub fn run_demo(
                     &mut rng,
                     args.shift,
                 ) {
-                    println!("\nAlt iterations on best r ({} runs):", config.engine.alt_iterations);
+                    println!(
+                        "\nAlt iterations on best r ({} runs):",
+                        config.engine.alt_iterations
+                    );
                     println!("Average matching bits: {:.4}", avg_bits);
                     println!("Average matching overlap: {:.4}%", avg_overlap);
                     println!("Max matching bits: {}", max_bits);
@@ -482,7 +502,10 @@ pub fn run_demo(
                     &mut rng,
                     args.shift,
                 ) {
-                    println!("\nAlt iterations on worst r ({} runs):", config.engine.alt_iterations);
+                    println!(
+                        "\nAlt iterations on worst r ({} runs):",
+                        config.engine.alt_iterations
+                    );
                     println!("Average matching bits: {:.4}", avg_bits);
                     println!("Average matching overlap: {:.4}%", avg_overlap);
                     println!("Max matching bits: {}", max_bits);
@@ -518,7 +541,9 @@ pub fn run_demo(
         // r_stress range testing
         if config.engine.r_stress_test_enable {
             let stress_start = Instant::now();
-            if let (Some(start), Some(end)) = (&config.engine.r_stress_start, &config.engine.r_stress_end) {
+            if let (Some(start), Some(end)) =
+                (&config.engine.r_stress_start, &config.engine.r_stress_end)
+            {
                 println!("\nRunning r_stress range tests...");
                 let mut current = start.clone();
                 while &current <= end {
@@ -547,7 +572,11 @@ pub fn run_demo(
         with_analytics(analytics, |a| {
             a.record_feature_duration("test_iterations", test_iterations_start.elapsed());
             a.set_feature_stat("test_iterations", "iterations", json!(iterations));
-            a.set_feature_stat("test_iterations", "best_match_found", json!(best_match.is_some()));
+            a.set_feature_stat(
+                "test_iterations",
+                "best_match_found",
+                json!(best_match.is_some()),
+            );
         });
     }
 
@@ -629,7 +658,9 @@ pub fn run_demo(
 
     if config.engine.enciphered_export_enable {
         let export_start = Instant::now();
-        if let Err(err) = run_enciphered_export(&ctx, &config.engine, &mut rng, analytics, args.shift) {
+        if let Err(err) =
+            run_enciphered_export(&ctx, &config.engine, &mut rng, analytics, args.shift)
+        {
             println!("Enciphered export failed: {}", err);
             with_analytics(analytics, |a| {
                 a.add_feature_note("enciphered_export", &format!("failed: {}", err));
@@ -668,7 +699,11 @@ fn log_progress_every_ten_percent(done: u64, total: u64, next_pct: &mut u64, lab
 
     let pct = done.saturating_mul(100) / total;
     if pct >= *next_pct || done == total {
-        let display_pct = if done == total { 100 } else { ((pct / 10) * 10).min(100) };
+        let display_pct = if done == total {
+            100
+        } else {
+            ((pct / 10) * 10).min(100)
+        };
         println!("{label} progress: {}% ({}/{})", display_pct, done, total);
 
         while *next_pct <= pct && *next_pct < 100 {
@@ -698,10 +733,7 @@ fn odd_ciphertext_exponent(
     context: &str,
 ) -> Result<BigUint, Box<dyn Error>> {
     if e.is_even() {
-        return Err(format!(
-            "{context} requires an odd public exponent to keep e*x odd"
-        )
-        .into());
+        return Err(format!("{context} requires an odd public exponent to keep e*x odd").into());
     }
     let idx = u64::try_from(instance_idx)
         .map_err(|_| format!("{context} message index exceeds u64 range"))?;
@@ -789,14 +821,8 @@ fn compute_stats(values: &[f64]) -> Option<StatSummary> {
         .sum::<f64>()
         / count as f64;
     let stddev = variance.sqrt();
-    let min = values
-        .iter()
-        .cloned()
-        .fold(f64::INFINITY, f64::min);
-    let max = values
-        .iter()
-        .cloned()
-        .fold(f64::NEG_INFINITY, f64::max);
+    let min = values.iter().cloned().fold(f64::INFINITY, f64::min);
+    let max = values.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
 
     Some(StatSummary {
         mean,
@@ -947,7 +973,13 @@ fn plot_overlap_histogram(overlaps_pct: &[f64], label: &str) -> Result<(), Box<d
     let seq = HIST_SEQ.fetch_add(1, Ordering::Relaxed);
     let safe_label: String = label
         .chars()
-        .map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '_' })
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
         .collect();
     let file_name = format!("overlap_histogram_{}_{}.png", safe_label, seq);
     let path = images_dir.join(file_name);
@@ -2030,10 +2062,12 @@ fn run_bitwise_speculative_oracle_attempt(
             }
         }
     }
-    let single_selection = selected_candidate.map(|idx| vec![OracleBitSelection {
-        oracle_idx: idx,
-        invert: false,
-    }]);
+    let single_selection = selected_candidate.map(|idx| {
+        vec![OracleBitSelection {
+            oracle_idx: idx,
+            invert: false,
+        }]
+    });
 
     let mut oracle_index_list: Vec<usize> = unique_oracle_indices.iter().copied().collect();
     oracle_index_list.sort_unstable();
@@ -2083,7 +2117,11 @@ fn run_bitwise_speculative_oracle_attempt(
                         .get(selection.oracle_idx)
                         .and_then(|entry| entry.as_ref())
                     {
-                        let bit = if selection.invert { !bits[bit_idx] } else { bits[bit_idx] };
+                        let bit = if selection.invert {
+                            !bits[bit_idx]
+                        } else {
+                            bits[bit_idx]
+                        };
                         if bit {
                             ones += 1;
                         } else {
@@ -2104,19 +2142,23 @@ fn run_bitwise_speculative_oracle_attempt(
             let mut zeros = 0usize;
             for selection in selections {
                 for oracle_bits in &oracle_bits_by_instance {
-                if let Some(bits) = oracle_bits
-                    .get(selection.oracle_idx)
-                    .and_then(|entry| entry.as_ref())
-                {
-                    let bit = if selection.invert { !bits[bit_idx] } else { bits[bit_idx] };
-                    if bit {
-                        ones += 1;
-                    } else {
-                        zeros += 1;
+                    if let Some(bits) = oracle_bits
+                        .get(selection.oracle_idx)
+                        .and_then(|entry| entry.as_ref())
+                    {
+                        let bit = if selection.invert {
+                            !bits[bit_idx]
+                        } else {
+                            bits[bit_idx]
+                        };
+                        if bit {
+                            ones += 1;
+                        } else {
+                            zeros += 1;
+                        }
                     }
                 }
             }
-        }
             recovered_bits[bit_idx] = if ones == zeros {
                 engine.combiner_tie_breaker
             } else {
@@ -2280,7 +2322,11 @@ fn build_avalanche_nodes_unique_d(
                             .zip(target_bits.iter())
                             .filter(|(cand, target)| cand != target)
                             .count();
-                        nodes_with_distance.push((inverted_distance, inverted_value, inverted_node));
+                        nodes_with_distance.push((
+                            inverted_distance,
+                            inverted_value,
+                            inverted_node,
+                        ));
                     }
                     nodes_with_distance.push((distance, message_value, node));
                 } else {
@@ -2294,10 +2340,7 @@ fn build_avalanche_nodes_unique_d(
 
     if engine.use_hamming_distance {
         if !nodes_with_distance.is_empty() {
-            nodes_with_distance.sort_by(|a, b| {
-                a.0.cmp(&b.0)
-                    .then_with(|| a.1.cmp(&b.1))
-            });
+            nodes_with_distance.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
             nodes = nodes_with_distance
                 .into_iter()
                 .map(|(_, _, node)| node)
@@ -2305,10 +2348,7 @@ fn build_avalanche_nodes_unique_d(
         }
     } else if !nodes_with_value.is_empty() {
         nodes_with_value.sort_by(|a, b| a.0.cmp(&b.0));
-        nodes = nodes_with_value
-            .into_iter()
-            .map(|(_, node)| node)
-            .collect();
+        nodes = nodes_with_value.into_iter().map(|(_, node)| node).collect();
     }
 
     if !nodes.is_empty() {
@@ -2356,16 +2396,15 @@ fn run_avalanche_search(
     analytics: &Arc<Mutex<SessionAnalytics>>,
     bits_decrypt: Option<u32>,
 ) -> Result<(), Box<dyn Error>> {
-    let avalanche_nodes =
-        build_avalanche_nodes_unique_d(
-            ctx,
-            engine,
-            candidates,
-            message,
-            batch_size,
-            shift,
-            bits_decrypt,
-        )?;
+    let avalanche_nodes = build_avalanche_nodes_unique_d(
+        ctx,
+        engine,
+        candidates,
+        message,
+        batch_size,
+        shift,
+        bits_decrypt,
+    )?;
     if avalanche_nodes.is_empty() {
         with_analytics(analytics, |a| {
             a.add_feature_note(
@@ -2376,10 +2415,7 @@ fn run_avalanche_search(
         return Ok(());
     }
 
-    println!(
-        "Avalanche tree instances: {}",
-        avalanche_nodes.len()
-    );
+    println!("Avalanche tree instances: {}", avalanche_nodes.len());
     let msb_one_count = avalanche_nodes
         .iter()
         .filter(|node| node.message_bits.last().copied().unwrap_or(false))
@@ -2412,10 +2448,7 @@ fn run_avalanche_search(
         .map(|bias| format_beam_float(*bias, BEAM_SCORE_DECIMALS))
         .collect::<Vec<_>>()
         .join(" ");
-    println!(
-        "Avalanche beam raw biases (lsb0 order): {}",
-        raw_bias_line
-    );
+    println!("Avalanche beam raw biases (lsb0 order): {}", raw_bias_line);
     let normalized_biases = normalize_avalanche_biases(&avalanche_result.biases);
     let bias_line = normalized_biases
         .iter()
@@ -2430,11 +2463,7 @@ fn run_avalanche_search(
         "Avalanche beam bias diagnostics: raw_len {} bit_width {} raw_last {}",
         avalanche_result.biases.len(),
         bit_width,
-        avalanche_result
-            .biases
-            .last()
-            .copied()
-            .unwrap_or(0.0)
+        avalanche_result.biases.last().copied().unwrap_or(0.0)
     );
     println!(
         "Avalanche beam MSB count: ones {} zeros {}",
@@ -2447,10 +2476,7 @@ fn run_avalanche_search(
             .map(|pct| format_beam_float(*pct, BEAM_PCT_DECIMALS))
             .collect::<Vec<_>>()
             .join(" ");
-        println!(
-            "Avalanche similarity per level (%): {}",
-            similarity_line
-        );
+        println!("Avalanche similarity per level (%): {}", similarity_line);
     }
     let beam_result = beam_search_top_k(
         vec![Vec::new()],
@@ -2471,11 +2497,12 @@ fn run_avalanche_search(
                 .iter()
                 .enumerate()
                 .map(|(idx, bit)| {
-                    let bias = normalized_biases
-                        .get(idx)
-                        .copied()
-                        .unwrap_or(0.0);
-                    if *bit >= 0.5 { bias } else { 1.0 - bias }
+                    let bias = normalized_biases.get(idx).copied().unwrap_or(0.0);
+                    if *bit >= 0.5 {
+                        bias
+                    } else {
+                        1.0 - bias
+                    }
                 })
                 .sum()
         },
@@ -2574,10 +2601,7 @@ fn run_avalanche_search(
         viterbi_hex
     );
     let viterbi_msb = viterbi_bits.0.last().copied().unwrap_or(false);
-    println!(
-        "Avalanche viterbi MSB: {}",
-        if viterbi_msb { 1 } else { 0 }
-    );
+    println!("Avalanche viterbi MSB: {}", if viterbi_msb { 1 } else { 0 });
 
     Ok(())
 }
@@ -2655,7 +2679,11 @@ fn compute_per_bit_best_case_match(
                 .get(selection.oracle_idx)
                 .and_then(|entry| entry.as_ref())
             {
-                let bit = if selection.invert { !bits[bit_idx] } else { bits[bit_idx] };
+                let bit = if selection.invert {
+                    !bits[bit_idx]
+                } else {
+                    bits[bit_idx]
+                };
                 if bit == target {
                     matched = true;
                     selected_bit = bit;
@@ -2769,7 +2797,13 @@ fn colorize_hex_matches(value: &str, reference: &str) -> String {
 fn sanitize_label(label: &str) -> String {
     label
         .chars()
-        .map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '_' })
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
         .collect()
 }
 
@@ -2957,10 +2991,10 @@ fn run_information_sufficiency_tests(
             println!("Failed to write oracle accuracy timeline: {}", err);
         }
 
-        let oracle_entropy_stats = compute_stats(&oracle_series.entropy_mean)
-            .ok_or("no oracle entropy samples")?;
-        let oracle_accuracy_stats = compute_stats(&oracle_series.accuracy_pct)
-            .ok_or("no oracle accuracy samples")?;
+        let oracle_entropy_stats =
+            compute_stats(&oracle_series.entropy_mean).ok_or("no oracle entropy samples")?;
+        let oracle_accuracy_stats =
+            compute_stats(&oracle_series.accuracy_pct).ok_or("no oracle accuracy samples")?;
 
         println!(
             "Oracle entropy stats: mean {:.4}, std dev {:.4}, min {:.4}, max {:.4}, n {}",
@@ -3042,10 +3076,10 @@ fn run_information_sufficiency_tests(
         });
     }
 
-    let match_entropy_stats = compute_stats(&match_series.entropy_mean)
-        .ok_or("no match entropy samples")?;
-    let match_pct_stats = compute_stats(&match_series.match_pct_mean)
-        .ok_or("no match percentage samples")?;
+    let match_entropy_stats =
+        compute_stats(&match_series.entropy_mean).ok_or("no match entropy samples")?;
+    let match_pct_stats =
+        compute_stats(&match_series.match_pct_mean).ok_or("no match percentage samples")?;
 
     println!(
         "Match entropy stats: mean {:.4}, std dev {:.4}, min {:.4}, max {:.4}, n {}",
@@ -3212,7 +3246,7 @@ fn run_information_sufficiency_tests(
         analytics,
         bits_decrypt,
     )?;
-    
+
     println!(
         "Bitwise speculative oracle recovered (hex): {}",
         to_hex(&speculative_report.recovered)
@@ -3246,14 +3280,16 @@ fn run_information_sufficiency_tests(
     let match_entropy_ok = match_entropy_stats.mean <= entropy_threshold;
 
     //This mean is times 100.0.
-    let match_pct_ok = (match_pct_stats.mean >= match_threshold) || (match_pct_stats.mean <= (100.0 - match_threshold));
+    let match_pct_ok = (match_pct_stats.mean >= match_threshold)
+        || (match_pct_stats.mean <= (100.0 - match_threshold));
     //let match_pct_inverted = match_pct_stats.mean < 50.0;
 
     let oracle_accuracy_ok = oracle_accuracy_stats
         .as_ref()
         .map(|stats| stats.mean >= oracle_accuracy_threshold)
         .unwrap_or(true);
-    let speculative_match_ok = (speculative_report.match_pct >= match_threshold) || (speculative_report.match_pct <= (100.0 - match_threshold));
+    let speculative_match_ok = (speculative_report.match_pct >= match_threshold)
+        || (speculative_report.match_pct <= (100.0 - match_threshold));
 
     println!(
         "Sufficiency thresholds: entropy <= {:.4}, match % >= {:.2}, oracle accuracy % >= {:.2}",
@@ -3277,7 +3313,10 @@ fn run_information_sufficiency_tests(
         println!("Sufficiency verdict: PASS (enough signal for speculative oracle attempts)");
         Ok(())
     } else {
-        Err("analysis tests indicate insufficient information for speculative oracle attempts".into())
+        Err(
+            "analysis tests indicate insufficient information for speculative oracle attempts"
+                .into(),
+        )
     }
 }
 
@@ -3319,11 +3358,7 @@ fn run_enciphered_export(
         .as_ref()
         .map(|msg| msg.bits().max(1) as usize)
         .unwrap_or(0);
-    let bit_width = engine
-        .message
-        .bits
-        .max(1)
-        .max(fixed_message_bits as u32) as usize;
+    let bit_width = engine.message.bits.max(1).max(fixed_message_bits as u32) as usize;
 
     let y = engine.rabin_exponent as u32;
     let n_pow_y = ctx.n.pow(y);
@@ -3431,10 +3466,7 @@ fn run_enciphered_export(
         .ok_or("missing max ciphertext")?;
 
     let bins = bit_width.max(1);
-    let window_size = engine
-        .enciphered_export_window
-        .max(1)
-        .min(samples.len());
+    let window_size = engine.enciphered_export_window.max(1).min(samples.len());
     let stride = engine.enciphered_export_stride.max(1);
     let frame_count = if samples.len() <= window_size {
         1
@@ -3472,7 +3504,11 @@ fn run_enciphered_export(
             .truncate(true)
             .open(ramp_path)?;
         writeln!(file, "# enciphered_ramps_export")?;
-        writeln!(file, "# ramp_length={}", engine.enciphered_export_ramp_length)?;
+        writeln!(
+            file,
+            "# ramp_length={}",
+            engine.enciphered_export_ramp_length
+        )?;
         writeln!(
             file,
             "# ramp_step_pct={}",
@@ -3515,12 +3551,7 @@ fn run_enciphered_export(
                 let _ = writeln!(
                     match_rows,
                     "{},{},{},{},{},{:.8}",
-                    frame_idx,
-                    start,
-                    end,
-                    bin_idx,
-                    count,
-                    match_pct
+                    frame_idx, start, end, bin_idx, count, match_pct
                 );
             }
 
@@ -3553,12 +3584,7 @@ fn run_enciphered_export(
                         let _ = writeln!(
                             ramp_rows,
                             "{},{},{},{},{},{:.4}",
-                            frame_idx,
-                            tol,
-                            ramp_start,
-                            ramp_len,
-                            values_str,
-                            mean
+                            frame_idx, tol, ramp_start, ramp_len, values_str, mean
                         );
                     }
                 }
@@ -3586,12 +3612,14 @@ fn run_enciphered_export(
         csv.write_all(output.match_rows.as_bytes())?;
 
         for (idx, entry) in output.ramp_summary.iter().enumerate() {
-            summaries[idx].frames_with_ramp =
-                summaries[idx].frames_with_ramp.saturating_add(entry.frames_with_ramp);
+            summaries[idx].frames_with_ramp = summaries[idx]
+                .frames_with_ramp
+                .saturating_add(entry.frames_with_ramp);
             summaries[idx].total_ramps =
                 summaries[idx].total_ramps.saturating_add(entry.total_ramps);
-            summaries[idx].total_strength =
-                summaries[idx].total_strength.saturating_add(entry.total_strength);
+            summaries[idx].total_strength = summaries[idx]
+                .total_strength
+                .saturating_add(entry.total_strength);
         }
     }
 
@@ -3627,7 +3655,11 @@ fn run_enciphered_export(
 ///
 /// # Expected Output
 /// - Returns the selected message; no side effects.
-fn select_message(args_message: Option<String>, engine: &EngineConfig, rng: &mut RngChoice) -> BigUint {
+fn select_message(
+    args_message: Option<String>,
+    engine: &EngineConfig,
+    rng: &mut RngChoice,
+) -> BigUint {
     if let Some(explicit) = args_message {
         return BigUint::from_bytes_be(explicit.as_bytes());
     }
@@ -3857,7 +3889,13 @@ impl MatchHistogram {
         let seq = BIT_HIST_SEQ.fetch_add(1, Ordering::Relaxed);
         let safe_label: String = label
             .chars()
-            .map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '_' })
+            .map(|c| {
+                if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                    c
+                } else {
+                    '_'
+                }
+            })
             .collect();
         let file_name = format!("bit_match_frequency_{}_{}.png", safe_label, seq);
         let path = images_dir.join(file_name);
@@ -3896,10 +3934,7 @@ impl MatchHistogram {
             .draw()?;
 
         chart.draw_series(bars.iter().map(|(idx, pct)| {
-            Rectangle::new(
-                [(*idx, 0.0), (*idx + 1, *pct)],
-                BLUE.mix(0.7).filled(),
-            )
+            Rectangle::new([(*idx, 0.0), (*idx + 1, *pct)], BLUE.mix(0.7).filled())
         }))?;
 
         root.present()?;
@@ -4180,7 +4215,7 @@ fn run_fixed_r_trials(
         .into_par_iter()
         .map(|seed| {
             let mut local_rng = RngChoice::from_seed(rng.mode(), seed);
-            
+
             let msg = random_message_under_n(engine, &ctx.n, &mut local_rng);
             let ciphertext = msg.modpow(&ctx.e, &ctx.n);
             let dm = derive_candidate_message(
@@ -4211,7 +4246,12 @@ fn run_fixed_r_trials(
             let mut current_next = next_pct.load(Ordering::Relaxed);
             while pct >= current_next && current_next <= 100 {
                 let new_next = current_next.saturating_add(10);
-                match next_pct.compare_exchange(current_next, new_next, Ordering::Relaxed, Ordering::Relaxed) {
+                match next_pct.compare_exchange(
+                    current_next,
+                    new_next,
+                    Ordering::Relaxed,
+                    Ordering::Relaxed,
+                ) {
                     Ok(_) => {
                         let display_pct = current_next.min(100);
                         println!(
@@ -4252,7 +4292,10 @@ fn run_fixed_r_trials(
     });
 
     let threshold = engine.overlap_report_threshold;
-    let over_threshold_count = overlap_values_pct.iter().filter(|v| **v >= threshold).count();
+    let over_threshold_count = overlap_values_pct
+        .iter()
+        .filter(|v| **v >= threshold)
+        .count();
 
     println!(
         "Alt iterations stats: bits mean {:.4}, std dev {:.4}, min {:.4}, max {:.4}; overlap % mean {:.4}, std dev {:.4}, min {:.4}, max {:.4}; overlaps >= {:.2}% count {}; max bits {}",
@@ -4305,7 +4348,11 @@ fn run_r_stress_entry(
     let Some(factors) = factor_composite_with_timeout(r, rng, deadline) else {
         return;
     };
-    if factors.len() < 3 || factors.iter().any(|(p, _)| p < &BigUint::from(engine.process_min_factor)) {
+    if factors.len() < 3
+        || factors
+            .iter()
+            .any(|(p, _)| p < &BigUint::from(engine.process_min_factor))
+    {
         return;
     }
     let dummy_report = TestReport {
@@ -4380,7 +4427,13 @@ fn count_matching_bits(a: &BigUint, b: &BigUint) -> (usize, usize) {
 ///
 /// # Expected Output
 /// - Returns a computed `BigUint`; no side effects.
-fn get_larger_number(x: &BigUint, p: &BigUint, y: u32, apply_mod: bool, use_other_root: bool) -> BigUint {
+fn get_larger_number(
+    x: &BigUint,
+    p: &BigUint,
+    y: u32,
+    apply_mod: bool,
+    use_other_root: bool,
+) -> BigUint {
     let p_y = p.pow(y);
     let p_y_minus_one = p.pow(y.saturating_sub(1));
 
@@ -4388,7 +4441,11 @@ fn get_larger_number(x: &BigUint, p: &BigUint, y: u32, apply_mod: bool, use_othe
     let x2_mod_p_y = x.modpow(&BigUint::from(2u8), &p_y);
 
     let test_1 = modular_sqrt(&x2_mod_p, p);
-    let base_root = if use_other_root { (p - &test_1) % p } else { test_1 };
+    let base_root = if use_other_root {
+        (p - &test_1) % p
+    } else {
+        test_1
+    };
     let big_x = base_root.modpow(&p_y_minus_one, &p_y);
 
     let tmp_1 = (&p_y - &(BigUint::from(2u8) * &p_y_minus_one) + BigUint::one()) >> 1;
@@ -4530,7 +4587,11 @@ fn derive_candidate_message_from_result(
     let width = dm_raw.bits().max(1);
     let mask = (BigUint::one() << width) - BigUint::one();
     let inverted_dm = &mask ^ &dm_raw;
-    if engine.invert_bits { inverted_dm } else { dm_raw }
+    if engine.invert_bits {
+        inverted_dm
+    } else {
+        dm_raw
+    }
 }
 
 /// Applies the optional ciphertext shift by homomorphically multiplying by encrypted 2.
@@ -4764,23 +4825,19 @@ fn beam_max_candidate_from_avalanche(
     shift: bool,
     bits_decrypt: Option<u32>,
 ) -> Result<Option<BeamCandidateBits>, Box<dyn Error>> {
-    let avalanche_nodes =
-        build_avalanche_nodes_unique_d(
-            ctx,
-            engine,
-            candidates,
-            message,
-            batch_size,
-            shift,
-            bits_decrypt,
-        )?;
+    let avalanche_nodes = build_avalanche_nodes_unique_d(
+        ctx,
+        engine,
+        candidates,
+        message,
+        batch_size,
+        shift,
+        bits_decrypt,
+    )?;
     if avalanche_nodes.is_empty() {
         return Ok(None);
     }
-    println!(
-        "Avalanche tree instances: {}",
-        avalanche_nodes.len()
-    );
+    println!("Avalanche tree instances: {}", avalanche_nodes.len());
     let avalanche_result = search_avalanche_tree(avalanche_nodes)?;
     let bit_width = avalanche_result.message_bits.len().max(1);
     let normalized_biases = normalize_avalanche_biases(&avalanche_result.biases);
@@ -4803,11 +4860,12 @@ fn beam_max_candidate_from_avalanche(
                 .iter()
                 .enumerate()
                 .map(|(idx, bit)| {
-                    let bias = normalized_biases
-                        .get(idx)
-                        .copied()
-                        .unwrap_or(0.0);
-                    if *bit >= 0.5 { bias } else { 1.0 - bias }
+                    let bias = normalized_biases.get(idx).copied().unwrap_or(0.0);
+                    if *bit >= 0.5 {
+                        bias
+                    } else {
+                        1.0 - bias
+                    }
                 })
                 .sum()
         },
@@ -4967,9 +5025,9 @@ fn run_r_candidate_accuracy_batches(
                     let result_default = &tonelli_ciphertexts[idx];
                     let hbc_result = hbc(result_default, &candidate.r, &n_pow_y, engine);
                     let d_new = if engine.ciphertext_modify {
-                        let e_x = e_x_values
-                            .get(idx)
-                            .ok_or_else(|| "missing ciphertext exponent for message index".to_string())?;
+                        let e_x = e_x_values.get(idx).ok_or_else(|| {
+                            "missing ciphertext exponent for message index".to_string()
+                        })?;
                         mod_inverse(e_x, &candidate.phi_new)
                     } else {
                         Some(candidate.d_new.clone())
@@ -5045,10 +5103,8 @@ fn run_r_candidate_accuracy_batches(
             bits_decrypt,
         )? {
             let message_bits = biguint_to_bits_le(&message, candidate.bits.len());
-            let (_, matching_total) =
-                count_matching_bits_le(&candidate.bits, &message_bits);
-            let match_pct =
-                matching_total as f64 / candidate.bits.len().max(1) as f64 * 100.0;
+            let (_, matching_total) = count_matching_bits_le(&candidate.bits, &message_bits);
+            let match_pct = matching_total as f64 / candidate.bits.len().max(1) as f64 * 100.0;
             let candidate_ones = candidate.bits.iter().filter(|bit| **bit).count();
             let matched_ones = candidate
                 .bits
@@ -5086,10 +5142,8 @@ fn run_r_candidate_accuracy_batches(
                     let padding = "0".repeat(hex_len - hex.len());
                     hex = format!("{}{}", padding, hex);
                 }
-                let (_, matching_total) =
-                    count_matching_bits_le(&max.bits, &max.message_bits);
-                let match_pct =
-                    matching_total as f64 / max.bits.len().max(1) as f64 * 100.0;
+                let (_, matching_total) = count_matching_bits_le(&max.bits, &max.message_bits);
+                let match_pct = matching_total as f64 / max.bits.len().max(1) as f64 * 100.0;
                 let candidate_ones = max.bits.iter().filter(|bit| **bit).count();
                 let matched_ones = max
                     .bits
@@ -5118,15 +5172,9 @@ fn run_r_candidate_accuracy_batches(
                     max_value.bits()
                 );
                 let msb = max.bits.last().copied().unwrap_or(false);
-                println!(
-                    "Avalanche beam max MSB: {}",
-                    if msb { 1 } else { 0 }
-                );
+                println!("Avalanche beam max MSB: {}", if msb { 1 } else { 0 });
             } else {
-                println!(
-                    "Avalanche beam max after {} batches: N/A",
-                    batch_count
-                );
+                println!("Avalanche beam max after {} batches: N/A", batch_count);
             }
         }
 
@@ -5166,7 +5214,10 @@ fn run_r_candidate_accuracy_batches(
 ///
 /// # Expected Output
 /// - Returns `1` if `prime_factors` is empty; no side effects.
-fn construct_from_factors_close_to_target_n(target_n: &BigUint, prime_factors: &[BigUint]) -> BigUint {
+fn construct_from_factors_close_to_target_n(
+    target_n: &BigUint,
+    prime_factors: &[BigUint],
+) -> BigUint {
     if prime_factors.is_empty() {
         return BigUint::one();
     }
@@ -5207,7 +5258,7 @@ mod tests {
     use crate::r_candidates::RCandidateMode;
 
     #[test]
-    fn test_ramp_detect () {
+    fn test_ramp_detect() {
         let mut hist = MatchHistogram::new();
         let msg1 = BigUint::from(0b11110000u8);
         let msg2 = BigUint::from(0b11100000u8);
@@ -5301,14 +5352,7 @@ mod tests {
         let e = choose_exponent(3, &phi);
         let d = mod_inverse(&e, &phi).expect("missing inverse");
 
-        let ctx = RSAContext {
-            p,
-            q,
-            n,
-            phi,
-            e,
-            d,
-        };
+        let ctx = RSAContext { p, q, n, phi, e, d };
 
         let mut config = Config::default();
         config.engine.r_candidate_mode = RCandidateMode::SmallPrimes;

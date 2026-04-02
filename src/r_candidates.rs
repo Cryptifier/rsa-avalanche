@@ -169,7 +169,10 @@ pub fn generate_r_candidates_from_small_primes(
     settings: &RCandidateSettings,
     rng: &mut RngChoice,
 ) -> Vec<(BigUint, Vec<(BigUint, u64)>)> {
-    let count = settings.process_count.max(settings.process_min_count).max(1) as usize;
+    let count = settings
+        .process_count
+        .max(settings.process_min_count)
+        .max(1) as usize;
     let target_count = count.max(1);
     let target_bits = settings.target_bit_length;
     let min_small_factors = settings.small_prime_factors_per_candidate.max(1);
@@ -194,7 +197,8 @@ pub fn generate_r_candidates_from_small_primes(
                 if collected.len() >= target_count {
                     println!(
                         "Loaded {} r candidates from reuse file {}",
-                        collected.len(), reuse_path
+                        collected.len(),
+                        reuse_path
                     );
                     return collected.into_iter().take(target_count).collect();
                 }
@@ -203,7 +207,8 @@ pub fn generate_r_candidates_from_small_primes(
         if !collected.is_empty() {
             println!(
                 "Loaded {} r candidates from reuse file {}",
-                collected.len(), reuse_path
+                collected.len(),
+                reuse_path
             );
         }
     } else if settings.reuse_r_candidates_append_only {
@@ -234,10 +239,7 @@ pub fn generate_r_candidates_from_small_primes(
         return collected;
     }
 
-    let max_small_prime = primes
-        .last()
-        .cloned()
-        .unwrap_or_else(|| BigUint::from(2u8));
+    let max_small_prime = primes.last().cloned().unwrap_or_else(|| BigUint::from(2u8));
     let min_large_value = if max_small_prime >= min_factor {
         &max_small_prime + BigUint::one()
     } else {
@@ -377,8 +379,7 @@ fn build_small_primes_candidate(
         let bits_for_prime = if remaining_primes == 1 {
             bits_left
         } else {
-            let max_bits_for_prime =
-                bits_left - min_large_bits * (remaining_primes as u64 - 1);
+            let max_bits_for_prime = bits_left - min_large_bits * (remaining_primes as u64 - 1);
             let span = max_bits_for_prime.saturating_sub(min_large_bits);
             if span == 0 {
                 min_large_bits
@@ -489,7 +490,10 @@ pub fn generate_r_candidates_via_factoring(
 
     let min_factor = settings.process_min_factor.clone();
     let scale = BigUint::one() << settings.process_scale;
-    let count = settings.process_count.max(settings.process_min_count).max(1);
+    let count = settings
+        .process_count
+        .max(settings.process_min_count)
+        .max(1);
     let target_count = count as usize;
 
     let mut collected: Vec<(BigUint, Vec<(BigUint, u64)>)> = Vec::new();
@@ -509,7 +513,8 @@ pub fn generate_r_candidates_via_factoring(
                 if collected.len() >= target_count {
                     println!(
                         "Loaded {} r candidates from reuse file {}",
-                        collected.len(), reuse_path
+                        collected.len(),
+                        reuse_path
                     );
                     return collected.into_iter().take(target_count).collect();
                 }
@@ -518,7 +523,8 @@ pub fn generate_r_candidates_via_factoring(
         if !collected.is_empty() {
             println!(
                 "Loaded {} r candidates from reuse file {}",
-                collected.len(), reuse_path
+                collected.len(),
+                reuse_path
             );
         }
     } else if settings.reuse_r_candidates_append_only {
@@ -554,7 +560,8 @@ pub fn generate_r_candidates_via_factoring(
                 return None;
             }
             let deadline = Instant::now() + Duration::from_millis(5000);
-            let Some(factors) = factor_composite_with_timeout(&candidate, &mut local_rng, deadline) else {
+            let Some(factors) = factor_composite_with_timeout(&candidate, &mut local_rng, deadline)
+            else {
                 return None;
             };
             if factors.len() < 3 {
@@ -569,7 +576,10 @@ pub fn generate_r_candidates_via_factoring(
                 return None;
             }
 
-            println!("Generated r candidate: {}, factors {:?}", candidate, factors);
+            println!(
+                "Generated r candidate: {}, factors {:?}",
+                candidate, factors
+            );
             Some((candidate, factors))
         })
         .collect::<Vec<_>>();
@@ -619,7 +629,11 @@ fn load_reuse_candidates(path: &str) -> Vec<(BigUint, Vec<(BigUint, u64)>)> {
         let line = match line {
             Ok(l) => l,
             Err(err) => {
-                println!("Skipping line {} in reuse file due to read error: {}", idx + 1, err);
+                println!(
+                    "Skipping line {} in reuse file due to read error: {}",
+                    idx + 1,
+                    err
+                );
                 continue;
             }
         };
@@ -644,7 +658,12 @@ fn load_reuse_candidates(path: &str) -> Vec<(BigUint, Vec<(BigUint, u64)>)> {
         let r = match r_str.parse::<BigUint>() {
             Ok(val) => val,
             Err(err) => {
-                println!("Skipping line {} in reuse file: invalid r '{}': {}", idx + 1, r_str, err);
+                println!(
+                    "Skipping line {} in reuse file: invalid r '{}': {}",
+                    idx + 1,
+                    r_str,
+                    err
+                );
                 continue;
             }
         };
@@ -748,8 +767,8 @@ fn format_factors_csv(factors: &[(BigUint, u64)]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rand::RngCore;
     use crate::rng::{RngChoice, RngMode};
+    use rand::RngCore;
     use std::path::PathBuf;
 
     fn temp_path(name: &str) -> PathBuf {
@@ -849,7 +868,10 @@ mod tests {
             reuse_r_candidates_path: "".to_string(),
             reuse_r_candidates: false,
             reuse_r_candidates_append_only: false,
-            small_primes: vec![3u8, 5u8, 7u8, 11u8].into_iter().map(BigUint::from).collect(),
+            small_primes: vec![3u8, 5u8, 7u8, 11u8]
+                .into_iter()
+                .map(BigUint::from)
+                .collect(),
             small_prime_factors_per_candidate: 3,
             max_factors_per_candidate: 5,
             target_bit_length: Some(16),
@@ -957,7 +979,8 @@ mod tests {
             target_bit_length: None,
         };
         let mut rng = RngChoice::from_seed(RngMode::Standard, 45);
-        let candidates = generate_r_candidates_via_factoring(&BigUint::from(100u8), &settings, &mut rng);
+        let candidates =
+            generate_r_candidates_via_factoring(&BigUint::from(100u8), &settings, &mut rng);
         assert_eq!(candidates.len(), 1);
         assert_eq!(candidates[0].0, BigUint::from(105u8));
         assert!(candidates[0].1.len() >= 3);
@@ -981,7 +1004,8 @@ mod tests {
             target_bit_length: None,
         };
         let mut rng = RngChoice::from_seed(RngMode::Standard, 47);
-        let candidates = generate_r_candidates_via_factoring(&BigUint::from(100u8), &settings, &mut rng);
+        let candidates =
+            generate_r_candidates_via_factoring(&BigUint::from(100u8), &settings, &mut rng);
         assert!(candidates.is_empty());
     }
 

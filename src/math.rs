@@ -162,7 +162,11 @@ pub fn random_biguint_bits(bits: u32, rng: &mut RngChoice) -> BigUint {
         bytes[0] &= mask;
     }
     // Ensure the top bit is set so the value uses the requested width when possible.
-    let top_bit = if leading_bits == 0 { 0x80 } else { 1u8 << (leading_bits - 1) };
+    let top_bit = if leading_bits == 0 {
+        0x80
+    } else {
+        1u8 << (leading_bits - 1)
+    };
     bytes[0] |= top_bit;
     BigUint::from_bytes_be(&bytes)
 }
@@ -347,7 +351,12 @@ pub fn factor_composite_with_timeout(
 ///
 /// # Expected Output
 /// - On success, `out` is extended with factors; no stdout/stderr output.
-pub fn factor_recursive(n: BigUint, out: &mut Vec<(BigUint, u64)>, rng: &mut RngChoice, deadline: Instant) -> bool {
+pub fn factor_recursive(
+    n: BigUint,
+    out: &mut Vec<(BigUint, u64)>,
+    rng: &mut RngChoice,
+    deadline: Instant,
+) -> bool {
     if Instant::now() >= deadline {
         return false;
     }
@@ -712,7 +721,12 @@ mod tests {
         let mut rng = RngChoice::from_seed(RngMode::Standard, 13);
         let mut factors = Vec::new();
         let deadline = Instant::now() + Duration::from_secs(1);
-        assert!(factor_recursive(BigUint::from(12u8), &mut factors, &mut rng, deadline));
+        assert!(factor_recursive(
+            BigUint::from(12u8),
+            &mut factors,
+            &mut rng,
+            deadline
+        ));
         let mut values: Vec<BigUint> = factors.into_iter().map(|(p, _)| p).collect();
         values.sort();
         assert!(values.contains(&BigUint::from(2u8)));
@@ -724,7 +738,12 @@ mod tests {
         let mut rng = RngChoice::from_seed(RngMode::Standard, 14);
         let mut factors = Vec::new();
         let deadline = Instant::now() + Duration::from_secs(1);
-        assert!(factor_recursive(BigUint::one(), &mut factors, &mut rng, deadline));
+        assert!(factor_recursive(
+            BigUint::one(),
+            &mut factors,
+            &mut rng,
+            deadline
+        ));
         assert!(factors.is_empty());
     }
 
@@ -733,7 +752,8 @@ mod tests {
         let mut rng = RngChoice::from_seed(RngMode::Standard, 15);
         let n = BigUint::from(84u8);
         let deadline = Instant::now() + Duration::from_secs(1);
-        let factors = factor_composite_with_timeout(&n, &mut rng, deadline).expect("missing factors");
+        let factors =
+            factor_composite_with_timeout(&n, &mut rng, deadline).expect("missing factors");
         let product = factors
             .iter()
             .fold(BigUint::one(), |acc, (p, e)| acc * p.pow(*e as u32));
@@ -745,7 +765,8 @@ mod tests {
         let mut rng = RngChoice::from_seed(RngMode::Standard, 16);
         let n = BigUint::from(13u8);
         let deadline = Instant::now() + Duration::from_secs(1);
-        let factors = factor_composite_with_timeout(&n, &mut rng, deadline).expect("missing factors");
+        let factors =
+            factor_composite_with_timeout(&n, &mut rng, deadline).expect("missing factors");
         assert_eq!(factors.len(), 1);
         assert_eq!(factors[0].0, n);
         assert_eq!(factors[0].1, 1);
