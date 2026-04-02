@@ -1,5 +1,0 @@
-enciphered_bins-2.mp4 filter=lfs diff=lfs merge=lfs -text
-enciphered_bins2.mp4 filter=lfs diff=lfs merge=lfs -text
-enciphered_bins-3.mp4 filter=lfs diff=lfs merge=lfs -text
-enciphered_bins3.mp4 filter=lfs diff=lfs merge=lfs -text
-enciphered_bins.mp4 filter=lfs diff=lfs merge=lfs -text

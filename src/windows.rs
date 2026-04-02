@@ -14,6 +14,13 @@ pub enum WindowOverlapPolicy {
     DisallowOverlap,
 }
 
+/// Indicates how a partition series should be laid out across the bit domain.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum WindowGenerationMode {
+    Randomized,
+    Contiguous,
+}
+
 /// Indicates whether a partition came from the requested random set or from gap filling.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum WindowPartitionKind {
@@ -108,6 +115,7 @@ impl WindowPartition {
 pub struct WindowPartitionSet {
     total_bits: usize,
     requested_count: usize,
+    min_width: usize,
     max_width: usize,
     seed: u64,
     overlap_policy: WindowOverlapPolicy,
@@ -155,6 +163,20 @@ impl WindowPartitionSet {
     /// - Returns the stored count; no side effects.
     pub fn requested_count(&self) -> usize {
         self.requested_count
+    }
+
+    /// Returns the configured minimum partition width.
+    ///
+    /// # Parameters
+    /// - None.
+    ///
+    /// # Returns
+    /// - `usize`: Minimum width in bits.
+    ///
+    /// # Expected Output
+    /// - Returns the stored minimum width; no side effects.
+    pub fn min_width(&self) -> usize {
+        self.min_width
     }
 
     /// Returns the configured maximum partition width.
@@ -752,9 +774,11 @@ impl<'a> WindowPartitionQueryBuilder<'a> {
 pub struct WindowPartitionSetBuilder {
     total_bits: usize,
     requested_count: usize,
+    min_width: Option<usize>,
     max_width: Option<usize>,
     seed: u64,
     overlap_policy: WindowOverlapPolicy,
+    generation_mode: WindowGenerationMode,
 }
 
 impl WindowPartitionSetBuilder {
@@ -772,9 +796,11 @@ impl WindowPartitionSetBuilder {
         Self {
             total_bits,
             requested_count: 0,
+            min_width: None,
             max_width: None,
             seed: DEFAULT_WINDOW_SEED,
             overlap_policy: WindowOverlapPolicy::AllowOverlap,
+            generation_mode: WindowGenerationMode::Randomized,
         }
     }
 
@@ -805,6 +831,21 @@ impl WindowPartitionSetBuilder {
     /// - Returns an updated builder; no side effects.
     pub fn count(mut self, requested_count: usize) -> Self {
         self.requested_count = requested_count;
+        self
+    }
+
+    /// Sets the minimum width for generated partitions.
+    ///
+    /// # Parameters
+    /// - `min_width`: Lower bound for partition width in bits.
+    ///
+    /// # Returns
+    /// - `WindowPartitionSetBuilder`: Updated builder.
+    ///
+    /// # Expected Output
+    /// - Returns an updated builder; no side effects.
+    pub fn min_width(mut self, min_width: usize) -> Self {
+        self.min_width = Some(min_width);
         self
     }
 
@@ -866,6 +907,36 @@ impl WindowPartitionSetBuilder {
         self.overlap_policy(WindowOverlapPolicy::DisallowOverlap)
     }
 
+    /// Configures the builder to generate deterministic contiguous coverage windows.
+    ///
+    /// # Parameters
+    /// - None.
+    ///
+    /// # Returns
+    /// - `WindowPartitionSetBuilder`: Updated builder.
+    ///
+    /// # Expected Output
+    /// - Returns an updated builder; no side effects.
+    pub fn contiguous(mut self) -> Self {
+        self.generation_mode = WindowGenerationMode::Contiguous;
+        self
+    }
+
+    /// Configures the builder to generate randomized windows.
+    ///
+    /// # Parameters
+    /// - None.
+    ///
+    /// # Returns
+    /// - `WindowPartitionSetBuilder`: Updated builder.
+    ///
+    /// # Expected Output
+    /// - Returns an updated builder; no side effects.
+    pub fn randomized(mut self) -> Self {
+        self.generation_mode = WindowGenerationMode::Randomized;
+        self
+    }
+
     /// Generates a fully covered partition set using the configured options.
     ///
     /// # Parameters
@@ -883,37 +954,58 @@ impl WindowPartitionSetBuilder {
             .max_width
             .expect("validated builder must contain max_width")
             .min(self.total_bits);
-        let mut rng = ChaCha20Rng::seed_from_u64(self.seed);
-        let mut partitions = match self.overlap_policy {
-            WindowOverlapPolicy::AllowOverlap => build_requested_partitions_with_overlap(
-                self.total_bits,
-                self.requested_count,
-                effective_max_width,
-                &mut rng,
-            ),
-            WindowOverlapPolicy::DisallowOverlap => build_requested_partitions_without_overlap(
-                self.total_bits,
-                self.requested_count,
-                effective_max_width,
-                &mut rng,
-            ),
-        };
+        let effective_min_width = self.min_width.unwrap_or(1).min(effective_max_width);
+        let (requested_count, mut partitions) = match self.generation_mode {
+            WindowGenerationMode::Randomized => {
+                let mut rng = ChaCha20Rng::seed_from_u64(self.seed);
+                let mut partitions = match self.overlap_policy {
+                    WindowOverlapPolicy::AllowOverlap => build_requested_partitions_with_overlap(
+                        self.total_bits,
+                        self.requested_count,
+                        effective_min_width,
+                        effective_max_width,
+                        &mut rng,
+                    ),
+                    WindowOverlapPolicy::DisallowOverlap => {
+                        build_requested_partitions_without_overlap(
+                            self.total_bits,
+                            self.requested_count,
+                            effective_min_width,
+                            effective_max_width,
+                            &mut rng,
+                        )
+                    }
+                };
 
-        let gaps = uncovered_ranges(self.total_bits, &partitions);
-        for gap in gaps {
-            partitions.extend(split_gap_into_partitions(
-                gap.index,
-                gap.width,
-                effective_max_width,
-                &mut rng,
-            ));
-        }
+                let gaps = uncovered_ranges(self.total_bits, &partitions);
+                for gap in gaps {
+                    partitions.extend(split_gap_into_partitions(
+                        gap.index,
+                        gap.width,
+                        effective_min_width,
+                        effective_max_width,
+                        &mut rng,
+                    ));
+                }
+
+                (self.requested_count, partitions)
+            }
+            WindowGenerationMode::Contiguous => {
+                let partitions = build_contiguous_partitions(
+                    self.total_bits,
+                    effective_min_width,
+                    effective_max_width,
+                );
+                (partitions.len(), partitions)
+            }
+        };
 
         partitions.sort_by_key(|partition| (partition.index, partition.kind, partition.width));
 
         Ok(WindowPartitionSet {
             total_bits: self.total_bits,
-            requested_count: self.requested_count,
+            requested_count,
+            min_width: effective_min_width,
             max_width: effective_max_width,
             seed: self.seed,
             overlap_policy: self.overlap_policy,
@@ -926,8 +1018,15 @@ impl WindowPartitionSetBuilder {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum WindowBuildError {
     TotalBitsMustBePositive,
+    MinWidthMustBePositive,
     MaxWidthMustBeSpecified,
     MaxWidthMustBePositive,
+    MinWidthExceedsMaxWidth,
+    RequestedMinWidthExceedsTotalBits {
+        requested_count: usize,
+        min_width: usize,
+        total_bits: usize,
+    },
     RequestedCountExceedsTotalBits {
         requested_count: usize,
         total_bits: usize,
@@ -940,12 +1039,26 @@ impl fmt::Display for WindowBuildError {
             Self::TotalBitsMustBePositive => {
                 write!(f, "total_bits must be positive")
             }
+            Self::MinWidthMustBePositive => {
+                write!(f, "min_width must be positive")
+            }
             Self::MaxWidthMustBeSpecified => {
                 write!(f, "max_width must be specified by the builder")
             }
             Self::MaxWidthMustBePositive => {
                 write!(f, "max_width must be positive")
             }
+            Self::MinWidthExceedsMaxWidth => {
+                write!(f, "min_width must be less than or equal to max_width")
+            }
+            Self::RequestedMinWidthExceedsTotalBits {
+                requested_count,
+                min_width,
+                total_bits,
+            } => write!(
+                f,
+                "requested_count ({requested_count}) with min_width ({min_width}) exceeds total_bits ({total_bits}) for non-overlapping partitions"
+            ),
             Self::RequestedCountExceedsTotalBits {
                 requested_count,
                 total_bits,
@@ -1182,12 +1295,22 @@ fn validate_builder(builder: &WindowPartitionSetBuilder) -> Result<(), WindowBui
     let max_width = builder
         .max_width
         .ok_or(WindowBuildError::MaxWidthMustBeSpecified)?;
+    let min_width = builder.min_width.unwrap_or(1);
+
+    if min_width == 0 {
+        return Err(WindowBuildError::MinWidthMustBePositive);
+    }
 
     if max_width == 0 {
         return Err(WindowBuildError::MaxWidthMustBePositive);
     }
 
-    if builder.overlap_policy == WindowOverlapPolicy::DisallowOverlap
+    if min_width > max_width {
+        return Err(WindowBuildError::MinWidthExceedsMaxWidth);
+    }
+
+    if builder.generation_mode == WindowGenerationMode::Randomized
+        && builder.overlap_policy == WindowOverlapPolicy::DisallowOverlap
         && builder.requested_count > builder.total_bits
     {
         return Err(WindowBuildError::RequestedCountExceedsTotalBits {
@@ -1196,7 +1319,49 @@ fn validate_builder(builder: &WindowPartitionSetBuilder) -> Result<(), WindowBui
         });
     }
 
+    if builder.generation_mode == WindowGenerationMode::Randomized
+        && builder.overlap_policy == WindowOverlapPolicy::DisallowOverlap
+        && builder.requested_count.saturating_mul(min_width) > builder.total_bits
+    {
+        return Err(WindowBuildError::RequestedMinWidthExceedsTotalBits {
+            requested_count: builder.requested_count,
+            min_width,
+            total_bits: builder.total_bits,
+        });
+    }
+
     Ok(())
+}
+
+/// Builds a deterministic contiguous partition layout that fully covers the bit domain.
+///
+/// # Parameters
+/// - `total_bits`: Total number of bits in the target domain.
+/// - `max_width`: Maximum partition width in bits.
+///
+/// # Returns
+/// - `Vec<WindowPartition>`: Contiguous partitions covering the domain.
+///
+/// # Expected Output
+/// - Returns the generated partitions; no side effects.
+fn build_contiguous_partitions(
+    total_bits: usize,
+    min_width: usize,
+    max_width: usize,
+) -> Vec<WindowPartition> {
+    let mut partitions = Vec::new();
+    let mut index = 0usize;
+
+    for width in choose_covering_widths(total_bits, min_width, max_width, None) {
+        partitions.push(WindowPartition::new(
+            index,
+            width,
+            WindowPartitionKind::Requested,
+        ));
+        index += width;
+    }
+
+    partitions
 }
 
 /// Validates query builder configuration before random query generation.
@@ -1251,14 +1416,20 @@ fn validate_query_builder(
 fn build_requested_partitions_with_overlap(
     total_bits: usize,
     requested_count: usize,
+    min_width: usize,
     max_width: usize,
     rng: &mut ChaCha20Rng,
 ) -> Vec<WindowPartition> {
     let mut partitions = Vec::with_capacity(requested_count);
+    let max_start = total_bits.saturating_sub(min_width);
 
     for _ in 0..requested_count {
-        let index = rng.gen_range(0..total_bits);
-        let width = rng.gen_range(1..=max_width.min(total_bits - index));
+        let index = if total_bits == min_width {
+            0
+        } else {
+            rng.gen_range(0..=max_start)
+        };
+        let width = rng.gen_range(min_width..=max_width.min(total_bits - index));
         partitions.push(WindowPartition::new(
             index,
             width,
@@ -1321,6 +1492,7 @@ fn validate_query_partition(
 fn build_requested_partitions_without_overlap(
     total_bits: usize,
     requested_count: usize,
+    min_width: usize,
     max_width: usize,
     rng: &mut ChaCha20Rng,
 ) -> Vec<WindowPartition> {
@@ -1328,7 +1500,8 @@ fn build_requested_partitions_without_overlap(
         return Vec::new();
     }
 
-    let widths = choose_non_overlapping_widths(total_bits, requested_count, max_width, rng);
+    let widths =
+        choose_non_overlapping_widths(total_bits, requested_count, min_width, max_width, rng);
     let occupied_bits = widths.iter().sum::<usize>();
     let gaps = distribute_gap_bits(total_bits - occupied_bits, requested_count + 1, rng);
 
@@ -1363,6 +1536,7 @@ fn build_requested_partitions_without_overlap(
 fn choose_non_overlapping_widths(
     total_bits: usize,
     requested_count: usize,
+    min_width: usize,
     max_width: usize,
     rng: &mut ChaCha20Rng,
 ) -> Vec<usize> {
@@ -1372,8 +1546,9 @@ fn choose_non_overlapping_widths(
     for offset in 0..requested_count {
         let remaining_partitions = requested_count - offset - 1;
         let remaining_capacity = total_bits - used_bits;
-        let max_width_for_current = max_width.min(remaining_capacity - remaining_partitions);
-        let width = rng.gen_range(1..=max_width_for_current);
+        let reserved_minimum = remaining_partitions.saturating_mul(min_width);
+        let max_width_for_current = max_width.min(remaining_capacity - reserved_minimum);
+        let width = rng.gen_range(min_width..=max_width_for_current);
         widths.push(width);
         used_bits += width;
     }
@@ -1400,6 +1575,80 @@ fn target_query_bits(total_bits: usize, percentage: f64, max_query_bits: usize) 
 
     let percentage_bits = ((total_bits as f64) * percentage).ceil() as usize;
     percentage_bits.min(max_query_bits).min(total_bits)
+}
+
+/// Chooses widths that cover an exact span while respecting a minimum width when feasible.
+///
+/// # Parameters
+/// - `total_bits`: Total number of bits that must be covered.
+/// - `min_width`: Minimum desired partition width in bits.
+/// - `max_width`: Maximum partition width in bits.
+/// - `rng`: Optional seeded ChaCha20 RNG used for randomized width choice.
+///
+/// # Returns
+/// - `Vec<usize>`: Widths whose sum equals `total_bits`.
+///
+/// # Expected Output
+/// - Returns generated widths; no side effects.
+fn choose_covering_widths(
+    total_bits: usize,
+    min_width: usize,
+    max_width: usize,
+    mut rng: Option<&mut ChaCha20Rng>,
+) -> Vec<usize> {
+    let mut widths = Vec::new();
+    let mut remaining = total_bits;
+
+    while remaining > 0 {
+        let max_candidate = max_width.min(remaining);
+        let candidates = (min_width..=max_candidate)
+            .filter(|width| {
+                let tail = remaining - width;
+                tail == 0 || has_exact_width_partition(tail, min_width, max_width)
+            })
+            .collect::<Vec<_>>();
+
+        let width = if let Some(local_rng) = rng.as_deref_mut() {
+            if candidates.is_empty() {
+                max_candidate
+            } else {
+                candidates[local_rng.gen_range(0..candidates.len())]
+            }
+        } else if candidates.is_empty() {
+            max_candidate
+        } else {
+            *candidates
+                .iter()
+                .max()
+                .expect("candidates is known to be non-empty")
+        };
+
+        widths.push(width);
+        remaining -= width;
+    }
+
+    widths
+}
+
+/// Reports whether an exact-width partitioning exists for the provided span.
+///
+/// # Parameters
+/// - `total_bits`: Total number of bits to cover.
+/// - `min_width`: Minimum partition width in bits.
+/// - `max_width`: Maximum partition width in bits.
+///
+/// # Returns
+/// - `bool`: `true` when an exact partitioning exists with widths in `min_width..=max_width`.
+///
+/// # Expected Output
+/// - Returns a derived flag; no side effects.
+fn has_exact_width_partition(total_bits: usize, min_width: usize, max_width: usize) -> bool {
+    if total_bits == 0 {
+        return true;
+    }
+
+    let minimum_partition_count = total_bits.div_ceil(max_width);
+    minimum_partition_count.saturating_mul(min_width) <= total_bits
 }
 
 /// Distributes uncovered capacity into random gap sizes around requested partitions.
@@ -1442,22 +1691,20 @@ fn distribute_gap_bits(gap_bits: usize, slot_count: usize, rng: &mut ChaCha20Rng
 fn split_gap_into_partitions(
     index: usize,
     width: usize,
+    min_width: usize,
     max_width: usize,
     rng: &mut ChaCha20Rng,
 ) -> Vec<WindowPartition> {
     let mut partitions = Vec::new();
     let mut cursor = index;
-    let mut remaining = width;
 
-    while remaining > 0 {
-        let chunk_width = rng.gen_range(1..=max_width.min(remaining));
+    for chunk_width in choose_covering_widths(width, min_width, max_width, Some(rng)) {
         partitions.push(WindowPartition::new(
             cursor,
             chunk_width,
             WindowPartitionKind::GapFill,
         ));
         cursor += chunk_width;
-        remaining -= chunk_width;
     }
 
     partitions
@@ -1670,6 +1917,7 @@ mod tests {
         let windows = WindowPartitionSet::build(64)
             .seed(7)
             .count(9)
+            .min_width(2)
             .max_width(8)
             .disallow_overlap()
             .generate()
@@ -1678,9 +1926,14 @@ mod tests {
         assert_eq!(windows.total_bits(), 64);
         assert_eq!(windows.seed(), 7);
         assert_eq!(windows.requested_count(), 9);
+        assert_eq!(windows.min_width(), 2);
         assert!(windows.covers_all_bits());
         assert!(!windows.has_overlaps());
         assert!(uncovered_ranges(windows.total_bits(), windows.partitions()).is_empty());
+        assert!(windows
+            .partitions()
+            .iter()
+            .all(|partition| partition.width() >= 1));
     }
 
     #[test]
@@ -1714,6 +1967,7 @@ mod tests {
         let left = WindowPartitionSet::build(96)
             .seed(41)
             .count(12)
+            .min_width(3)
             .max_width(10)
             .disallow_overlap()
             .generate()
@@ -1721,6 +1975,7 @@ mod tests {
         let right = WindowPartitionSet::build(96)
             .seed(41)
             .count(12)
+            .min_width(3)
             .max_width(10)
             .disallow_overlap()
             .generate()
@@ -1760,6 +2015,60 @@ mod tests {
     }
 
     #[test]
+    fn contiguous_builder_generates_expected_full_coverage_layout() {
+        let windows = WindowPartitionSet::build(10)
+            .min_width(3)
+            .max_width(4)
+            .disallow_overlap()
+            .contiguous()
+            .generate()
+            .expect("windows should build");
+
+        let layout: Vec<(usize, usize)> = windows
+            .partitions()
+            .iter()
+            .map(|partition| (partition.index(), partition.end_exclusive()))
+            .collect();
+
+        assert_eq!(layout, vec![(0, 4), (4, 7), (7, 10)]);
+        assert_eq!(windows.requested_count(), 3);
+        assert_eq!(windows.min_width(), 3);
+        assert!(windows.covers_all_bits());
+        assert!(!windows.has_overlaps());
+    }
+
+    #[test]
+    fn randomized_builder_respects_explicit_min_width_when_feasible() {
+        let windows = WindowPartitionSet::build(48)
+            .seed(17)
+            .count(6)
+            .min_width(3)
+            .max_width(7)
+            .disallow_overlap()
+            .generate()
+            .expect("windows should build");
+
+        assert!(windows
+            .requested_partitions()
+            .all(|partition| partition.width() >= 3));
+        assert!(windows
+            .partitions()
+            .iter()
+            .all(|partition| partition.width() <= 7));
+    }
+
+    #[test]
+    fn builder_rejects_min_width_above_max_width() {
+        let error = WindowPartitionSet::build(16)
+            .min_width(5)
+            .max_width(4)
+            .generate()
+            .expect_err("configuration should be rejected");
+
+        assert_eq!(error, WindowBuildError::MinWidthExceedsMaxWidth);
+    }
+
+    #[test]
     fn query_builder_respects_bit_budget_and_non_overlap_policy() {
         let windows = generate_windows_with_seed(128, 24, 12, 73).expect("windows should build");
         let query = windows
@@ -1786,6 +2095,7 @@ mod tests {
         let source = WindowPartitionSet {
             total_bits: 32,
             requested_count: 3,
+            min_width: 4,
             max_width: 4,
             seed: 17,
             overlap_policy: WindowOverlapPolicy::DisallowOverlap,
@@ -1817,6 +2127,7 @@ mod tests {
         let source = WindowPartitionSet {
             total_bits: 32,
             requested_count: 2,
+            min_width: 4,
             max_width: 4,
             seed: 23,
             overlap_policy: WindowOverlapPolicy::DisallowOverlap,
