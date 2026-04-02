@@ -1,10 +1,17 @@
+use bigdecimal::BigDecimal;
 use num_bigint::{BigInt, BigUint};
 use num_integer::Integer;
-use num_traits::{One, Signed, Zero};
+use num_traits::{One, Signed, ToPrimitive, Zero};
 use rand::RngCore;
 use std::time::Instant;
 
 use crate::rng::RngChoice;
+
+mod rational_support {
+    include!("math_rational.rs");
+}
+
+pub use rational_support::{ApproximationBounds, BigRational, RationalError};
 
 /// Selects the first odd public exponent `e >= start` that is coprime with `phi`.
 ///
@@ -90,6 +97,153 @@ pub fn to_hex(value: &BigUint) -> String {
 /// - Returns the bit length; no side effects.
 pub fn bit_length(value: &BigUint) -> u64 {
     value.bits()
+}
+
+/// Computes `floor(base^exponent)` for a `BigUint` base and finite decimal exponent.
+///
+/// # Parameters
+/// - `base`: Integer base, converted to `BigDecimal` exactly before evaluation.
+/// - `exponent`: Non-negative decimal exponent such as `0.45`.
+///
+/// # Returns
+/// - `BigUint`: The truncated integer result of `base^exponent`.
+///
+/// # Expected Output
+/// - Returns the floored powered value without float-based precision loss; no side effects.
+pub fn floor_biguint_pow_bigdecimal(base: &BigUint, exponent: &BigDecimal) -> BigUint {
+    assert!(
+        !exponent.is_negative(),
+        "bigdecimal exponent must be non-negative"
+    );
+
+    if exponent.is_zero() {
+        return BigUint::one();
+    }
+
+    let exact_base_decimal = BigDecimal::from_biguint(base.clone(), 0);
+    let (exact_digits, exact_scale) = exact_base_decimal.into_bigint_and_exponent();
+    debug_assert_eq!(exact_scale, 0);
+
+    let exact_base = exact_digits
+        .to_biguint()
+        .expect("BigUint converted to BigDecimal must remain non-negative");
+
+    if exact_base.is_zero() {
+        return BigUint::zero();
+    }
+
+    let (numerator, two_roots, five_roots) = reduced_decimal_fraction_parts(exponent);
+    if numerator.is_zero() {
+        return BigUint::one();
+    }
+
+    let mut value = pow_biguint(&exact_base, &numerator);
+    for _ in 0..two_roots {
+        value = value.sqrt();
+    }
+    for _ in 0..five_roots {
+        value = value.nth_root(5);
+    }
+
+    value
+}
+
+/// Finds the first probable prime at or above `start`.
+///
+/// # Parameters
+/// - `start`: Starting value for the upward prime search.
+///
+/// # Returns
+/// - `BigUint`: The first probable prime `>= start`.
+///
+/// # Expected Output
+/// - Returns `2` when `start <= 2`; no stdout/stderr output.
+pub fn next_prime_at_or_above(start: &BigUint) -> BigUint {
+    if start <= &BigUint::from(2u8) {
+        return BigUint::from(2u8);
+    }
+
+    let mut candidate = if start.is_even() {
+        start + BigUint::one()
+    } else {
+        start.clone()
+    };
+
+    while !is_probable_prime_big(&candidate) {
+        candidate += BigUint::from(2u8);
+    }
+
+    candidate
+}
+
+/// Computes `floor(base^exponent)` and returns the next probable prime at or above it.
+///
+/// # Parameters
+/// - `base`: Integer base to raise.
+/// - `exponent`: Non-negative decimal exponent used for the threshold.
+///
+/// # Returns
+/// - `BigUint`: The first probable prime `>= floor(base^exponent)`.
+///
+/// # Expected Output
+/// - Returns the powered threshold's next probable prime; no side effects.
+pub fn next_prime_from_biguint_pow_bigdecimal(base: &BigUint, exponent: &BigDecimal) -> BigUint {
+    let threshold = floor_biguint_pow_bigdecimal(base, exponent);
+    next_prime_at_or_above(&threshold)
+}
+
+/// Randomly partitions a target decimal into up to `max_parts` values with a minimum per part.
+///
+/// # Parameters
+/// - `desired_total`: Exact decimal sum to match.
+/// - `max_parts`: Maximum number of values to return.
+/// - `minimum_value`: Minimum value allowed for each returned entry.
+/// - `rng`: Random number generator used for the partition.
+///
+/// # Returns
+/// - `Vec<BigDecimal>`: Random values summing exactly to `desired_total`.
+///
+/// # Expected Output
+/// - Returns exactly `max_parts` values when feasible, otherwise the largest feasible count below it; returns an empty vector when no valid partition exists.
+pub fn random_bigdecimal_partition_with_min(
+    desired_total: &BigDecimal,
+    max_parts: usize,
+    minimum_value: &BigDecimal,
+    rng: &mut RngChoice,
+) -> Vec<BigDecimal> {
+    assert!(
+        !desired_total.is_negative(),
+        "desired_total must be non-negative"
+    );
+    assert!(
+        !minimum_value.is_negative(),
+        "minimum_value must be non-negative"
+    );
+
+    if max_parts == 0 {
+        return Vec::new();
+    }
+
+    let scale = partition_decimal_scale(desired_total, minimum_value);
+    let total_units = scaled_bigdecimal_to_biguint(desired_total, scale);
+    let minimum_units = scaled_bigdecimal_to_biguint(minimum_value, scale);
+    let part_count = feasible_partition_count(&total_units, &minimum_units, max_parts);
+
+    if part_count == 0 {
+        return Vec::new();
+    }
+
+    let slack_units = &total_units - (&minimum_units * BigUint::from(part_count));
+    let mut partition_units = random_biguint_partition(&slack_units, part_count, rng);
+    let minimum_decimal = BigDecimal::from_biguint(minimum_units.clone(), scale).normalized();
+
+    partition_units
+        .drain(..)
+        .map(|units| {
+            let extra = BigDecimal::from_biguint(units, scale);
+            (&minimum_decimal + extra).normalized()
+        })
+        .collect()
 }
 
 /// Computes the Shannon entropy of a Bernoulli bit distribution.
@@ -219,9 +373,19 @@ pub fn random_biguint_below(upper: &BigUint, rng: &mut RngChoice) -> BigUint {
     if upper.is_zero() {
         return BigUint::zero();
     }
-    let bits = upper.bits();
+
+    let bits = upper.bits() as usize;
+    let bytes_len = bits.div_ceil(8);
+    let leading_bits = (bits % 8) as u8;
+
     loop {
-        let candidate = random_biguint_bits(bits as u32, rng);
+        let mut bytes = vec![0u8; bytes_len];
+        rng.fill_bytes(&mut bytes);
+        if leading_bits != 0 {
+            let mask = (1u8 << leading_bits) - 1;
+            bytes[0] &= mask;
+        }
+        let candidate = BigUint::from_bytes_be(&bytes);
         if &candidate < upper {
             return candidate;
         }
@@ -519,6 +683,209 @@ pub fn decompose_big(mut value: BigUint) -> (BigUint, u32) {
     (value, s)
 }
 
+/// Raises `base` to an arbitrarily large non-negative integer exponent.
+///
+/// # Parameters
+/// - `base`: Integer base to raise.
+/// - `exponent`: Non-negative integer exponent.
+///
+/// # Returns
+/// - `BigUint`: `base^exponent`.
+///
+/// # Expected Output
+/// - Returns the exact integer power; no side effects.
+fn pow_biguint(base: &BigUint, exponent: &BigUint) -> BigUint {
+    if exponent.is_zero() {
+        return BigUint::one();
+    }
+
+    let mut result = BigUint::one();
+    let mut factor = base.clone();
+    let mut remaining = exponent.clone();
+
+    while !remaining.is_zero() {
+        if remaining.is_odd() {
+            result *= &factor;
+        }
+        remaining >>= 1;
+        if !remaining.is_zero() {
+            factor = &factor * &factor;
+        }
+    }
+
+    result
+}
+
+/// Converts a finite decimal exponent into reduced numerator and root counts.
+///
+/// # Parameters
+/// - `exponent`: Non-negative finite decimal exponent.
+///
+/// # Returns
+/// - `(BigUint, u64, u64)`: Reduced numerator plus the remaining counts of `2` and `5` roots.
+///
+/// # Expected Output
+/// - Returns components suitable for exact `base^(m / (2^a * 5^b))` evaluation; no side effects.
+fn reduced_decimal_fraction_parts(exponent: &BigDecimal) -> (BigUint, u64, u64) {
+    let normalized = exponent.normalized();
+    let (digits, scale) = normalized.into_bigint_and_exponent();
+    let mut numerator = digits
+        .to_biguint()
+        .expect("non-negative exponent must remain non-negative after normalization");
+
+    if numerator.is_zero() {
+        return (BigUint::zero(), 0, 0);
+    }
+
+    if scale < 0 {
+        numerator *= pow_biguint(&BigUint::from(10u8), &BigUint::from(scale.unsigned_abs()));
+        return (numerator, 0, 0);
+    }
+
+    let mut two_roots = scale as u64;
+    let mut five_roots = scale as u64;
+    let two = BigUint::from(2u8);
+    let five = BigUint::from(5u8);
+
+    while two_roots > 0 && (&numerator % &two).is_zero() {
+        numerator /= &two;
+        two_roots -= 1;
+    }
+
+    while five_roots > 0 && (&numerator % &five).is_zero() {
+        numerator /= &five;
+        five_roots -= 1;
+    }
+
+    (numerator, two_roots, five_roots)
+}
+
+/// Selects a shared non-negative decimal scale that preserves both inputs exactly.
+///
+/// # Parameters
+/// - `left`: First decimal value.
+/// - `right`: Second decimal value.
+///
+/// # Returns
+/// - `i64`: A scale that can represent both values without truncation.
+///
+/// # Expected Output
+/// - Returns the maximum normalized fractional digit count clamped at zero; no side effects.
+fn partition_decimal_scale(left: &BigDecimal, right: &BigDecimal) -> i64 {
+    left.normalized()
+        .fractional_digit_count()
+        .max(right.normalized().fractional_digit_count())
+        .max(0)
+}
+
+/// Converts a non-negative decimal into exact integer units at the requested scale.
+///
+/// # Parameters
+/// - `value`: Decimal to convert.
+/// - `scale`: Non-negative scale used for unit conversion.
+///
+/// # Returns
+/// - `BigUint`: Integer units representing `value * 10^scale`.
+///
+/// # Expected Output
+/// - Returns the exact scaled integer form; no side effects.
+fn scaled_bigdecimal_to_biguint(value: &BigDecimal, scale: i64) -> BigUint {
+    let normalized = value.normalized();
+    assert!(
+        scale >= normalized.fractional_digit_count(),
+        "scale must preserve the full decimal value"
+    );
+
+    normalized
+        .with_scale(scale)
+        .into_bigint_and_exponent()
+        .0
+        .to_biguint()
+        .expect("scaled decimal value must be non-negative")
+}
+
+/// Chooses the largest valid partition count not exceeding `max_parts`.
+///
+/// # Parameters
+/// - `total_units`: Exact total in integer units.
+/// - `minimum_units`: Minimum value per part in the same units.
+/// - `max_parts`: Maximum allowed number of parts.
+///
+/// # Returns
+/// - `usize`: Feasible partition count, or `0` when none exists.
+///
+/// # Expected Output
+/// - Returns `max_parts` when possible, otherwise the largest smaller count; no side effects.
+fn feasible_partition_count(
+    total_units: &BigUint,
+    minimum_units: &BigUint,
+    max_parts: usize,
+) -> usize {
+    if total_units.is_zero() {
+        return if minimum_units.is_zero() { 1 } else { 0 };
+    }
+
+    for part_count in (1..=max_parts).rev() {
+        let required_units = minimum_units * BigUint::from(part_count);
+        if required_units <= *total_units {
+            return part_count;
+        }
+    }
+
+    0
+}
+
+/// Randomly partitions integer units into `parts` non-negative buckets.
+///
+/// # Parameters
+/// - `total_units`: Total integer units to distribute.
+/// - `parts`: Number of buckets to produce.
+/// - `rng`: Random number generator used for the cut points.
+///
+/// # Returns
+/// - `Vec<BigUint>`: Random non-negative bucket sizes summing to `total_units`.
+///
+/// # Expected Output
+/// - Returns exactly `parts` entries whose sum matches `total_units`; no side effects.
+fn random_biguint_partition(
+    total_units: &BigUint,
+    parts: usize,
+    rng: &mut RngChoice,
+) -> Vec<BigUint> {
+    if parts == 0 {
+        return Vec::new();
+    }
+
+    if parts == 1 {
+        return vec![total_units.clone()];
+    }
+
+    let upper = total_units + BigUint::one();
+    let mut cut_points = Vec::with_capacity(parts - 1);
+    for _ in 0..parts - 1 {
+        cut_points.push(random_biguint_below(&upper, rng));
+    }
+    cut_points.sort();
+
+    let mut values = Vec::with_capacity(parts);
+    let mut previous = BigUint::zero();
+    for cut in cut_points {
+        values.push(&cut - &previous);
+        previous = cut;
+    }
+    values.push(total_units - previous);
+
+    for idx in (1..values.len()).rev() {
+        let swap_bound = BigUint::from(idx + 1);
+        let swap_idx = random_biguint_below(&swap_bound, rng)
+            .to_usize()
+            .expect("partition index must fit into usize");
+        values.swap(idx, swap_idx);
+    }
+
+    values
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -576,6 +943,96 @@ mod tests {
     fn test_bit_length_value() {
         let v = BigUint::from(10u8); // 1010
         assert_eq!(bit_length(&v), 4);
+    }
+
+    #[test]
+    fn test_floor_biguint_pow_bigdecimal_fractional() {
+        let base = BigUint::from(625u16);
+        let exponent = "0.75".parse::<BigDecimal>().expect("invalid exponent");
+        let value = floor_biguint_pow_bigdecimal(&base, &exponent);
+        assert_eq!(value, BigUint::from(125u16));
+    }
+
+    #[test]
+    fn test_floor_biguint_pow_bigdecimal_mixed_exponent() {
+        let base = BigUint::from(64u8);
+        let exponent = "1.5".parse::<BigDecimal>().expect("invalid exponent");
+        let value = floor_biguint_pow_bigdecimal(&base, &exponent);
+        assert_eq!(value, BigUint::from(512u16));
+    }
+
+    #[test]
+    fn test_next_prime_at_or_above_composite() {
+        let start = BigUint::from(22u8);
+        let next = next_prime_at_or_above(&start);
+        assert_eq!(next, BigUint::from(23u8));
+    }
+
+    #[test]
+    fn test_next_prime_from_biguint_pow_bigdecimal() {
+        let base = BigUint::from(1000u16);
+        let exponent = "0.45".parse::<BigDecimal>().expect("invalid exponent");
+        let next = next_prime_from_biguint_pow_bigdecimal(&base, &exponent);
+        assert_eq!(next, BigUint::from(23u8));
+    }
+
+    #[test]
+    fn test_random_bigdecimal_partition_with_min_two_parts() {
+        let desired_total = "2.01".parse::<BigDecimal>().expect("invalid desired total");
+        let minimum_value = "0.45".parse::<BigDecimal>().expect("invalid minimum");
+        let mut rng = RngChoice::from_seed(RngMode::Standard, 21);
+        let values =
+            random_bigdecimal_partition_with_min(&desired_total, 2, &minimum_value, &mut rng);
+
+        assert_eq!(values.len(), 2);
+        assert!(values.iter().all(|value| value >= &minimum_value));
+        let sum = values
+            .into_iter()
+            .fold(BigDecimal::zero(), |acc, value| acc + value);
+        assert_eq!(sum, desired_total);
+    }
+
+    #[test]
+    fn test_random_bigdecimal_partition_with_min_three_parts() {
+        let desired_total = "2.01".parse::<BigDecimal>().expect("invalid desired total");
+        let minimum_value = "0.45".parse::<BigDecimal>().expect("invalid minimum");
+        let mut rng = RngChoice::from_seed(RngMode::Standard, 22);
+        let values =
+            random_bigdecimal_partition_with_min(&desired_total, 3, &minimum_value, &mut rng);
+
+        assert_eq!(values.len(), 3);
+        assert!(values.iter().all(|value| value >= &minimum_value));
+        let sum = values
+            .into_iter()
+            .fold(BigDecimal::zero(), |acc, value| acc + value);
+        assert_eq!(sum, desired_total);
+    }
+
+    #[test]
+    fn test_random_bigdecimal_partition_with_min_uses_feasible_count() {
+        let desired_total = "1.00".parse::<BigDecimal>().expect("invalid desired total");
+        let minimum_value = "0.45".parse::<BigDecimal>().expect("invalid minimum");
+        let mut rng = RngChoice::from_seed(RngMode::Standard, 23);
+        let values =
+            random_bigdecimal_partition_with_min(&desired_total, 3, &minimum_value, &mut rng);
+
+        assert_eq!(values.len(), 2);
+        assert!(values.iter().all(|value| value >= &minimum_value));
+        let sum = values
+            .into_iter()
+            .fold(BigDecimal::zero(), |acc, value| acc + value);
+        assert_eq!(sum, desired_total);
+    }
+
+    #[test]
+    fn test_random_bigdecimal_partition_with_min_impossible() {
+        let desired_total = "0.40".parse::<BigDecimal>().expect("invalid desired total");
+        let minimum_value = "0.45".parse::<BigDecimal>().expect("invalid minimum");
+        let mut rng = RngChoice::from_seed(RngMode::Standard, 24);
+        let values =
+            random_bigdecimal_partition_with_min(&desired_total, 3, &minimum_value, &mut rng);
+
+        assert!(values.is_empty());
     }
 
     #[test]
@@ -637,6 +1094,16 @@ mod tests {
         let upper = BigUint::zero();
         let v = random_biguint_below(&upper, &mut rng);
         assert!(v.is_zero());
+    }
+
+    #[test]
+    fn test_random_biguint_below_power_of_two() {
+        let mut rng = RngChoice::from_seed(RngMode::Standard, 5);
+        let upper = BigUint::from(2u8);
+        for _ in 0..5 {
+            let v = random_biguint_below(&upper, &mut rng);
+            assert!(v < upper);
+        }
     }
 
     #[test]
