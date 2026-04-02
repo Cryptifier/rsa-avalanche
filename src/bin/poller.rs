@@ -189,6 +189,9 @@ fn run_poller_loop(
                             announced_idle = true;
                         }
                     }
+                    RouterReply::Clients(_) => {
+                        return Err("unexpected clients reply".into());
+                    }
                     RouterReply::Stopped => {
                         if !awaiting_stop_reply {
                             return Err("unexpected stop reply".into());

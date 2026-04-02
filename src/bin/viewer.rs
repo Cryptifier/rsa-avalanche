@@ -14,6 +14,8 @@ use web_time::{Duration, Instant};
 use eframe::egui;
 use egui_extras::{Column, TableBuilder};
 use egui_plot::{Plot, PlotPoints, Points};
+#[cfg(not(target_arch = "wasm32"))]
+use rsademo::zmq_status::{QueryResponsePayload, build_client_from_endpoint_with_timeouts};
 use serde::Deserialize;
 use serde_json::{Map, Value};
 
@@ -70,6 +72,14 @@ pub async fn start(canvas_id: &str) -> Result<(), JsValue> {
 struct ViewerArgs {
     session_path: PathBuf,
     log_dir: PathBuf,
+    #[cfg(not(target_arch = "wasm32"))]
+    zmq_host: String,
+    #[cfg(not(target_arch = "wasm32"))]
+    zmq_port: u16,
+    #[cfg(not(target_arch = "wasm32"))]
+    zmq_timeout_ms: i32,
+    #[cfg(not(target_arch = "wasm32"))]
+    clients_refresh_ms: u64,
 }
 
 impl ViewerArgs {
@@ -77,6 +87,14 @@ impl ViewerArgs {
     fn parse() -> Self {
         let mut session_path = PathBuf::from("session.log");
         let mut log_dir = PathBuf::from("logs");
+        #[cfg(not(target_arch = "wasm32"))]
+        let mut zmq_host = String::from("127.0.0.1");
+        #[cfg(not(target_arch = "wasm32"))]
+        let mut zmq_port = 5555u16;
+        #[cfg(not(target_arch = "wasm32"))]
+        let mut zmq_timeout_ms = 250i32;
+        #[cfg(not(target_arch = "wasm32"))]
+        let mut clients_refresh_ms = 2_000u64;
         let mut args = std::env::args().skip(1);
         while let Some(arg) = args.next() {
             match arg.as_str() {
@@ -90,6 +108,36 @@ impl ViewerArgs {
                         session_path = PathBuf::from(value);
                     }
                 }
+                #[cfg(not(target_arch = "wasm32"))]
+                "--zmq-host" => {
+                    if let Some(value) = args.next() {
+                        zmq_host = value;
+                    }
+                }
+                #[cfg(not(target_arch = "wasm32"))]
+                "--zmq-port" => {
+                    if let Some(value) = args.next() {
+                        if let Ok(port) = value.parse::<u16>() {
+                            zmq_port = port;
+                        }
+                    }
+                }
+                #[cfg(not(target_arch = "wasm32"))]
+                "--zmq-timeout-ms" => {
+                    if let Some(value) = args.next() {
+                        if let Ok(timeout_ms) = value.parse::<i32>() {
+                            zmq_timeout_ms = timeout_ms;
+                        }
+                    }
+                }
+                #[cfg(not(target_arch = "wasm32"))]
+                "--clients-refresh-ms" => {
+                    if let Some(value) = args.next() {
+                        if let Ok(refresh_ms) = value.parse::<u64>() {
+                            clients_refresh_ms = refresh_ms;
+                        }
+                    }
+                }
                 _ => {
                     if !arg.starts_with("--") {
                         session_path = PathBuf::from(arg);
@@ -100,6 +148,14 @@ impl ViewerArgs {
         Self {
             session_path,
             log_dir,
+            #[cfg(not(target_arch = "wasm32"))]
+            zmq_host,
+            #[cfg(not(target_arch = "wasm32"))]
+            zmq_port,
+            #[cfg(not(target_arch = "wasm32"))]
+            zmq_timeout_ms,
+            #[cfg(not(target_arch = "wasm32"))]
+            clients_refresh_ms,
         }
     }
 
@@ -114,6 +170,7 @@ impl ViewerArgs {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Tab {
+    Clients,
     Summary,
     Candidates,
     BitSimilarity,
@@ -176,6 +233,18 @@ struct ViewerApp {
     log_entries: Vec<LogEntry>,
     selected_log: Option<String>,
     status: String,
+    #[cfg(not(target_arch = "wasm32"))]
+    zmq_endpoint: String,
+    #[cfg(not(target_arch = "wasm32"))]
+    zmq_timeout_ms: i32,
+    #[cfg(not(target_arch = "wasm32"))]
+    clients_refresh_interval: Duration,
+    #[cfg(not(target_arch = "wasm32"))]
+    last_clients_refresh: Instant,
+    #[cfg(not(target_arch = "wasm32"))]
+    clients_status: String,
+    #[cfg(not(target_arch = "wasm32"))]
+    client_snapshots: Vec<QueryResponsePayload>,
     #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
     last_poll: Instant,
     #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
@@ -216,6 +285,20 @@ impl ViewerApp {
             log_entries: Vec::new(),
             selected_log: None,
             status: String::new(),
+            #[cfg(not(target_arch = "wasm32"))]
+            zmq_endpoint: format!("tcp://{}:{}", args.zmq_host, args.zmq_port),
+            #[cfg(not(target_arch = "wasm32"))]
+            zmq_timeout_ms: args.zmq_timeout_ms,
+            #[cfg(not(target_arch = "wasm32"))]
+            clients_refresh_interval: Duration::from_millis(args.clients_refresh_ms),
+            #[cfg(not(target_arch = "wasm32"))]
+            last_clients_refresh: Instant::now()
+                .checked_sub(Duration::from_millis(args.clients_refresh_ms))
+                .unwrap_or_else(Instant::now),
+            #[cfg(not(target_arch = "wasm32"))]
+            clients_status: "Waiting for client snapshots.".to_string(),
+            #[cfg(not(target_arch = "wasm32"))]
+            client_snapshots: Vec::new(),
             last_poll: Instant::now(),
             last_scan: Instant::now(),
             last_log_fetch: Instant::now(),
@@ -223,7 +306,7 @@ impl ViewerApp {
             ndjson_mode: false,
             offset: 0,
             buffer: String::new(),
-            tab: Tab::Summary,
+            tab: Tab::Clients,
             bit_true_bit_idx: 0,
             bitflow_selected: None,
             bit_similarity_sort: BitSimilaritySort::Original,
@@ -236,6 +319,8 @@ impl ViewerApp {
             session_request_in_flight,
         };
         app.refresh_logs(true);
+        #[cfg(not(target_arch = "wasm32"))]
+        app.refresh_clients();
         app
     }
 
@@ -306,6 +391,9 @@ impl ViewerApp {
                 self.refresh_logs(false);
                 self.last_scan = now;
             }
+            if now.duration_since(self.last_clients_refresh) >= self.clients_refresh_interval {
+                self.refresh_clients();
+            }
             if now.duration_since(self.last_poll) < Duration::from_millis(400) {
                 return;
             }
@@ -319,6 +407,24 @@ impl ViewerApp {
             let updated = self.ingest_tail(&path);
             if updated {
                 self.status = format!("Updated {}", path);
+            }
+        }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn refresh_clients(&mut self) {
+        self.last_clients_refresh = Instant::now();
+        match query_router_clients_with_timeout(&self.zmq_endpoint, self.zmq_timeout_ms) {
+            Ok(snapshots) => {
+                self.clients_status = if snapshots.is_empty() {
+                    "Connected to ZMQ server. No client snapshots available yet.".to_string()
+                } else {
+                    format!("Loaded {} client snapshot(s).", snapshots.len())
+                };
+                self.client_snapshots = snapshots;
+            }
+            Err(err) => {
+                self.clients_status = format!("Failed to refresh clients: {err}");
             }
         }
     }
@@ -590,6 +696,87 @@ impl ViewerApp {
                         });
                 });
             });
+    }
+
+    fn draw_clients(&mut self, ui: &mut egui::Ui) {
+        ui.heading("Clients");
+        #[cfg(target_arch = "wasm32")]
+        {
+            ui.label("Client snapshots are only available in the native viewer.");
+            return;
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            ui.horizontal(|ui| {
+                if ui.button("Refresh").clicked() {
+                    self.refresh_clients();
+                }
+                ui.monospace(&self.zmq_endpoint);
+            });
+            ui.label(&self.clients_status);
+            if self.client_snapshots.is_empty() {
+                ui.label("No client snapshots available yet. Start one or more pollers and wait for the server query interval.");
+                return;
+            }
+
+            let total_cpu_cores = self
+                .client_snapshots
+                .iter()
+                .map(|snapshot| snapshot.cpu_cores)
+                .sum::<usize>();
+            let total_available_memory_bytes = self
+                .client_snapshots
+                .iter()
+                .map(|snapshot| snapshot.available_memory_bytes)
+                .sum::<u64>();
+
+            ui.label(format!(
+                "Clients: {} | Total CPU cores: {} | Total available memory: {}",
+                self.client_snapshots.len(),
+                total_cpu_cores,
+                format_bytes(total_available_memory_bytes)
+            ));
+            ui.add_space(8.0);
+
+            TableBuilder::new(ui)
+                .striped(true)
+                .column(Column::initial(220.0).resizable(true))
+                .column(Column::initial(90.0).resizable(true))
+                .column(Column::initial(140.0).resizable(true))
+                .column(Column::remainder())
+                .header(22.0, |mut header| {
+                    header.col(|ui| {
+                        ui.label("Client ID");
+                    });
+                    header.col(|ui| {
+                        ui.label("CPU Cores");
+                    });
+                    header.col(|ui| {
+                        ui.label("Available Memory");
+                    });
+                    header.col(|ui| {
+                        ui.label("Bytes");
+                    });
+                })
+                .body(|mut body| {
+                    for snapshot in &self.client_snapshots {
+                        body.row(22.0, |mut row| {
+                            row.col(|ui| {
+                                ui.monospace(&snapshot.client_id);
+                            });
+                            row.col(|ui| {
+                                ui.label(snapshot.cpu_cores.to_string());
+                            });
+                            row.col(|ui| {
+                                ui.label(format_bytes(snapshot.available_memory_bytes));
+                            });
+                            row.col(|ui| {
+                                ui.label(snapshot.available_memory_bytes.to_string());
+                            });
+                        });
+                    }
+                });
+        }
     }
 
     fn draw_candidates(&self, ui: &mut egui::Ui) {
@@ -1179,6 +1366,7 @@ impl eframe::App for ViewerApp {
             });
             ui.separator();
             ui.horizontal(|ui| {
+                tab_button(ui, "Clients", Tab::Clients, &mut self.tab);
                 tab_button(ui, "Summary", Tab::Summary, &mut self.tab);
                 tab_button(ui, "Candidates", Tab::Candidates, &mut self.tab);
                 tab_button(ui, "Bit Similarity", Tab::BitSimilarity, &mut self.tab);
@@ -1218,6 +1406,7 @@ impl eframe::App for ViewerApp {
         }
 
         egui::CentralPanel::default().show(ctx, |ui| match self.tab {
+            Tab::Clients => self.draw_clients(ui),
             Tab::Summary => self.draw_summary(ui),
             Tab::Candidates => self.draw_candidates(ui),
             Tab::BitSimilarity => self.draw_bit_similarity(ui),
@@ -1226,6 +1415,32 @@ impl eframe::App for ViewerApp {
             Tab::BeamVsR => self.draw_beam_vs_r(ui),
             Tab::Bitflow => self.draw_bitflow(ui),
         });
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn query_router_clients_with_timeout(
+    endpoint: &str,
+    timeout_ms: i32,
+) -> Result<Vec<QueryResponsePayload>, String> {
+    let client =
+        build_client_from_endpoint_with_timeouts(endpoint, Some(timeout_ms), Some(timeout_ms))?;
+    client.query_clients()
+}
+
+fn format_bytes(bytes: u64) -> String {
+    const KIB: f64 = 1024.0;
+    const MIB: f64 = KIB * 1024.0;
+    const GIB: f64 = MIB * 1024.0;
+    let bytes_f64 = bytes as f64;
+    if bytes_f64 >= GIB {
+        format!("{:.2} GiB", bytes_f64 / GIB)
+    } else if bytes_f64 >= MIB {
+        format!("{:.2} MiB", bytes_f64 / MIB)
+    } else if bytes_f64 >= KIB {
+        format!("{:.2} KiB", bytes_f64 / KIB)
+    } else {
+        format!("{bytes} B")
     }
 }
 

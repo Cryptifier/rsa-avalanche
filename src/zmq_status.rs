@@ -19,6 +19,8 @@ const DEFAULT_CLIENT_PORT: u16 = 5555;
 const DEFAULT_LINGER_MS: i32 = 0;
 const PING_MESSAGE: &str = "PING";
 const PONG_MESSAGE: &str = "PONG";
+const CLIENTS_MESSAGE: &str = "CLIENTS";
+const CLIENTS_RESPONSE_MESSAGE: &str = "CLIENTS_RESPONSE";
 const QUERY_MESSAGE: &str = "QUERY";
 const QUERY_RESPONSE_MESSAGE: &str = "QUERY_RESPONSE";
 const STATUS_MESSAGE: &str = "STATUS";
@@ -67,11 +69,20 @@ pub struct QueryResponsePayload {
     pub available_memory_bytes: u64,
 }
 
+/// Aggregated client snapshot response returned by the router.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ClientsResponsePayload {
+    /// Latest known resource snapshots keyed by client identity.
+    pub clients: Vec<QueryResponsePayload>,
+}
+
 /// Structured command accepted by the ROUTER server.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RouterCommand {
     /// Increment the ping counter and reply with PONG.
     Ping,
+    /// Return the router's aggregated client resource snapshots as JSON.
+    Clients,
     /// Carry a JSON resource snapshot from a poller back to the router.
     QueryResponse(QueryResponsePayload),
     /// Return the current status mirror as a decimal string.
@@ -87,6 +98,8 @@ pub enum RouterCommand {
 pub enum RouterReply {
     /// Successful reply for a ping request.
     Pong,
+    /// Aggregated client resource snapshots.
+    Clients(ClientsResponsePayload),
     /// Query a connected poller for its resource snapshot.
     Query,
     /// Current status value.
@@ -733,6 +746,7 @@ impl RouterCommand {
         let text = String::from_utf8_lossy(payload);
         match text.as_ref() {
             PING_MESSAGE => Self::Ping,
+            CLIENTS_MESSAGE => Self::Clients,
             STATUS_MESSAGE => Self::Status,
             STOP_MESSAGE => Self::Stop,
             _ => match text.strip_prefix(&format!("{QUERY_RESPONSE_MESSAGE} ")) {
@@ -748,6 +762,7 @@ impl RouterCommand {
     fn payload_text(&self) -> &str {
         match self {
             Self::Ping => PING_MESSAGE,
+            Self::Clients => CLIENTS_MESSAGE,
             Self::QueryResponse(_) => QUERY_RESPONSE_MESSAGE,
             Self::Status => STATUS_MESSAGE,
             Self::Stop => STOP_MESSAGE,
@@ -780,9 +795,15 @@ impl RouterReply {
             QUERY_MESSAGE => Self::Query,
             STOPPED_MESSAGE => Self::Stopped,
             UNKNOWN_MESSAGE_REPLY => Self::Error(UNKNOWN_MESSAGE_REPLY.to_string()),
-            value => match value.parse::<u64>() {
-                Ok(status) => Self::Status(status),
-                Err(_) => Self::Error(value.to_string()),
+            value => match value.strip_prefix(&format!("{CLIENTS_RESPONSE_MESSAGE} ")) {
+                Some(json) => match serde_json::from_str::<ClientsResponsePayload>(json) {
+                    Ok(payload) => Self::Clients(payload),
+                    Err(_) => Self::Error(value.to_string()),
+                },
+                None => match value.parse::<u64>() {
+                    Ok(status) => Self::Status(status),
+                    Err(_) => Self::Error(value.to_string()),
+                },
             },
         }
     }
@@ -790,6 +811,7 @@ impl RouterReply {
     fn payload_text(&self) -> String {
         match self {
             Self::Pong => PONG_MESSAGE.to_string(),
+            Self::Clients(payload) => format_clients_response_payload(payload),
             Self::Query => QUERY_MESSAGE.to_string(),
             Self::Status(value) => value.to_string(),
             Self::Stopped => STOPPED_MESSAGE.to_string(),
@@ -808,6 +830,7 @@ impl fmt::Display for RouterReply {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Pong => f.write_str(PONG_MESSAGE),
+            Self::Clients(payload) => f.write_str(&format_clients_response_payload(payload)),
             Self::Query => f.write_str(QUERY_MESSAGE),
             Self::Status(value) => write!(f, "{value}"),
             Self::Stopped => f.write_str(STOPPED_MESSAGE),
@@ -891,6 +914,23 @@ impl PingClient {
         match self.send_command(RouterCommand::Ping)? {
             RouterReply::Pong => Ok(()),
             reply => Err(format!("unexpected router reply: {reply}")),
+        }
+    }
+
+    /// Queries the router's aggregated client resource snapshots.
+    ///
+    /// # Parameters
+    /// - None.
+    ///
+    /// # Returns
+    /// - `Result<Vec<QueryResponsePayload>, String>`: Latest client snapshots or an error string.
+    ///
+    /// # Expected Output
+    /// - Sends CLIENTS and receives a JSON reply; no stdout/stderr output.
+    pub fn query_clients(&self) -> Result<Vec<QueryResponsePayload>, String> {
+        match self.send_command(RouterCommand::Clients)? {
+            RouterReply::Clients(payload) => Ok(payload.clients),
+            reply => Err(format!("unexpected router clients reply: {reply}")),
         }
     }
 
@@ -1051,6 +1091,21 @@ pub fn query_router_status(endpoint: &str) -> Result<u64, String> {
     client.query_status()
 }
 
+/// Queries the latest aggregated client resource snapshots from a ROUTER endpoint.
+///
+/// # Parameters
+/// - `endpoint`: ROUTER endpoint string.
+///
+/// # Returns
+/// - `Result<Vec<QueryResponsePayload>, String>`: Latest client snapshots or an error string.
+///
+/// # Expected Output
+/// - Sends CLIENTS and receives JSON; no stdout/stderr output.
+pub fn query_router_clients(endpoint: &str) -> Result<Vec<QueryResponsePayload>, String> {
+    let client = build_client_from_endpoint(endpoint)?;
+    client.query_clients()
+}
+
 /// Requests a running ROUTER endpoint to stop.
 ///
 /// # Parameters
@@ -1095,6 +1150,31 @@ pub fn build_client_from_endpoint(endpoint: &str) -> Result<PingClient, String> 
     let connect_address = parse_connect_address(endpoint)?;
     PingClientBuilder::new()
         .connect_address(connect_address)
+        .build()
+}
+
+/// Builds a client from a fully qualified TCP endpoint string with explicit timeouts.
+///
+/// # Parameters
+/// - `endpoint`: Endpoint string in `tcp://host:port` form.
+/// - `send_timeout_ms`: Optional send timeout in milliseconds.
+/// - `recv_timeout_ms`: Optional receive timeout in milliseconds.
+///
+/// # Returns
+/// - `Result<PingClient, String>`: Configured client or an error string.
+///
+/// # Expected Output
+/// - Parses the endpoint string and returns a client value.
+pub fn build_client_from_endpoint_with_timeouts(
+    endpoint: &str,
+    send_timeout_ms: Option<i32>,
+    recv_timeout_ms: Option<i32>,
+) -> Result<PingClient, String> {
+    let connect_address = parse_connect_address(endpoint)?;
+    PingClientBuilder::new()
+        .connect_address(connect_address)
+        .send_timeout_ms(send_timeout_ms)
+        .recv_timeout_ms(recv_timeout_ms)
         .build()
 }
 
@@ -1206,6 +1286,9 @@ where
                 print_query_aggregation(&query_snapshots);
                 None
             }
+            RouterCommand::Clients => Some(RouterReply::Clients(ClientsResponsePayload {
+                clients: collect_sorted_snapshots(&query_snapshots),
+            })),
             RouterCommand::Status => {
                 status_queries += 1;
                 Some(RouterReply::Status(GLOBAL_STATUS.load(Ordering::Relaxed)))
@@ -1375,14 +1458,18 @@ fn format_query_response_payload(payload: &QueryResponsePayload) -> String {
     format!("{QUERY_RESPONSE_MESSAGE} {json}")
 }
 
+fn format_clients_response_payload(payload: &ClientsResponsePayload) -> String {
+    let json = serde_json::to_string(payload).unwrap_or_else(|_| "{\"clients\":[]}".to_string());
+    format!("{CLIENTS_RESPONSE_MESSAGE} {json}")
+}
+
 fn router_poll_timeout_ms(query_interval: Duration) -> i32 {
     let timeout_ms = query_interval.as_millis().clamp(1, 250) as i32;
     timeout_ms
 }
 
 fn print_query_aggregation(query_snapshots: &HashMap<String, QueryResponsePayload>) {
-    let mut snapshots = query_snapshots.values().cloned().collect::<Vec<_>>();
-    snapshots.sort_by(|left, right| left.client_id.cmp(&right.client_id));
+    let snapshots = collect_sorted_snapshots(query_snapshots);
 
     let total_cpu_cores = snapshots
         .iter()
@@ -1404,6 +1491,14 @@ fn print_query_aggregation(query_snapshots: &HashMap<String, QueryResponsePayloa
         "  totals: cpu_cores={}, available_memory_bytes={}",
         total_cpu_cores, total_available_memory
     );
+}
+
+fn collect_sorted_snapshots(
+    query_snapshots: &HashMap<String, QueryResponsePayload>,
+) -> Vec<QueryResponsePayload> {
+    let mut snapshots = query_snapshots.values().cloned().collect::<Vec<_>>();
+    snapshots.sort_by(|left, right| left.client_id.cmp(&right.client_id));
+    snapshots
 }
 
 #[cfg(test)]
@@ -1469,11 +1564,27 @@ mod tests {
     fn test_command_and_reply_parsing() {
         assert_eq!(RouterCommand::from_payload(b"PING"), RouterCommand::Ping);
         assert_eq!(
+            RouterCommand::from_payload(b"CLIENTS"),
+            RouterCommand::Clients
+        );
+        assert_eq!(
             RouterCommand::from_payload(b"STATUS"),
             RouterCommand::Status
         );
         assert_eq!(RouterReply::from_text("QUERY"), RouterReply::Query);
         assert_eq!(RouterReply::from_text("PONG"), RouterReply::Pong);
+        assert_eq!(
+            RouterReply::from_text(
+                r#"CLIENTS_RESPONSE {"clients":[{"client_id":"poller-1","cpu_cores":8,"available_memory_bytes":1024}]}"#
+            ),
+            RouterReply::Clients(ClientsResponsePayload {
+                clients: vec![QueryResponsePayload {
+                    client_id: "poller-1".to_string(),
+                    cpu_cores: 8,
+                    available_memory_bytes: 1024,
+                }],
+            })
+        );
         assert_eq!(RouterReply::from_text("42"), RouterReply::Status(42));
         assert_eq!(
             RouterReply::from_text("ERROR"),

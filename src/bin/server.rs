@@ -42,6 +42,10 @@ struct ServerArgs {
     #[arg(long, default_value_t = 5555)]
     zmq_port: u16,
 
+    /// Interval between poller resource queries in seconds
+    #[arg(long, default_value_t = 10)]
+    zmq_query_interval_secs: u64,
+
     /// Stop the ZMQ router automatically after this many pings
     #[arg(long)]
     zmq_expected_pings: Option<usize>,
@@ -98,7 +102,10 @@ fn run_server(args: ServerArgs) -> Result<(), Box<dyn std::error::Error + Send +
 
     println!("Viewer server running at http://{}/", args.addr);
     println!("ZMQ router listening at {}", router_endpoint_value);
-    println!("ZMQ router will query connected pollers every 10 seconds.");
+    println!(
+        "ZMQ router will query connected pollers every {} seconds.",
+        args.zmq_query_interval_secs
+    );
 
     while !shutdown_requested.load(Ordering::Relaxed) {
         match http_server.recv_timeout(Duration::from_millis(args.http_poll_timeout_ms)) {
@@ -135,6 +142,7 @@ fn run_server(args: ServerArgs) -> Result<(), Box<dyn std::error::Error + Send +
 fn build_router_builder(args: &ServerArgs) -> RouterServerBuilder {
     let builder = RouterServerBuilder::new()
         .bind_address(ZmqBindAddress::new(args.zmq_host.clone(), args.zmq_port))
+        .query_interval(Duration::from_secs(args.zmq_query_interval_secs))
         .linger_ms(args.zmq_linger_ms);
     match args.zmq_expected_pings {
         Some(expected_pings) => builder.expected_pings(expected_pings),

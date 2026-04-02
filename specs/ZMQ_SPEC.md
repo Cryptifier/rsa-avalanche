@@ -34,6 +34,18 @@ All request bodies are UTF-8 strings carried in the final message frame.
 - Effect: updates the status context to the current ping count
 - Effect: mirrors the updated value into the global atomic status
 
+### `CLIENTS`
+
+- Direction: viewer or other REQ client to router
+- Reply: `CLIENTS_RESPONSE <json>`
+- Effect: returns the router's latest aggregated client snapshots
+
+### `CLIENTS_RESPONSE`
+
+- Direction: router to viewer or other REQ client
+- Body: JSON object with a `clients` array of per-client resource snapshots
+- Effect: exposes the latest `QUERY_RESPONSE` data already aggregated by the server
+
 ### `QUERY`
 
 - Direction: router to connected poller
@@ -85,8 +97,10 @@ Two lifecycle modes are supported:
 
 - `ping_router(endpoint)` sends `PING` and validates `PONG`
 - `query_router_status(endpoint)` sends `STATUS` and parses the numeric reply
+- `query_router_clients(endpoint)` sends `CLIENTS` and parses the JSON reply
 - `stop_router(endpoint)` sends `STOP` and validates `STOPPED`
 - `build_client_from_endpoint(endpoint)` parses a TCP endpoint into a typed client
+- `build_client_from_endpoint_with_timeouts(endpoint, send_timeout_ms, recv_timeout_ms)` parses a TCP endpoint into a typed client with explicit timeouts
 - `join_router(handle)` waits for the background router thread and returns `RouterStats`
 
 ## Builder Usage
@@ -112,12 +126,15 @@ Typical REQ client builder usage:
 - `src/bin/server.rs`
   - Starts the existing HTTP viewer server.
   - Starts a concurrent ZMQ ROUTER server in the background.
-  - Exposes CLI options for ZMQ host, port, linger, and optional expected ping count.
+  - Exposes CLI options for ZMQ host, port, query interval, linger, and optional expected ping count.
 - `src/bin/poller.rs`
   - Creates a long-lived ZMQ DEALER client from CLI options.
   - Sends the configured `PING` sequence to the configured host/port.
   - Remains active until `Ctrl-C`, answering server-initiated `QUERY` messages.
   - Can optionally query `STATUS` after each ping and send `STOP` at the end.
+- `src/bin/viewer.rs`
+  - Adds a `Clients` tab that queries the server over ZMQ for aggregated client resource snapshots.
+  - Exposes CLI options for ZMQ host, port, timeout, and refresh cadence.
 
 ## RouterStats
 
