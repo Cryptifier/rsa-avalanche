@@ -11,6 +11,7 @@ use std::time::{Duration, Instant};
 #[cfg(target_arch = "wasm32")]
 use web_time::{Duration, Instant};
 
+use clap::Parser;
 use eframe::egui;
 use egui_extras::{Column, TableBuilder};
 use egui_plot::{Plot, PlotPoints, Points};
@@ -68,97 +69,44 @@ pub async fn start(canvas_id: &str) -> Result<(), JsValue> {
         .map_err(|err| JsValue::from_str(&format!("{err:?}")))
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone, Parser)]
+#[command(
+    name = "viewer",
+    about = "Launch the egui session viewer",
+    author,
+    version
+)]
 struct ViewerArgs {
+    /// Session log or JSON file to load
+    #[arg(value_name = "SESSION", default_value = "session.log")]
     session_path: PathBuf,
+
+    /// Directory containing session log files
+    #[arg(long, default_value = "logs")]
     log_dir: PathBuf,
+
     #[cfg(not(target_arch = "wasm32"))]
+    /// Host name or IP address for the ZMQ server
+    #[arg(long = "host", visible_alias = "zmq-host", default_value = "127.0.0.1")]
     zmq_host: String,
+
     #[cfg(not(target_arch = "wasm32"))]
+    /// TCP port for the ZMQ server
+    #[arg(long = "port", visible_alias = "zmq-port", default_value_t = 5555)]
     zmq_port: u16,
+
     #[cfg(not(target_arch = "wasm32"))]
+    /// ZMQ send and receive timeout in milliseconds
+    #[arg(long, default_value_t = 250)]
     zmq_timeout_ms: i32,
+
     #[cfg(not(target_arch = "wasm32"))]
+    /// Client snapshot refresh interval in milliseconds
+    #[arg(long, default_value_t = 2_000)]
     clients_refresh_ms: u64,
 }
 
 impl ViewerArgs {
-    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
-    fn parse() -> Self {
-        let mut session_path = PathBuf::from("session.log");
-        let mut log_dir = PathBuf::from("logs");
-        #[cfg(not(target_arch = "wasm32"))]
-        let mut zmq_host = String::from("127.0.0.1");
-        #[cfg(not(target_arch = "wasm32"))]
-        let mut zmq_port = 5555u16;
-        #[cfg(not(target_arch = "wasm32"))]
-        let mut zmq_timeout_ms = 250i32;
-        #[cfg(not(target_arch = "wasm32"))]
-        let mut clients_refresh_ms = 2_000u64;
-        let mut args = std::env::args().skip(1);
-        while let Some(arg) = args.next() {
-            match arg.as_str() {
-                "--log-dir" => {
-                    if let Some(value) = args.next() {
-                        log_dir = PathBuf::from(value);
-                    }
-                }
-                "--session" => {
-                    if let Some(value) = args.next() {
-                        session_path = PathBuf::from(value);
-                    }
-                }
-                #[cfg(not(target_arch = "wasm32"))]
-                "--zmq-host" => {
-                    if let Some(value) = args.next() {
-                        zmq_host = value;
-                    }
-                }
-                #[cfg(not(target_arch = "wasm32"))]
-                "--zmq-port" => {
-                    if let Some(value) = args.next() {
-                        if let Ok(port) = value.parse::<u16>() {
-                            zmq_port = port;
-                        }
-                    }
-                }
-                #[cfg(not(target_arch = "wasm32"))]
-                "--zmq-timeout-ms" => {
-                    if let Some(value) = args.next() {
-                        if let Ok(timeout_ms) = value.parse::<i32>() {
-                            zmq_timeout_ms = timeout_ms;
-                        }
-                    }
-                }
-                #[cfg(not(target_arch = "wasm32"))]
-                "--clients-refresh-ms" => {
-                    if let Some(value) = args.next() {
-                        if let Ok(refresh_ms) = value.parse::<u64>() {
-                            clients_refresh_ms = refresh_ms;
-                        }
-                    }
-                }
-                _ => {
-                    if !arg.starts_with("--") {
-                        session_path = PathBuf::from(arg);
-                    }
-                }
-            }
-        }
-        Self {
-            session_path,
-            log_dir,
-            #[cfg(not(target_arch = "wasm32"))]
-            zmq_host,
-            #[cfg(not(target_arch = "wasm32"))]
-            zmq_port,
-            #[cfg(not(target_arch = "wasm32"))]
-            zmq_timeout_ms,
-            #[cfg(not(target_arch = "wasm32"))]
-            clients_refresh_ms,
-        }
-    }
-
     #[cfg(target_arch = "wasm32")]
     fn web_default() -> Self {
         Self {
@@ -3054,5 +3002,45 @@ fn text_color_for(color: egui::Color32) -> egui::Color32 {
         egui::Color32::BLACK
     } else {
         egui::Color32::WHITE
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn viewer_cli_accepts_host_and_port_flags() {
+        let args = ViewerArgs::try_parse_from([
+            "viewer",
+            "--host",
+            "10.0.0.5",
+            "--port",
+            "6001",
+            "--zmq-timeout-ms",
+            "900",
+            "--clients-refresh-ms",
+            "3000",
+            "--log-dir",
+            "tmp/logs",
+            "custom-session.log",
+        ])
+        .expect("viewer args should parse");
+
+        assert_eq!(args.session_path, PathBuf::from("custom-session.log"));
+        assert_eq!(args.log_dir, PathBuf::from("tmp/logs"));
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            assert_eq!(args.zmq_host, "10.0.0.5");
+            assert_eq!(args.zmq_port, 6001);
+            assert_eq!(args.zmq_timeout_ms, 900);
+            assert_eq!(args.clients_refresh_ms, 3000);
+        }
+    }
+
+    #[test]
+    fn viewer_cli_reports_help_without_launching_ui() {
+        let err = ViewerArgs::try_parse_from(["viewer", "--help"]).expect_err("help should exit");
+        assert_eq!(err.kind(), clap::error::ErrorKind::DisplayHelp);
     }
 }
