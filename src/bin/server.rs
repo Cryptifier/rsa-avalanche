@@ -1,15 +1,15 @@
 use std::fs::File;
 use std::path::{Path, PathBuf};
 use std::sync::{
-    atomic::{AtomicBool, Ordering},
     Arc, Mutex,
+    atomic::{AtomicBool, Ordering},
 };
 use std::time::Duration;
 
 use clap::Parser;
 use rsademo::zmq_status::{
-    join_router, router_endpoint, stop_router, RouterServerBuilder, ZmqBindAddress,
-    ZmqStatusContext,
+    RouterServerBuilder, ZmqBindAddress, ZmqStatusContext, join_router, router_endpoint,
+    stop_router,
 };
 use serde::Serialize;
 use tiny_http::{Header, Method, Request, Response, Server, StatusCode};
@@ -98,6 +98,7 @@ fn run_server(args: ServerArgs) -> Result<(), Box<dyn std::error::Error + Send +
 
     println!("Viewer server running at http://{}/", args.addr);
     println!("ZMQ router listening at {}", router_endpoint_value);
+    println!("ZMQ router will query connected pollers every 10 seconds.");
 
     while !shutdown_requested.load(Ordering::Relaxed) {
         match http_server.recv_timeout(Duration::from_millis(args.http_poll_timeout_ms)) {
@@ -111,8 +112,12 @@ fn run_server(args: ServerArgs) -> Result<(), Box<dyn std::error::Error + Send +
     let _ = stop_router(&router_endpoint_value);
     let router_stats = join_router(router_handle)?;
     println!(
-        "ZMQ router stopped after {} pings and {} status queries.",
-        router_stats.pings, router_stats.status_queries
+        "ZMQ router stopped after {} pings, {} status queries, {} query requests, and {} query responses across {} known clients.",
+        router_stats.pings,
+        router_stats.status_queries,
+        router_stats.query_requests_sent,
+        router_stats.query_responses,
+        router_stats.known_clients
     );
     Ok(())
 }

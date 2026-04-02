@@ -1,10 +1,14 @@
+use std::collections::HashMap;
 use std::fmt;
 use std::sync::{
+    Arc, Mutex,
     atomic::{AtomicU64, Ordering},
-    mpsc, Arc, Mutex,
+    mpsc,
 };
 use std::thread;
+use std::time::{Duration, Instant};
 
+use serde::{Deserialize, Serialize};
 use zmq::{Context, Socket};
 
 static GLOBAL_STATUS: AtomicU64 = AtomicU64::new(0);
@@ -15,10 +19,13 @@ const DEFAULT_CLIENT_PORT: u16 = 5555;
 const DEFAULT_LINGER_MS: i32 = 0;
 const PING_MESSAGE: &str = "PING";
 const PONG_MESSAGE: &str = "PONG";
+const QUERY_MESSAGE: &str = "QUERY";
+const QUERY_RESPONSE_MESSAGE: &str = "QUERY_RESPONSE";
 const STATUS_MESSAGE: &str = "STATUS";
 const STOP_MESSAGE: &str = "STOP";
 const STOPPED_MESSAGE: &str = "STOPPED";
 const UNKNOWN_MESSAGE_REPLY: &str = "ERROR";
+const DEFAULT_QUERY_INTERVAL_SECS: u64 = 10;
 
 /// Shared context for reporting r-candidate generation status.
 #[derive(Debug, Clone, Default)]
@@ -49,11 +56,24 @@ pub struct ZmqConnectAddress {
     port: u16,
 }
 
+/// Resource snapshot returned by a poller in response to `QUERY`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct QueryResponsePayload {
+    /// Client identity used by the poller.
+    pub client_id: String,
+    /// Number of CPU cores available to the poller process.
+    pub cpu_cores: usize,
+    /// Available system memory in bytes observed by the poller.
+    pub available_memory_bytes: u64,
+}
+
 /// Structured command accepted by the ROUTER server.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RouterCommand {
     /// Increment the ping counter and reply with PONG.
     Ping,
+    /// Carry a JSON resource snapshot from a poller back to the router.
+    QueryResponse(QueryResponsePayload),
     /// Return the current status mirror as a decimal string.
     Status,
     /// Stop the router after replying.
@@ -67,6 +87,8 @@ pub enum RouterCommand {
 pub enum RouterReply {
     /// Successful reply for a ping request.
     Pong,
+    /// Query a connected poller for its resource snapshot.
+    Query,
     /// Current status value.
     Status(u64),
     /// Successful reply for a stop request.
@@ -80,6 +102,7 @@ pub enum RouterReply {
 pub struct RouterServerConfig {
     bind_address: ZmqBindAddress,
     linger_ms: i32,
+    query_interval: Duration,
     run_mode: RouterRunMode,
 }
 
@@ -88,6 +111,7 @@ pub struct RouterServerConfig {
 pub struct RouterServerBuilder {
     bind_address: ZmqBindAddress,
     linger_ms: i32,
+    query_interval: Duration,
     run_mode: RouterRunMode,
 }
 
@@ -121,12 +145,23 @@ pub struct PingClient {
 pub struct RouterStats {
     /// Number of PING messages processed.
     pub pings: usize,
+    /// Number of QUERY messages sent to connected pollers.
+    pub query_requests_sent: usize,
+    /// Number of QUERY_RESPONSE messages processed.
+    pub query_responses: usize,
     /// Number of STATUS messages processed.
     pub status_queries: usize,
     /// Final status value in the context.
     pub final_status: u64,
+    /// Number of known client identities seen by the router.
+    pub known_clients: usize,
     /// Whether the router stopped because it received a STOP message.
     pub stop_requested: bool,
+}
+
+#[derive(Debug, Clone)]
+struct KnownClient {
+    routing_id: Vec<u8>,
 }
 
 /// Handle to a background ROUTER thread.
@@ -216,6 +251,7 @@ impl Default for RouterServerBuilder {
         Self {
             bind_address: ZmqBindAddress::localhost_random_port(),
             linger_ms: DEFAULT_LINGER_MS,
+            query_interval: Duration::from_secs(DEFAULT_QUERY_INTERVAL_SECS),
             run_mode: RouterRunMode::UntilStopped,
         }
     }
@@ -311,6 +347,21 @@ impl RouterServerBuilder {
         self
     }
 
+    /// Sets the interval between server-initiated poller queries.
+    ///
+    /// # Parameters
+    /// - `query_interval`: Duration between `QUERY` broadcasts to known clients.
+    ///
+    /// # Returns
+    /// - `RouterServerBuilder`: Updated builder.
+    ///
+    /// # Expected Output
+    /// - Returns an updated builder; no side effects.
+    pub fn query_interval(mut self, query_interval: Duration) -> Self {
+        self.query_interval = query_interval;
+        self
+    }
+
     /// Configures the router to stop only after a STOP command.
     ///
     /// # Parameters
@@ -355,6 +406,7 @@ impl RouterServerBuilder {
         RouterServerConfig {
             bind_address: self.bind_address,
             linger_ms: self.linger_ms,
+            query_interval: self.query_interval,
             run_mode: self.run_mode,
         }
     }
@@ -678,20 +730,35 @@ impl RouterCommand {
     /// # Expected Output
     /// - Returns a command value; no side effects.
     pub fn from_payload(payload: &[u8]) -> Self {
-        match payload {
-            value if value == PING_MESSAGE.as_bytes() => Self::Ping,
-            value if value == STATUS_MESSAGE.as_bytes() => Self::Status,
-            value if value == STOP_MESSAGE.as_bytes() => Self::Stop,
-            value => Self::Unknown(String::from_utf8_lossy(value).into_owned()),
+        let text = String::from_utf8_lossy(payload);
+        match text.as_ref() {
+            PING_MESSAGE => Self::Ping,
+            STATUS_MESSAGE => Self::Status,
+            STOP_MESSAGE => Self::Stop,
+            _ => match text.strip_prefix(&format!("{QUERY_RESPONSE_MESSAGE} ")) {
+                Some(json) => match serde_json::from_str::<QueryResponsePayload>(json) {
+                    Ok(payload) => Self::QueryResponse(payload),
+                    Err(_) => Self::Unknown(text.into_owned()),
+                },
+                None => Self::Unknown(text.into_owned()),
+            },
         }
     }
 
     fn payload_text(&self) -> &str {
         match self {
             Self::Ping => PING_MESSAGE,
+            Self::QueryResponse(_) => QUERY_RESPONSE_MESSAGE,
             Self::Status => STATUS_MESSAGE,
             Self::Stop => STOP_MESSAGE,
             Self::Unknown(text) => text.as_str(),
+        }
+    }
+
+    fn payload_string(&self) -> String {
+        match self {
+            Self::QueryResponse(payload) => format_query_response_payload(payload),
+            _ => self.payload_text().to_string(),
         }
     }
 }
@@ -710,6 +777,7 @@ impl RouterReply {
     pub fn from_text(text: &str) -> Self {
         match text {
             PONG_MESSAGE => Self::Pong,
+            QUERY_MESSAGE => Self::Query,
             STOPPED_MESSAGE => Self::Stopped,
             UNKNOWN_MESSAGE_REPLY => Self::Error(UNKNOWN_MESSAGE_REPLY.to_string()),
             value => match value.parse::<u64>() {
@@ -722,6 +790,7 @@ impl RouterReply {
     fn payload_text(&self) -> String {
         match self {
             Self::Pong => PONG_MESSAGE.to_string(),
+            Self::Query => QUERY_MESSAGE.to_string(),
             Self::Status(value) => value.to_string(),
             Self::Stopped => STOPPED_MESSAGE.to_string(),
             Self::Error(message) => message.clone(),
@@ -731,7 +800,7 @@ impl RouterReply {
 
 impl fmt::Display for RouterCommand {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(self.payload_text())
+        f.write_str(&self.payload_string())
     }
 }
 
@@ -739,6 +808,7 @@ impl fmt::Display for RouterReply {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Pong => f.write_str(PONG_MESSAGE),
+            Self::Query => f.write_str(QUERY_MESSAGE),
             Self::Status(value) => write!(f, "{value}"),
             Self::Stopped => f.write_str(STOPPED_MESSAGE),
             Self::Error(message) => f.write_str(message),
@@ -1069,6 +1139,9 @@ where
         .set_linger(config.linger_ms)
         .map_err(|err| format!("router linger error: {err}"))?;
     socket
+        .set_rcvtimeo(router_poll_timeout_ms(config.query_interval))
+        .map_err(|err| format!("router receive timeout error: {err}"))?;
+    socket
         .bind(&config.bind_endpoint())
         .map_err(|err| format!("router bind error: {err}"))?;
     let endpoint = socket
@@ -1080,15 +1153,40 @@ where
         .map_err(|_| "router endpoint send failed".to_string())?;
 
     let mut count = 0usize;
+    let mut known_clients = HashMap::<String, KnownClient>::new();
+    let mut query_snapshots = HashMap::<String, QueryResponsePayload>::new();
+    let mut query_requests_sent = 0usize;
+    let mut query_responses = 0usize;
     let mut status_queries = 0usize;
     let mut stop_requested = false;
+    let mut next_query_at = Instant::now() + config.query_interval;
     loop {
-        let frames = socket
-            .recv_multipart(0)
-            .map_err(|err| format!("router recv error: {err}"))?;
+        let now = Instant::now();
+        if now >= next_query_at {
+            for client in known_clients.values() {
+                send_router_message_to_client(&socket, &client.routing_id, &RouterReply::Query)?;
+                query_requests_sent += 1;
+            }
+            next_query_at = now + config.query_interval;
+        }
+
+        let frames = match socket.recv_multipart(0) {
+            Ok(frames) => frames,
+            Err(zmq::Error::EAGAIN) => continue,
+            Err(err) => return Err(format!("router recv error: {err}")),
+        };
         if frames.is_empty() {
             continue;
         }
+
+        let routing_id = frames.first().cloned().unwrap_or_default();
+        let routing_key = String::from_utf8_lossy(&routing_id).into_owned();
+        known_clients.insert(
+            routing_key,
+            KnownClient {
+                routing_id: routing_id.clone(),
+            },
+        );
 
         let command = RouterCommand::from_payload(frames.last().unwrap());
         let reply = match command {
@@ -1100,26 +1198,39 @@ where
                     send_router_reply(&socket, &frames, &RouterReply::Pong)?;
                     break;
                 }
-                RouterReply::Pong
+                Some(RouterReply::Pong)
+            }
+            RouterCommand::QueryResponse(payload) => {
+                query_responses += 1;
+                query_snapshots.insert(payload.client_id.clone(), payload);
+                print_query_aggregation(&query_snapshots);
+                None
             }
             RouterCommand::Status => {
                 status_queries += 1;
-                RouterReply::Status(GLOBAL_STATUS.load(Ordering::Relaxed))
+                Some(RouterReply::Status(GLOBAL_STATUS.load(Ordering::Relaxed)))
             }
             RouterCommand::Stop => {
                 stop_requested = true;
                 send_router_reply(&socket, &frames, &RouterReply::Stopped)?;
                 break;
             }
-            RouterCommand::Unknown(_) => RouterReply::Error(UNKNOWN_MESSAGE_REPLY.to_string()),
+            RouterCommand::Unknown(_) => {
+                Some(RouterReply::Error(UNKNOWN_MESSAGE_REPLY.to_string()))
+            }
         };
-        send_router_reply(&socket, &frames, &reply)?;
+        if let Some(reply) = reply {
+            send_router_reply(&socket, &frames, &reply)?;
+        }
     }
 
     Ok(RouterStats {
         pings: count,
+        query_requests_sent,
+        query_responses,
         status_queries,
         final_status: GLOBAL_STATUS.load(Ordering::Relaxed),
+        known_clients: known_clients.len(),
         stop_requested,
     })
 }
@@ -1149,6 +1260,33 @@ fn send_router_reply(
             .send(frame, zmq::SNDMORE)
             .map_err(|err| format!("router send envelope error: {err}"))?;
     }
+    let payload = reply.payload_text();
+    socket
+        .send(payload.as_bytes(), 0)
+        .map_err(|err| format!("router send payload error: {err}"))?;
+    Ok(())
+}
+
+/// Sends a server-initiated message to a connected DEALER client.
+///
+/// # Parameters
+/// - `socket`: ROUTER socket to send from.
+/// - `routing_id`: Client routing identity frame.
+/// - `reply`: Typed reply payload to send.
+///
+/// # Returns
+/// - `Result<(), String>`: `Ok(())` on success or an error string.
+///
+/// # Expected Output
+/// - Sends a multipart message to one client; no stdout/stderr output.
+fn send_router_message_to_client(
+    socket: &Socket,
+    routing_id: &[u8],
+    reply: &RouterReply,
+) -> Result<(), String> {
+    socket
+        .send(routing_id, zmq::SNDMORE)
+        .map_err(|err| format!("router send identity error: {err}"))?;
     let payload = reply.payload_text();
     socket
         .send(payload.as_bytes(), 0)
@@ -1192,7 +1330,7 @@ fn send_router_request(
         .connect(&config.connect_endpoint())
         .map_err(|err| format!("req connect error: {err}"))?;
     socket
-        .send(command.payload_text(), 0)
+        .send(command.payload_string().as_bytes(), 0)
         .map_err(|err| format!("req send error: {err}"))?;
     let reply = socket
         .recv_msg(0)
@@ -1227,6 +1365,45 @@ fn parse_connect_address(endpoint: &str) -> Result<ZmqConnectAddress, String> {
         .parse::<u16>()
         .map_err(|err| format!("invalid endpoint port: {err}"))?;
     Ok(ZmqConnectAddress::new(host, port))
+}
+
+fn format_query_response_payload(payload: &QueryResponsePayload) -> String {
+    let json = serde_json::to_string(payload).unwrap_or_else(|_| {
+        "{\"client_id\":\"serialization-error\",\"cpu_cores\":0,\"available_memory_bytes\":0}"
+            .to_string()
+    });
+    format!("{QUERY_RESPONSE_MESSAGE} {json}")
+}
+
+fn router_poll_timeout_ms(query_interval: Duration) -> i32 {
+    let timeout_ms = query_interval.as_millis().clamp(1, 250) as i32;
+    timeout_ms
+}
+
+fn print_query_aggregation(query_snapshots: &HashMap<String, QueryResponsePayload>) {
+    let mut snapshots = query_snapshots.values().cloned().collect::<Vec<_>>();
+    snapshots.sort_by(|left, right| left.client_id.cmp(&right.client_id));
+
+    let total_cpu_cores = snapshots
+        .iter()
+        .map(|snapshot| snapshot.cpu_cores)
+        .sum::<usize>();
+    let total_available_memory = snapshots
+        .iter()
+        .map(|snapshot| snapshot.available_memory_bytes)
+        .sum::<u64>();
+
+    println!("Poller resource summary ({} clients):", snapshots.len());
+    for snapshot in snapshots {
+        println!(
+            "  {}: cpu_cores={}, available_memory_bytes={}",
+            snapshot.client_id, snapshot.cpu_cores, snapshot.available_memory_bytes
+        );
+    }
+    println!(
+        "  totals: cpu_cores={}, available_memory_bytes={}",
+        total_cpu_cores, total_available_memory
+    );
 }
 
 #[cfg(test)]
@@ -1295,11 +1472,22 @@ mod tests {
             RouterCommand::from_payload(b"STATUS"),
             RouterCommand::Status
         );
+        assert_eq!(RouterReply::from_text("QUERY"), RouterReply::Query);
         assert_eq!(RouterReply::from_text("PONG"), RouterReply::Pong);
         assert_eq!(RouterReply::from_text("42"), RouterReply::Status(42));
         assert_eq!(
             RouterReply::from_text("ERROR"),
             RouterReply::Error("ERROR".to_string())
+        );
+        assert_eq!(
+            RouterCommand::from_payload(
+                br#"QUERY_RESPONSE {"client_id":"poller-1","cpu_cores":8,"available_memory_bytes":1024}"#
+            ),
+            RouterCommand::QueryResponse(QueryResponsePayload {
+                client_id: "poller-1".to_string(),
+                cpu_cores: 8,
+                available_memory_bytes: 1024,
+            })
         );
     }
 

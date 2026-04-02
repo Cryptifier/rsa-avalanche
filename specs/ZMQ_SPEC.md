@@ -17,7 +17,8 @@ The ZMQ layer uses typed interfaces and builders instead of raw string-only setu
 ## Transport
 
 - Server socket type: `ROUTER`
-- Client socket type: `REQ`
+- Helper client socket type: `REQ`
+- Long-lived poller socket type: `DEALER`
 - Default builder bind template: `tcp://127.0.0.1:*`
 - Default client target: `tcp://127.0.0.1:5555`
 - Replies reuse the full incoming envelope and replace only the final body frame.
@@ -32,6 +33,19 @@ All request bodies are UTF-8 strings carried in the final message frame.
 - Effect: increments the router ping count
 - Effect: updates the status context to the current ping count
 - Effect: mirrors the updated value into the global atomic status
+
+### `QUERY`
+
+- Direction: router to connected poller
+- Reply: poller sends `QUERY_RESPONSE <json>`
+- Effect: requests a per-client resource snapshot from the target poller
+
+### `QUERY_RESPONSE`
+
+- Direction: poller to router
+- Body: JSON object with `client_id`, `cpu_cores`, and `available_memory_bytes`
+- Effect: updates the router's in-memory resource aggregation for that client
+- Effect: causes the server to print the aggregated snapshot to stdout
 
 ### `STATUS`
 
@@ -57,12 +71,14 @@ Two lifecycle modes are supported:
   - The router exits automatically after `expected_pings` successful `PING` requests.
 - Unbounded mode: `start_router_until_stopped_with_shared_context` and `start_router_until_stopped_with_mut_context`
   - The router runs until it receives `STOP`.
+- In both modes, the router sends `QUERY` to each known client at the configured interval.
 
 ## Status Semantics
 
 - `ZmqStatusContext::set_status(value)` stores `value` locally and in the process-wide global atomic mirror.
 - `PING` sets the status to the cumulative ping count seen by that router instance.
 - `STATUS` returns the current mirrored value.
+- `QUERY_RESPONSE` stores the latest resource snapshot for the reported `client_id`.
 - `ZmqStatusContext::reset_global_status()` clears the global mirror to `0`.
 
 ## Public Client Helpers
@@ -98,9 +114,9 @@ Typical REQ client builder usage:
   - Starts a concurrent ZMQ ROUTER server in the background.
   - Exposes CLI options for ZMQ host, port, linger, and optional expected ping count.
 - `src/bin/poller.rs`
-  - Creates a ZMQ REQ client from CLI options.
-  - Sends `PING` requests to the configured host/port.
-  - Prints requests and replies to stdout.
+  - Creates a long-lived ZMQ DEALER client from CLI options.
+  - Sends the configured `PING` sequence to the configured host/port.
+  - Remains active until `Ctrl-C`, answering server-initiated `QUERY` messages.
   - Can optionally query `STATUS` after each ping and send `STOP` at the end.
 
 ## RouterStats
@@ -108,6 +124,9 @@ Typical REQ client builder usage:
 `RouterStats` reports:
 
 - `pings`: number of processed `PING` commands
+- `query_requests_sent`: number of `QUERY` messages sent by the router
+- `query_responses`: number of processed `QUERY_RESPONSE` messages
 - `status_queries`: number of processed `STATUS` commands
 - `final_status`: last mirrored status observed before exit
+- `known_clients`: number of distinct client identities seen by the router
 - `stop_requested`: `true` when shutdown happened via `STOP`
