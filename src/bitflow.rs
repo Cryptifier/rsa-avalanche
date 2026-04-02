@@ -2,6 +2,8 @@ use rand::rngs::StdRng;
 use rand::seq::SliceRandom;
 use rand::SeedableRng;
 
+use crate::windows::WindowPartitionSet;
+
 /// Errors returned by the bitflow generator.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BitflowError {
@@ -191,10 +193,7 @@ impl BitflowEngine {
             if partitions.is_empty() {
                 continue;
             }
-            let flip_limit = self
-                .config
-                .max_partitions_to_flip
-                .min(partitions.len());
+            let flip_limit = self.config.max_partitions_to_flip.min(partitions.len());
             let pow_mod_value = mod_pow(
                 self.config.pow_mod_base,
                 (iteration as u64).saturating_add(1),
@@ -203,12 +202,12 @@ impl BitflowEngine {
             for trial in 0..self.config.per_candidate_trials {
                 let mut indices: Vec<usize> = (0..partitions.len()).collect();
                 indices.shuffle(&mut self.rng);
-                let flip_count =
-                    1 + ((pow_mod_value + trial as u64) % flip_limit as u64) as usize;
+                let flip_count = 1 + ((pow_mod_value + trial as u64) % flip_limit as u64) as usize;
                 let mut inverted_partitions: Vec<usize> =
                     indices.into_iter().take(flip_count).collect();
                 inverted_partitions.sort_unstable();
-                let bits = apply_partition_inversions(message_bits, &partitions, &inverted_partitions);
+                let bits =
+                    apply_partition_inversions(message_bits, &partitions, &inverted_partitions);
                 candidates.push(BitflowCandidate {
                     iteration,
                     trial,
@@ -291,11 +290,7 @@ fn validate_progression(
             }
         }
         PartitionProgression::Sequence { sizes } => {
-            if sizes.is_empty()
-                || sizes
-                    .iter()
-                    .any(|size| *size == 0 || *size > bit_width)
-            {
+            if sizes.is_empty() || sizes.iter().any(|size| *size == 0 || *size > bit_width) {
                 return Err(BitflowError::InvalidPartitionRange);
             }
         }
@@ -326,7 +321,9 @@ fn partition_size_for_iteration(
 ) -> Result<usize, BitflowError> {
     let raw_size = match progression {
         PartitionProgression::Fixed { size } => *size,
-        PartitionProgression::Linear { start, step } => start.saturating_add(step.saturating_mul(iteration)),
+        PartitionProgression::Linear { start, step } => {
+            start.saturating_add(step.saturating_mul(iteration))
+        }
         PartitionProgression::Geometric { start, factor } => {
             let mut size = *start;
             for _ in 0..iteration {
@@ -355,14 +352,20 @@ fn partition_size_for_iteration(
 /// # Expected Output
 /// - Returns partitions; no stdout/stderr output.
 fn build_partitions(bit_width: usize, partition_size: usize) -> Vec<BitPartition> {
-    let mut partitions = Vec::new();
-    let mut start = 0usize;
-    while start < bit_width {
-        let end = (start + partition_size).min(bit_width);
-        partitions.push(BitPartition { start, end });
-        start = end;
-    }
-    partitions
+    WindowPartitionSet::build(bit_width)
+        .min_width(partition_size)
+        .max_width(partition_size)
+        .disallow_overlap()
+        .contiguous()
+        .generate()
+        .expect("validated bitflow partition size should produce contiguous windows")
+        .partitions()
+        .iter()
+        .map(|partition| BitPartition {
+            start: partition.index(),
+            end: partition.end_exclusive(),
+        })
+        .collect()
 }
 
 /// Applies partition-level inversions to a bit vector.
@@ -473,16 +476,18 @@ mod tests {
         let mut engine = BitflowEngine::new(config).expect("valid config");
         let message = bits_from_str("11001100");
         let candidates = engine.generate_candidates(&message).expect("candidates");
-        let candidate_bits: Vec<String> =
-            candidates.iter().map(|cand| bits_to_string(&cand.bits)).collect();
-        let expected = vec![
-            "11110000",
-            "00001100",
-            "11001111",
-            "00101111",
-        ];
+        let candidate_bits: Vec<String> = candidates
+            .iter()
+            .map(|cand| bits_to_string(&cand.bits))
+            .collect();
+        let expected = vec!["11110000", "00001100", "11001111", "00101111"];
         assert_eq!(candidate_bits, expected);
-        let avalanche_bits = avalanche_reduce(&candidates.iter().map(|c| c.bits.clone()).collect::<Vec<_>>());
+        let avalanche_bits = avalanche_reduce(
+            &candidates
+                .iter()
+                .map(|c| c.bits.clone())
+                .collect::<Vec<_>>(),
+        );
         assert_eq!(bits_to_string(&avalanche_bits), "00000000");
     }
 
@@ -492,7 +497,10 @@ mod tests {
             bit_width: 10,
             min_partition_size: 2,
             max_partition_size: 5,
-            progression: PartitionProgression::Geometric { start: 2, factor: 2 },
+            progression: PartitionProgression::Geometric {
+                start: 2,
+                factor: 2,
+            },
             max_iterations: 2,
             max_partitions_to_flip: 2,
             per_candidate_trials: 2,
@@ -503,16 +511,18 @@ mod tests {
         let mut engine = BitflowEngine::new(config).expect("valid config");
         let message = bits_from_str("1010101010");
         let candidates = engine.generate_candidates(&message).expect("candidates");
-        let candidate_bits: Vec<String> =
-            candidates.iter().map(|cand| bits_to_string(&cand.bits)).collect();
-        let expected = vec![
-            "0110011010",
-            "0110101010",
-            "0101010110",
-            "1010010110",
-        ];
+        let candidate_bits: Vec<String> = candidates
+            .iter()
+            .map(|cand| bits_to_string(&cand.bits))
+            .collect();
+        let expected = vec!["0110011010", "0110101010", "0101010110", "1010010110"];
         assert_eq!(candidate_bits, expected);
-        let avalanche_bits = avalanche_reduce(&candidates.iter().map(|c| c.bits.clone()).collect::<Vec<_>>());
+        let avalanche_bits = avalanche_reduce(
+            &candidates
+                .iter()
+                .map(|c| c.bits.clone())
+                .collect::<Vec<_>>(),
+        );
         assert_eq!(bits_to_string(&avalanche_bits), "0000000010");
     }
 
@@ -522,7 +532,9 @@ mod tests {
             bit_width: 9,
             min_partition_size: 2,
             max_partition_size: 4,
-            progression: PartitionProgression::Sequence { sizes: vec![2, 3, 4] },
+            progression: PartitionProgression::Sequence {
+                sizes: vec![2, 3, 4],
+            },
             max_iterations: 3,
             max_partitions_to_flip: 2,
             per_candidate_trials: 1,
@@ -533,15 +545,18 @@ mod tests {
         let mut engine = BitflowEngine::new(config).expect("valid config");
         let message = bits_from_str("111000111");
         let candidates = engine.generate_candidates(&message).expect("candidates");
-        let candidate_bits: Vec<String> =
-            candidates.iter().map(|cand| bits_to_string(&cand.bits)).collect();
-        let expected = vec![
-            "111011110",
-            "000000111",
-            "111011000",
-        ];
+        let candidate_bits: Vec<String> = candidates
+            .iter()
+            .map(|cand| bits_to_string(&cand.bits))
+            .collect();
+        let expected = vec!["111011110", "000000111", "111011000"];
         assert_eq!(candidate_bits, expected);
-        let avalanche_bits = avalanche_reduce(&candidates.iter().map(|c| c.bits.clone()).collect::<Vec<_>>());
+        let avalanche_bits = avalanche_reduce(
+            &candidates
+                .iter()
+                .map(|c| c.bits.clone())
+                .collect::<Vec<_>>(),
+        );
         assert_eq!(bits_to_string(&avalanche_bits), "000000000");
     }
 
@@ -568,7 +583,12 @@ mod tests {
             .collect();
         let expected = vec![3, 1, 1, 2, 3, 1];
         assert_eq!(flip_counts, expected);
-        let avalanche_bits = avalanche_reduce(&candidates.iter().map(|c| c.bits.clone()).collect::<Vec<_>>());
+        let avalanche_bits = avalanche_reduce(
+            &candidates
+                .iter()
+                .map(|c| c.bits.clone())
+                .collect::<Vec<_>>(),
+        );
         assert_eq!(bits_to_string(&avalanche_bits), "000000000000");
     }
 
@@ -591,7 +611,12 @@ mod tests {
         let message = bits_from_str("1111000000001111");
         let baseline_accuracy = accuracy_pct(&message, &target);
         let candidates = engine.generate_candidates(&message).expect("candidates");
-        let avalanche_bits = avalanche_reduce(&candidates.iter().map(|c| c.bits.clone()).collect::<Vec<_>>());
+        let avalanche_bits = avalanche_reduce(
+            &candidates
+                .iter()
+                .map(|c| c.bits.clone())
+                .collect::<Vec<_>>(),
+        );
         let avalanche_accuracy = accuracy_pct(&avalanche_bits, &target);
         let best_accuracy = candidates
             .iter()
@@ -620,7 +645,12 @@ mod tests {
         let message = bits_from_str("1100110011");
         let candidates = engine.generate_candidates(&message).expect("candidates");
         assert_eq!(candidates.len(), 8);
-        let avalanche_bits = avalanche_reduce(&candidates.iter().map(|c| c.bits.clone()).collect::<Vec<_>>());
+        let avalanche_bits = avalanche_reduce(
+            &candidates
+                .iter()
+                .map(|c| c.bits.clone())
+                .collect::<Vec<_>>(),
+        );
         assert_eq!(avalanche_bits.len(), 10);
     }
 
@@ -644,8 +674,43 @@ mod tests {
         let candidates_a = engine_a.generate_candidates(&message).expect("candidates");
         let candidates_b = engine_b.generate_candidates(&message).expect("candidates");
         assert_eq!(candidates_a, candidates_b);
-        let avalanche_bits = avalanche_reduce(&candidates_a.iter().map(|c| c.bits.clone()).collect::<Vec<_>>());
+        let avalanche_bits = avalanche_reduce(
+            &candidates_a
+                .iter()
+                .map(|c| c.bits.clone())
+                .collect::<Vec<_>>(),
+        );
         assert_eq!(bits_to_string(&avalanche_bits), "00000000");
+    }
+
+    #[test]
+    fn test_bitflow_partitions_for_iteration_match_contiguous_window_layout() {
+        let config = BitflowConfig {
+            bit_width: 10,
+            min_partition_size: 4,
+            max_partition_size: 4,
+            progression: PartitionProgression::Fixed { size: 4 },
+            max_iterations: 1,
+            max_partitions_to_flip: 2,
+            per_candidate_trials: 1,
+            seed: 43,
+            pow_mod_base: 3,
+            pow_mod_modulus: 7,
+        };
+        let engine = BitflowEngine::new(config).expect("valid config");
+
+        let partitions = engine
+            .partitions_for_iteration(0)
+            .expect("partitions should build");
+
+        assert_eq!(
+            partitions,
+            vec![
+                BitPartition { start: 0, end: 4 },
+                BitPartition { start: 4, end: 8 },
+                BitPartition { start: 8, end: 10 },
+            ]
+        );
     }
 
     #[test]
@@ -666,15 +731,18 @@ mod tests {
         let target = bits_from_str("000000000000");
         let message = bits_from_str("111111111111");
         let candidates = engine.generate_candidates(&message).expect("candidates");
-        let avalanche_bits = avalanche_reduce(&candidates.iter().map(|c| c.bits.clone()).collect::<Vec<_>>());
+        let avalanche_bits = avalanche_reduce(
+            &candidates
+                .iter()
+                .map(|c| c.bits.clone())
+                .collect::<Vec<_>>(),
+        );
         let avalanche_accuracy = accuracy_pct(&avalanche_bits, &target);
         let best_accuracy = candidates
             .iter()
             .map(|cand| accuracy_pct(&cand.bits, &target))
             .fold(0.0_f64, f64::max);
-        let candidate_matches_target = candidates
-            .iter()
-            .any(|cand| cand.bits == target);
+        let candidate_matches_target = candidates.iter().any(|cand| cand.bits == target);
         assert!(best_accuracy >= 100.0);
         assert!(candidate_matches_target);
         assert!(avalanche_accuracy >= 100.0);
