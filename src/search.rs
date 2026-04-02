@@ -398,7 +398,7 @@ fn select_top_k(candidates: &mut Vec<ScoredCandidate>, k: usize) {
 
 #[cfg(test)]
 mod tests {
-    use super::{beam_search, viterbi_decode, BeamSearchError, ViterbiError};
+    use super::{BeamSearchError, ViterbiError, beam_search, viterbi_decode};
 
     #[test]
     fn beam_search_finds_best_candidate() {

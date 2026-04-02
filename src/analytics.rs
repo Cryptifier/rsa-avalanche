@@ -5,7 +5,7 @@ use num_bigint::BigUint;
 use serde::Serialize;
 use serde_json::{Map, Value};
 
-use crate::r_candidates::{generate_r_candidates_batch, RCandidateMode, RCandidateSettings};
+use crate::r_candidates::{RCandidateMode, RCandidateSettings, generate_r_candidates_batch};
 use crate::rng::RngChoice;
 
 /// CLI metadata captured for analytics sessions.

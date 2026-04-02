@@ -20,13 +20,13 @@ use serde_json::{Map, Value};
 #[cfg(target_arch = "wasm32")]
 use js_sys::encode_uri_component;
 #[cfg(target_arch = "wasm32")]
-use wasm_bindgen::prelude::*;
-#[cfg(target_arch = "wasm32")]
 use wasm_bindgen::JsCast;
 #[cfg(target_arch = "wasm32")]
-use wasm_bindgen_futures::{spawn_local, JsFuture};
+use wasm_bindgen::prelude::*;
 #[cfg(target_arch = "wasm32")]
-use web_sys::{window, Response};
+use wasm_bindgen_futures::{JsFuture, spawn_local};
+#[cfg(target_arch = "wasm32")]
+use web_sys::{Response, window};
 
 /// Entry point for the egui-based session viewer.
 #[cfg(not(target_arch = "wasm32"))]
@@ -302,24 +302,24 @@ impl ViewerApp {
         }
         #[cfg(not(target_arch = "wasm32"))]
         {
-        if now.duration_since(self.last_scan) > Duration::from_secs(2) {
-            self.refresh_logs(false);
-            self.last_scan = now;
-        }
-        if now.duration_since(self.last_poll) < Duration::from_millis(400) {
-            return;
-        }
-        self.last_poll = now;
-        if !self.ndjson_mode {
-            return;
-        }
-        let Some(path) = self.selected_log.clone() else {
-            return;
-        };
-        let updated = self.ingest_tail(&path);
-        if updated {
-            self.status = format!("Updated {}", path);
-        }
+            if now.duration_since(self.last_scan) > Duration::from_secs(2) {
+                self.refresh_logs(false);
+                self.last_scan = now;
+            }
+            if now.duration_since(self.last_poll) < Duration::from_millis(400) {
+                return;
+            }
+            self.last_poll = now;
+            if !self.ndjson_mode {
+                return;
+            }
+            let Some(path) = self.selected_log.clone() else {
+                return;
+            };
+            let updated = self.ingest_tail(&path);
+            if updated {
+                self.status = format!("Updated {}", path);
+            }
         }
     }
 
@@ -444,8 +444,7 @@ impl ViewerApp {
                         });
                         pending.log_entries = Some(entries.clone());
                         if select_default && current.is_none() {
-                            pending.select_log =
-                                entries.first().map(|entry| entry.name.clone());
+                            pending.select_log = entries.first().map(|entry| entry.name.clone());
                         } else if let Some(current) = current {
                             if !entries.iter().any(|entry| entry.name == current) {
                                 pending.select_log =
@@ -509,7 +508,10 @@ impl ViewerApp {
                 }
                 rows.push(("Bits", self.session.cli.bits.to_string()));
                 rows.push(("Config", self.session.cli.config_path.clone()));
-                rows.push(("Seed", opt_to_string(self.session.cli.seed.map(|v| v as u128))));
+                rows.push((
+                    "Seed",
+                    opt_to_string(self.session.cli.seed.map(|v| v as u128)),
+                ));
                 rows.push(("Crypto RNG", self.session.cli.crypto_rng.to_string()));
                 rows.push(("Tests", self.session.cli.tests.to_string()));
                 rows.push(("Export", self.session.cli.export.to_string()));
@@ -576,7 +578,9 @@ impl ViewerApp {
                                         ui.label(feature.enabled.to_string());
                                     });
                                     row.col(|ui| {
-                                        ui.label(opt_to_string(feature.duration_ms.map(|v| v as u128)));
+                                        ui.label(opt_to_string(
+                                            feature.duration_ms.map(|v| v as u128),
+                                        ));
                                     });
                                     row.col(|ui| {
                                         ui.label(feature.notes.join("; "));
@@ -605,7 +609,7 @@ impl ViewerApp {
             }
             ui.set_style(style);
             ui.push_id("candidates_table", |ui| {
-            TableBuilder::new(ui)
+                TableBuilder::new(ui)
                     .striped(true)
                     .column(Column::initial(200.0).resizable(true))
                     .column(Column::initial(110.0).resizable(true))
@@ -691,7 +695,10 @@ impl ViewerApp {
                 }
             }
             rows.push(BeamRow {
-                batch: batch.context.clone().unwrap_or_else(|| format!("batch_{}", idx + 1)),
+                batch: batch
+                    .context
+                    .clone()
+                    .unwrap_or_else(|| format!("batch_{}", idx + 1)),
                 beam_match: batch.beam_match_pct,
                 beam_ones: batch.beam_ones_match_pct,
                 beam_score: batch.beam_score,
@@ -744,30 +751,70 @@ impl ViewerApp {
                 .columns(Column::auto(), 10)
                 .striped(true)
                 .header(20.0, |mut header| {
-                    header.col(|ui| { ui.label("Batch"); });
-                    header.col(|ui| { ui.label("Beam Match %"); });
-                    header.col(|ui| { ui.label("Beam Ones %"); });
-                    header.col(|ui| { ui.label("Beam Score"); });
-                    header.col(|ui| { ui.label("Beam Bits"); });
-                    header.col(|ui| { ui.label("R Mean %"); });
-                    header.col(|ui| { ui.label("R Max %"); });
-                    header.col(|ui| { ui.label("R Min %"); });
-                    header.col(|ui| { ui.label("R Stddev"); });
-                    header.col(|ui| { ui.label("Candidates"); });
+                    header.col(|ui| {
+                        ui.label("Batch");
+                    });
+                    header.col(|ui| {
+                        ui.label("Beam Match %");
+                    });
+                    header.col(|ui| {
+                        ui.label("Beam Ones %");
+                    });
+                    header.col(|ui| {
+                        ui.label("Beam Score");
+                    });
+                    header.col(|ui| {
+                        ui.label("Beam Bits");
+                    });
+                    header.col(|ui| {
+                        ui.label("R Mean %");
+                    });
+                    header.col(|ui| {
+                        ui.label("R Max %");
+                    });
+                    header.col(|ui| {
+                        ui.label("R Min %");
+                    });
+                    header.col(|ui| {
+                        ui.label("R Stddev");
+                    });
+                    header.col(|ui| {
+                        ui.label("Candidates");
+                    });
                 })
                 .body(|mut body| {
                     for row in rows {
                         body.row(20.0, |mut row_ui| {
-                            row_ui.col(|ui| { ui.label(row.batch); });
-                            row_ui.col(|ui| { ui.label(format_opt_f64(row.beam_match)); });
-                            row_ui.col(|ui| { ui.label(format_opt_f64(row.beam_ones)); });
-                            row_ui.col(|ui| { ui.label(format_opt_f64(row.beam_score)); });
-                            row_ui.col(|ui| { ui.label(opt_to_string(row.beam_bits.map(|v| v as u128))); });
-                            row_ui.col(|ui| { ui.label(format_opt_f64(row.r_mean)); });
-                            row_ui.col(|ui| { ui.label(format_opt_f64(row.r_max)); });
-                            row_ui.col(|ui| { ui.label(format_opt_f64(row.r_min)); });
-                            row_ui.col(|ui| { ui.label(format_opt_f64(row.r_stddev)); });
-                            row_ui.col(|ui| { ui.label(row.candidate_count.to_string()); });
+                            row_ui.col(|ui| {
+                                ui.label(row.batch);
+                            });
+                            row_ui.col(|ui| {
+                                ui.label(format_opt_f64(row.beam_match));
+                            });
+                            row_ui.col(|ui| {
+                                ui.label(format_opt_f64(row.beam_ones));
+                            });
+                            row_ui.col(|ui| {
+                                ui.label(format_opt_f64(row.beam_score));
+                            });
+                            row_ui.col(|ui| {
+                                ui.label(opt_to_string(row.beam_bits.map(|v| v as u128)));
+                            });
+                            row_ui.col(|ui| {
+                                ui.label(format_opt_f64(row.r_mean));
+                            });
+                            row_ui.col(|ui| {
+                                ui.label(format_opt_f64(row.r_max));
+                            });
+                            row_ui.col(|ui| {
+                                ui.label(format_opt_f64(row.r_min));
+                            });
+                            row_ui.col(|ui| {
+                                ui.label(format_opt_f64(row.r_stddev));
+                            });
+                            row_ui.col(|ui| {
+                                ui.label(row.candidate_count.to_string());
+                            });
                         });
                     }
                 });
@@ -800,11 +847,7 @@ impl ViewerApp {
                 .selected_text(self.bit_similarity_sort.label())
                 .show_ui(ui, |ui| {
                     for option in BitSimilaritySort::all() {
-                        ui.selectable_value(
-                            &mut self.bit_similarity_sort,
-                            option,
-                            option.label(),
-                        );
+                        ui.selectable_value(&mut self.bit_similarity_sort, option, option.label());
                     }
                 });
             ui.checkbox(&mut self.bit_similarity_show_all, "Show all rows");
@@ -842,8 +885,7 @@ impl ViewerApp {
             ui.label("Rows:");
             ui.add_enabled(
                 !self.bit_similarity_show_all,
-                egui::DragValue::new(&mut self.bit_similarity_rows)
-                    .clamp_range(1..=total),
+                egui::DragValue::new(&mut self.bit_similarity_rows).clamp_range(1..=total),
             );
             ui.add_space(12.0);
             ui.label(format!(
@@ -875,13 +917,12 @@ impl ViewerApp {
             .max()
             .unwrap_or(0);
         let original_bits = hex_to_bits_le(&data.original_hex, data.bit_width);
-        let match_counts = if data.match_counts.len() == data.bit_width
-            && !self.bit_similarity_hide_shifted
-        {
-            data.match_counts.clone()
-        } else {
-            build_match_counts(&data.entries, &original_bits, data.bit_width)
-        };
+        let match_counts =
+            if data.match_counts.len() == data.bit_width && !self.bit_similarity_hide_shifted {
+                data.match_counts.clone()
+            } else {
+                build_match_counts(&data.entries, &original_bits, data.bit_width)
+            };
 
         ui.add_space(8.0);
         let palette = bit_similarity_palette(ui);
@@ -935,7 +976,10 @@ impl ViewerApp {
         ui.add_space(8.0);
         ui.horizontal(|ui| {
             ui.label("Selected bit:");
-            ui.add(egui::Slider::new(&mut self.bit_true_bit_idx, 0..=bit_width - 1));
+            ui.add(egui::Slider::new(
+                &mut self.bit_true_bit_idx,
+                0..=bit_width - 1,
+            ));
         });
         let mut points = Vec::new();
         for (idx, frame) in frames.iter().enumerate() {
@@ -972,12 +1016,20 @@ impl ViewerApp {
         let biases = map
             .get("biases")
             .and_then(|v| v.as_array())
-            .map(|list| list.iter().map(|v| value_as_f64(Some(v))).collect::<Vec<_>>())
+            .map(|list| {
+                list.iter()
+                    .map(|v| value_as_f64(Some(v)))
+                    .collect::<Vec<_>>()
+            })
             .unwrap_or_default();
         let message_bits = map
             .get("message_bits")
             .and_then(|v| v.as_array())
-            .map(|list| list.iter().map(|v| value_as_u64(Some(v)) as u8).collect::<Vec<_>>())
+            .map(|list| {
+                list.iter()
+                    .map(|v| value_as_u64(Some(v)) as u8)
+                    .collect::<Vec<_>>()
+            })
             .unwrap_or_default();
         ui.label(format!("Bit width: {}", bit_width));
         ui.label(format!("Unique messages: {}", unique_messages));
@@ -1044,22 +1096,44 @@ impl ViewerApp {
                 .columns(Column::auto(), 7)
                 .striped(true)
                 .header(20.0, |mut header| {
-                    header.col(|ui| { ui.label("Run"); });
-                    header.col(|ui| { ui.label("Iter"); });
-                    header.col(|ui| { ui.label("Trial"); });
-                    header.col(|ui| { ui.label("Partition"); });
-                    header.col(|ui| { ui.label("Inverted"); });
-                    header.col(|ui| { ui.label("Ones %"); });
-                    header.col(|ui| { ui.label("Bits"); });
+                    header.col(|ui| {
+                        ui.label("Run");
+                    });
+                    header.col(|ui| {
+                        ui.label("Iter");
+                    });
+                    header.col(|ui| {
+                        ui.label("Trial");
+                    });
+                    header.col(|ui| {
+                        ui.label("Partition");
+                    });
+                    header.col(|ui| {
+                        ui.label("Inverted");
+                    });
+                    header.col(|ui| {
+                        ui.label("Ones %");
+                    });
+                    header.col(|ui| {
+                        ui.label("Bits");
+                    });
                 })
                 .body(|mut body| {
                     for candidate in filtered_candidates {
                         let ones_pct = bits_ones_pct(&candidate.bits);
                         body.row(20.0, |mut row| {
-                            row.col(|ui| { ui.label(candidate.run_id); });
-                            row.col(|ui| { ui.label(candidate.iteration.to_string()); });
-                            row.col(|ui| { ui.label(candidate.trial.to_string()); });
-                            row.col(|ui| { ui.label(candidate.partition_size.to_string()); });
+                            row.col(|ui| {
+                                ui.label(candidate.run_id);
+                            });
+                            row.col(|ui| {
+                                ui.label(candidate.iteration.to_string());
+                            });
+                            row.col(|ui| {
+                                ui.label(candidate.trial.to_string());
+                            });
+                            row.col(|ui| {
+                                ui.label(candidate.partition_size.to_string());
+                            });
                             row.col(|ui| {
                                 ui.label(
                                     candidate
@@ -1073,7 +1147,9 @@ impl ViewerApp {
                             row.col(|ui| {
                                 ui.label(format!("{ones_pct:.1}"));
                             });
-                            row.col(|ui| { ui.label(bits_preview(&candidate.bits, 96)); });
+                            row.col(|ui| {
+                                ui.label(bits_preview(&candidate.bits, 96));
+                            });
                         });
                     }
                 });
@@ -1121,21 +1197,21 @@ impl eframe::App for ViewerApp {
                 egui::ScrollArea::vertical()
                     .id_source("log_list_scroll")
                     .show(ui, |ui| {
-                    for entry in &self.log_entries {
-                        let label = log_label(entry);
-                        let selected = self
-                            .selected_log
-                            .as_ref()
-                            .map(|name| name == &entry.name)
-                            .unwrap_or(false);
-                        let response = ui.selectable_label(selected, label);
-                        let clicked = response.clicked();
-                        let _response = response.on_hover_text(format!("{} bytes", entry.size));
-                        if clicked {
-                            selected_log = Some(entry.name.clone());
+                        for entry in &self.log_entries {
+                            let label = log_label(entry);
+                            let selected = self
+                                .selected_log
+                                .as_ref()
+                                .map(|name| name == &entry.name)
+                                .unwrap_or(false);
+                            let response = ui.selectable_label(selected, label);
+                            let clicked = response.clicked();
+                            let _response = response.on_hover_text(format!("{} bytes", entry.size));
+                            if clicked {
+                                selected_log = Some(entry.name.clone());
+                            }
                         }
-                    }
-                });
+                    });
             });
         if let Some(name) = selected_log {
             let _ = self.load_session(&name);
@@ -1694,7 +1770,9 @@ fn normalize_session(map: &Map<String, Value>) -> Session {
     if let Some(batches) = map.get("r_candidate_batches").and_then(|v| v.as_array()) {
         for batch in batches {
             if let Some(batch) = batch.as_object() {
-                session.r_candidate_batches.push(parse_r_candidate_batch(batch));
+                session
+                    .r_candidate_batches
+                    .push(parse_r_candidate_batch(batch));
             }
         }
     }
@@ -1710,10 +1788,7 @@ fn normalize_session(map: &Map<String, Value>) -> Session {
             }
         }
     }
-    if let Some(batches) = map
-        .get("r_candidate_traces")
-        .and_then(|v| v.as_array())
-    {
+    if let Some(batches) = map.get("r_candidate_traces").and_then(|v| v.as_array()) {
         for batch in batches {
             if let Some(batch) = batch.as_object() {
                 session
@@ -1979,7 +2054,13 @@ fn value_as_u64(value: Option<&Value>) -> u64 {
     match value {
         Some(Value::Number(num)) => num.as_u64().unwrap_or(0),
         Some(Value::String(val)) => val.parse::<u64>().unwrap_or(0),
-        Some(Value::Bool(val)) => if *val { 1 } else { 0 },
+        Some(Value::Bool(val)) => {
+            if *val {
+                1
+            } else {
+                0
+            }
+        }
         _ => 0,
     }
 }
@@ -1992,7 +2073,13 @@ fn value_as_u128(value: Option<&Value>) -> u128 {
     match value {
         Some(Value::Number(num)) => num.as_u64().unwrap_or(0) as u128,
         Some(Value::String(val)) => val.parse::<u128>().unwrap_or(0),
-        Some(Value::Bool(val)) => if *val { 1 } else { 0 },
+        Some(Value::Bool(val)) => {
+            if *val {
+                1
+            } else {
+                0
+            }
+        }
         _ => 0,
     }
 }
@@ -2017,7 +2104,13 @@ fn value_as_f64(value: Option<&Value>) -> f64 {
     match value {
         Some(Value::Number(num)) => num.as_f64().unwrap_or(0.0),
         Some(Value::String(val)) => val.parse::<f64>().unwrap_or(0.0),
-        Some(Value::Bool(val)) => if *val { 1.0 } else { 0.0 },
+        Some(Value::Bool(val)) => {
+            if *val {
+                1.0
+            } else {
+                0.0
+            }
+        }
         _ => 0.0,
     }
 }
@@ -2294,10 +2387,7 @@ fn build_match_counts(
             if cand_idx >= bit_width {
                 continue;
             }
-            if candidate_bits
-                .get(cand_idx)
-                .copied()
-                .unwrap_or(false)
+            if candidate_bits.get(cand_idx).copied().unwrap_or(false)
                 == original_bits.get(bit_idx).copied().unwrap_or(false)
             {
                 counts[bit_idx] += 1;
@@ -2328,23 +2418,21 @@ fn draw_bit_similarity_canvas(
     let box_offset = 0.0;
     let label_width = 320.0;
 
-    let content_width =
-        margin * 2.0
-            + label_width
-            + (bit_width + max_shift) as f32 * (bit_size + bit_spacing)
-            + label_width;
+    let content_width = margin * 2.0
+        + label_width
+        + (bit_width + max_shift) as f32 * (bit_size + bit_spacing)
+        + label_width;
     let mut content_height = margin * 2.0;
     for row in rows {
-        content_height +=
-            row_height_for(
-                row,
-                bit_size,
-                row_gap,
-                header_height,
-                header_gap,
-                row_padding,
-                box_offset,
-            );
+        content_height += row_height_for(
+            row,
+            bit_size,
+            row_gap,
+            header_height,
+            header_gap,
+            row_padding,
+            box_offset,
+        );
         content_height += row_spacing;
     }
     if !rows.is_empty() {
@@ -2355,8 +2443,10 @@ fn draw_bit_similarity_canvas(
         .id_source("bit_similarity_canvas")
         .auto_shrink([false, false])
         .show(ui, |ui| {
-            let (rect, _) =
-                ui.allocate_exact_size(egui::vec2(content_width, content_height), egui::Sense::hover());
+            let (rect, _) = ui.allocate_exact_size(
+                egui::vec2(content_width, content_height),
+                egui::Sense::hover(),
+            );
             let painter = ui.painter_at(rect);
             let mut y = rect.min.y + margin;
             for row in rows {
@@ -2463,10 +2553,8 @@ fn draw_bit_similarity_row(
             lighten_color(base_color, 0.45)
         };
         let x = boxes_start + bit_idx as f32 * (bit_size + bit_spacing);
-        let rect = egui::Rect::from_min_size(
-            egui::pos2(x, boxes_top),
-            egui::vec2(bit_size, bit_size),
-        );
+        let rect =
+            egui::Rect::from_min_size(egui::pos2(x, boxes_top), egui::vec2(bit_size, bit_size));
         painter.rect_filled(rect, 0.0, color);
         painter.rect_stroke(rect, 0.0, palette.stroke);
         let text_color = text_color_for(color);
@@ -2482,7 +2570,11 @@ fn draw_bit_similarity_row(
     let mut prev_bits: Option<Vec<bool>> = None;
     for (entry_idx, entry) in row.entries.iter().enumerate() {
         let shift = entry.shift;
-        let masked_bits = if entry.masked_bits == 0 { shift } else { entry.masked_bits };
+        let masked_bits = if entry.masked_bits == 0 {
+            shift
+        } else {
+            entry.masked_bits
+        };
         let mut label = if shift == 0 {
             "Candidate".to_string()
         } else {
@@ -2517,14 +2609,10 @@ fn draw_bit_similarity_row(
             } else {
                 false
             };
-            let matches_original = !masked
-                && cand_bit == original_bits.get(bit_idx).copied().unwrap_or(false);
+            let matches_original =
+                !masked && cand_bit == original_bits.get(bit_idx).copied().unwrap_or(false);
             let matches_prev = if let (false, Some(prev_bits)) = (masked, &prev_bits) {
-                prev_bits
-                    .get(cand_idx)
-                    .copied()
-                    .unwrap_or(false)
-                    == cand_bit
+                prev_bits.get(cand_idx).copied().unwrap_or(false) == cand_bit
             } else {
                 false
             };
@@ -2543,23 +2631,15 @@ fn draw_bit_similarity_row(
                 base_candidate
             };
             let x = boxes_start + bit_idx as f32 * (bit_size + bit_spacing);
-            let rect = egui::Rect::from_min_size(
-                egui::pos2(x, y_boxes),
-                egui::vec2(bit_size, bit_size),
-            );
+            let rect =
+                egui::Rect::from_min_size(egui::pos2(x, y_boxes), egui::vec2(bit_size, bit_size));
             painter.rect_filled(rect, 0.0, color);
             painter.rect_stroke(rect, 0.0, palette.stroke);
             let (text, text_color) = if masked {
                 let masked_bit = candidate_bits.get(bit_idx).copied().unwrap_or(false);
-                (
-                    if masked_bit { "1" } else { "0" },
-                    palette.masked_text,
-                )
+                (if masked_bit { "1" } else { "0" }, palette.masked_text)
             } else {
-                (
-                    if cand_bit { "1" } else { "0" },
-                    text_color_for(color),
-                )
+                (if cand_bit { "1" } else { "0" }, text_color_for(color))
             };
             painter.text(
                 rect.center(),
@@ -2616,9 +2696,7 @@ fn draw_bit_similarity_row(
     painter.text(
         egui::pos2(label_x, majority_y),
         egui::Align2::LEFT_TOP,
-        format!(
-            "Majority vote | adj={majority_pct:.2}% ({majority_matches}/{majority_denom})"
-        ),
+        format!("Majority vote | adj={majority_pct:.2}% ({majority_matches}/{majority_denom})"),
         egui::FontId::proportional(11.0),
         palette.label_color,
     );
@@ -2626,8 +2704,8 @@ fn draw_bit_similarity_row(
         let votes = majority_votes[bit_idx];
         let masked = votes == 0;
         let majority_bit = majority_bits[bit_idx];
-        let matches_original = !masked
-            && majority_bit == original_bits.get(bit_idx).copied().unwrap_or(false);
+        let matches_original =
+            !masked && majority_bit == original_bits.get(bit_idx).copied().unwrap_or(false);
         let base_candidate = if matches_original && votes > 1 {
             palette.multi_match_color
         } else if matches_original {

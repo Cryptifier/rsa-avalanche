@@ -97,11 +97,7 @@ pub fn generate_oracle_samples(
         .iter()
         .map(|&bit| {
             let roll: f64 = rng.r#gen();
-            if roll <= match_probability {
-                bit
-            } else {
-                !bit
-            }
+            if roll <= match_probability { bit } else { !bit }
         })
         .collect()
 }

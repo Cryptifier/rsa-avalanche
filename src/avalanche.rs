@@ -320,11 +320,7 @@ fn combine_candidates(
         let and_bit = left.message_bits[idx] & right.message_bits[idx];
         let bias = if and_bit {
             let sum = left.biases[idx] + right.biases[idx];
-            if sum == 0.0 {
-                1.0
-            } else {
-                sum
-            }
+            if sum == 0.0 { 1.0 } else { sum }
         } else {
             (left.biases[idx] - right.biases[idx]).abs()
         };
@@ -340,7 +336,7 @@ fn combine_candidates(
 
 #[cfg(test)]
 mod tests {
-    use super::{search_avalanche_tree, search_avalanche_tree_with_scores, AvalancheNode};
+    use super::{AvalancheNode, search_avalanche_tree, search_avalanche_tree_with_scores};
     use insta::assert_yaml_snapshot;
     use serde_json::json;
 

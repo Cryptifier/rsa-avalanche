@@ -1,7 +1,6 @@
 /// Eclipse Public License 2.0
 /// SPDX-License-Identifier: EPL-2.0
 /// Copyright (c) 2025 Nicholas LaRoche <nlaroche@cryptifier.dev>
-
 use std::{
     collections::HashSet,
     error::Error,
@@ -11,10 +10,10 @@ use std::{
 
 use clap::{Parser, ValueEnum};
 use num_bigint::BigUint;
-use rsademo::config::{load_config, Config, EngineConfig};
+use rsademo::config::{Config, EngineConfig, load_config};
 use rsademo::math::random_prime_with_bits;
+use rsademo::r_candidates::{RCandidateMode, RCandidateSettings, generate_r_candidates};
 use rsademo::rng::{RngChoice, RngMode};
-use rsademo::r_candidates::{generate_r_candidates, RCandidateMode, RCandidateSettings};
 
 #[derive(Parser, Debug)]
 #[command(
@@ -174,13 +173,12 @@ fn run_rgen(args: Args, config: Config) -> Result<(), Box<dyn Error>> {
 
     if settings.mode == RCandidateMode::Factoring && modulus.is_none() {
         return Err(
-            "factoring mode requires --n, --p/--q, --bits, or config/rsa_config.json with p and q".into(),
+            "factoring mode requires --n, --p/--q, --bits, or config/rsa_config.json with p and q"
+                .into(),
         );
     }
 
-    let n_for_generation = modulus
-        .clone()
-        .unwrap_or_else(|| BigUint::from(1u8));
+    let n_for_generation = modulus.clone().unwrap_or_else(|| BigUint::from(1u8));
     let candidates = generate_r_candidates(&n_for_generation, &settings, &mut rng);
 
     if candidates.is_empty() {
@@ -275,10 +273,7 @@ fn resolve_modulus(
         return Ok(Some(p * q));
     }
 
-    if let (Some(p), Some(q)) = (
-        config.rsa_keypair.p.clone(),
-        config.rsa_keypair.q.clone(),
-    ) {
+    if let (Some(p), Some(q)) = (config.rsa_keypair.p.clone(), config.rsa_keypair.q.clone()) {
         return Ok(Some(p * q));
     }
 
@@ -355,9 +350,7 @@ fn build_r_candidate_settings(
         small_prime_factors_per_candidate: args
             .small_prime_factors
             .unwrap_or(engine.r_candidate_small_prime_factors),
-        max_factors_per_candidate: args
-            .max_factors
-            .unwrap_or(engine.r_candidate_max_factors),
+        max_factors_per_candidate: args.max_factors.unwrap_or(engine.r_candidate_max_factors),
         target_bit_length: args
             .r_bits
             .or(target_bit_length_override)
@@ -388,9 +381,8 @@ fn resolve_target_bit_length_override(
         return Err("--r-bits-percent must be greater than 0 and less than 100".into());
     }
 
-    let modulus = modulus.ok_or(
-        "--r-bits-percent requires a modulus from config, --n, --p/--q, or --bits",
-    )?;
+    let modulus = modulus
+        .ok_or("--r-bits-percent requires a modulus from config, --n, --p/--q, or --bits")?;
     let bits = modulus.bits();
     if bits == 0 {
         return Err("modulus bit length must be non-zero".into());
@@ -424,7 +416,9 @@ fn write_candidates_csv(
     header_lines: &[String],
 ) -> Result<usize, Box<dyn Error>> {
     let needs_header = if append {
-        fs::metadata(path).map(|meta| meta.len() == 0).unwrap_or(true)
+        fs::metadata(path)
+            .map(|meta| meta.len() == 0)
+            .unwrap_or(true)
     } else {
         true
     };

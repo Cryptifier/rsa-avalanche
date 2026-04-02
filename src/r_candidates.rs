@@ -4,16 +4,16 @@ use crate::math::{
 };
 use num_bigint::BigUint;
 use num_traits::{One, Zero};
-use rand::seq::SliceRandom;
 use rand::RngCore;
+use rand::seq::SliceRandom;
 use rayon::prelude::*;
 use serde::Deserialize;
 use std::collections::HashSet;
 use std::fs::{self, OpenOptions};
 use std::io::{BufRead, BufReader, Write};
 use std::sync::{
-    atomic::{AtomicUsize, Ordering},
     Arc,
+    atomic::{AtomicUsize, Ordering},
 };
 use std::time::{Duration, Instant};
 

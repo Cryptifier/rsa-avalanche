@@ -1104,11 +1104,7 @@ fn max_admissible_step(
         limit = limit.min((bounds.max_denominator() - prev2_den) / prev1_den);
     }
 
-    if limit.is_zero() {
-        None
-    } else {
-        Some(limit)
-    }
+    if limit.is_zero() { None } else { Some(limit) }
 }
 
 /// Determines whether one admissible candidate is closer to the target than another.

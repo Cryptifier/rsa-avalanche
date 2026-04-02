@@ -30,8 +30,8 @@ pub struct PolynomialCoordinate {
 use linfa::prelude::Predict;
 #[cfg(feature = "pca")]
 use linfa::{
-    prelude::{Fit, Transformer},
     DatasetBase,
+    prelude::{Fit, Transformer},
 };
 #[cfg(feature = "cluster")]
 use linfa_clustering::KMeans;

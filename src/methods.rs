@@ -7,8 +7,8 @@ use std::{
     fs::{self, OpenOptions},
     io::Write,
     sync::{
-        atomic::{AtomicU64, Ordering},
         Arc, Mutex,
+        atomic::{AtomicU64, Ordering},
     },
     time::{Duration, Instant},
 };
@@ -34,10 +34,10 @@ const BLUE: RGBColor = (30, 144, 255);
 const BLACK: RGBColor = (0, 0, 0);
 
 use crate::analytics::{
-    generate_r_candidates_with_analytics, RCandidateAccuracyBatch, RCandidateAccuracyEntry,
-    RCandidateFactor, RCandidateTraceBatch, RCandidateTraceEntry, SessionAnalytics,
+    RCandidateAccuracyBatch, RCandidateAccuracyEntry, RCandidateFactor, RCandidateTraceBatch,
+    RCandidateTraceEntry, SessionAnalytics, generate_r_candidates_with_analytics,
 };
-use crate::avalanche::{search_avalanche_tree, search_avalanche_tree_with_scores, AvalancheNode};
+use crate::avalanche::{AvalancheNode, search_avalanche_tree, search_avalanche_tree_with_scores};
 use crate::combiner::majority_vote_with_distribution;
 use crate::config::{Config, EngineConfig};
 use crate::dsp::{find_ramp_signals_f64, ramp_signal_strength_f64};
@@ -295,22 +295,18 @@ pub fn run_demo(
                             a.set_feature_stat("combiner", "accuracy_pct", json!(accuracy * 100.0));
                         });
                         println!(
-                        "Speculative combiner majority vote: accuracy {:.2}% ({} of {} bits) using {} oracles (requested {})",
-                        accuracy * 100.0,
-                        correct,
-                        total,
-                        distribution.total_oracles,
-                        requested_oracles
-                    );
+                            "Speculative combiner majority vote: accuracy {:.2}% ({} of {} bits) using {} oracles (requested {})",
+                            accuracy * 100.0,
+                            correct,
+                            total,
+                            distribution.total_oracles,
+                            requested_oracles
+                        );
                         if let Some(stats) = compute_stats(&distribution.probability_one) {
                             println!(
-                            "Speculative combiner bit probability P(1) stats: mean {:.4}, std dev {:.4}, min {:.4}, max {:.4}, n {}",
-                            stats.mean,
-                            stats.stddev,
-                            stats.min,
-                            stats.max,
-                            stats.count
-                        );
+                                "Speculative combiner bit probability P(1) stats: mean {:.4}, std dev {:.4}, min {:.4}, max {:.4}, n {}",
+                                stats.mean, stats.stddev, stats.min, stats.max, stats.count
+                            );
                         }
                     }
                     Err(err) => {
@@ -2498,11 +2494,7 @@ fn run_avalanche_search(
                 .enumerate()
                 .map(|(idx, bit)| {
                     let bias = normalized_biases.get(idx).copied().unwrap_or(0.0);
-                    if *bit >= 0.5 {
-                        bias
-                    } else {
-                        1.0 - bias
-                    }
+                    if *bit >= 0.5 { bias } else { 1.0 - bias }
                 })
                 .sum()
         },
@@ -3160,12 +3152,7 @@ fn run_information_sufficiency_tests(
     if let Some(stats) = compute_stats(&top_match_pct) {
         println!(
             "Per-bit top oracle adjusted match % stats: mean {:.2}, std dev {:.2}, min {:.2}, max {:.2}, n {}; inverted selections {}",
-            stats.mean,
-            stats.stddev,
-            stats.min,
-            stats.max,
-            stats.count,
-            inverted_total
+            stats.mean, stats.stddev, stats.min, stats.max, stats.count, inverted_total
         );
     }
 
@@ -3181,11 +3168,7 @@ fn run_information_sufficiency_tests(
     if let Some(stats) = compute_stats(&per_bit_best_pct) {
         println!(
             "Per-bit best-case match % on original message: mean {:.2}, std dev {:.2}, min {:.2}, max {:.2}, n {}",
-            stats.mean,
-            stats.stddev,
-            stats.min,
-            stats.max,
-            stats.count
+            stats.mean, stats.stddev, stats.min, stats.max, stats.count
         );
     }
     print_best_case_hex(message, &best_case_bits);
@@ -4861,11 +4844,7 @@ fn beam_max_candidate_from_avalanche(
                 .enumerate()
                 .map(|(idx, bit)| {
                     let bias = normalized_biases.get(idx).copied().unwrap_or(0.0);
-                    if *bit >= 0.5 {
-                        bias
-                    } else {
-                        1.0 - bias
-                    }
+                    if *bit >= 0.5 { bias } else { 1.0 - bias }
                 })
                 .sum()
         },

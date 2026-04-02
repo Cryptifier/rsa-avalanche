@@ -1,7 +1,6 @@
 /// Eclipse Public License 2.0
 /// SPDX-License-Identifier: EPL-2.0
 /// Copyright (c) 2025 Nicholas LaRoche <nlaroche@cryptifier.dev>
-
 use std::{
     error::Error,
     sync::{Arc, Mutex},
@@ -9,12 +8,17 @@ use std::{
 
 use clap::Parser;
 use rsademo::analytics::{AnalyticsCliArgs, SessionAnalytics};
-use rsademo::logs::write_session_log;
 use rsademo::config::load_config;
+use rsademo::logs::write_session_log;
 use rsademo::methods::{DemoArgs, run_demo};
 
 #[derive(Parser, Debug)]
-#[command(name = "analysis", about = "Lightweight RSA round-trip demo", author, version)]
+#[command(
+    name = "analysis",
+    about = "Lightweight RSA round-trip demo",
+    author,
+    version
+)]
 struct Args {
     /// Bit-length of the primes to generate (kept small for a quick demo)
     #[arg(short, long, default_value_t = 56, value_parser = clap::value_parser!(u32).range(16..=8192))]
