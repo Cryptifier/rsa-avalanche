@@ -291,8 +291,10 @@ impl Default for EngineConfig {
             avalanche_combination_size: default_avalanche_combination_size(),
             avalanche_combination_pool_size: default_avalanche_combination_pool_size(),
             avalanche_combination_majority_vote: default_avalanche_combination_majority_vote(),
-            avalanche_combination_sample_smoothing: default_avalanche_combination_sample_smoothing(),
-            avalanche_combination_majority_vote_print: default_avalanche_combination_majority_vote_print(),
+            avalanche_combination_sample_smoothing: default_avalanche_combination_sample_smoothing(
+            ),
+            avalanche_combination_majority_vote_print:
+                default_avalanche_combination_majority_vote_print(),
             same_r_batch: default_same_r_batch(),
             ciphertext_modify: default_ciphertext_modify(),
             oracle_accuracy_threshold: default_oracle_accuracy_threshold(),

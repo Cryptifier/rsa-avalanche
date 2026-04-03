@@ -3,9 +3,11 @@ use std::collections::HashMap;
 #[cfg(not(target_arch = "wasm32"))]
 use std::fs::File;
 #[cfg(not(target_arch = "wasm32"))]
-use std::io::{Read, Seek, SeekFrom};
+use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
+#[cfg(not(target_arch = "wasm32"))]
+use std::sync::mpsc::{self, Receiver, TryRecvError};
 #[cfg(not(target_arch = "wasm32"))]
 use std::time::{Duration, Instant};
 #[cfg(target_arch = "wasm32")]
@@ -171,6 +173,13 @@ struct PendingUpdates {
     status: Option<String>,
 }
 
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Debug)]
+struct SessionLoadResult {
+    path: String,
+    result: Result<(Session, bool), String>,
+}
+
 #[derive(Debug)]
 struct ViewerApp {
     session: Session,
@@ -193,6 +202,10 @@ struct ViewerApp {
     clients_status: String,
     #[cfg(not(target_arch = "wasm32"))]
     client_snapshots: Vec<QueryResponsePayload>,
+    #[cfg(not(target_arch = "wasm32"))]
+    session_load_rx: Option<Receiver<SessionLoadResult>>,
+    #[cfg(not(target_arch = "wasm32"))]
+    session_load_in_flight: bool,
     #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
     last_poll: Instant,
     #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
@@ -247,6 +260,10 @@ impl ViewerApp {
             clients_status: "Waiting for client snapshots.".to_string(),
             #[cfg(not(target_arch = "wasm32"))]
             client_snapshots: Vec::new(),
+            #[cfg(not(target_arch = "wasm32"))]
+            session_load_rx: None,
+            #[cfg(not(target_arch = "wasm32"))]
+            session_load_in_flight: false,
             last_poll: Instant::now(),
             last_scan: Instant::now(),
             last_log_fetch: Instant::now(),
@@ -296,28 +313,55 @@ impl ViewerApp {
     }
 
     fn load_session(&mut self, path: &str) -> Result<(), String> {
+        self.prepare_for_session_load(path);
         #[cfg(target_arch = "wasm32")]
         {
-            self.selected_log = Some(path.to_string());
             self.request_session(path);
             return Ok(());
         }
         #[cfg(not(target_arch = "wasm32"))]
         {
-            let path_obj = Path::new(path);
-            let (session, ndjson) = load_session_from_path(path_obj)?;
-            self.session = session;
-            self.ndjson_mode = ndjson;
-            self.offset = file_size(path_obj).unwrap_or(0);
-            self.buffer.clear();
-            self.selected_log = Some(path.to_string());
-            self.status = format!("Loaded {}", path_obj.display());
+            let path_string = path.to_string();
+            self.session_load_in_flight = true;
+            let (sender, receiver) = mpsc::channel();
+            self.session_load_rx = Some(receiver);
+            std::thread::spawn(move || {
+                let result = load_session_from_path(Path::new(&path_string));
+                let _ = sender.send(SessionLoadResult {
+                    path: path_string,
+                    result,
+                });
+            });
             Ok(())
         }
     }
 
+    /// Prepares viewer state for loading a different session log.
+    ///
+    /// # Parameters
+    /// - `path`: Path of the session log being loaded.
+    ///
+    /// # Returns
+    /// - `()`: This function returns nothing.
+    ///
+    /// # Expected Output
+    /// - Clears the currently displayed session data and updates loading state; no stdout/stderr output.
+    fn prepare_for_session_load(&mut self, path: &str) {
+        self.selected_log = Some(path.to_string());
+        self.session = Session::default();
+        self.ndjson_mode = false;
+        self.offset = 0;
+        self.buffer.clear();
+        self.bit_similarity_start = 0;
+        self.bit_similarity_rows = 0;
+        self.bitflow_selected = None;
+        self.status = format!("Loading {}", Path::new(path).display());
+    }
+
     fn poll_updates(&mut self) {
         self.apply_pending();
+        #[cfg(not(target_arch = "wasm32"))]
+        self.apply_session_load_result();
         let now = Instant::now();
         #[cfg(target_arch = "wasm32")]
         {
@@ -346,6 +390,9 @@ impl ViewerApp {
                 return;
             }
             self.last_poll = now;
+            if self.session_load_in_flight {
+                return;
+            }
             if !self.ndjson_mode {
                 return;
             }
@@ -355,6 +402,38 @@ impl ViewerApp {
             let updated = self.ingest_tail(&path);
             if updated {
                 self.status = format!("Updated {}", path);
+            }
+        }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn apply_session_load_result(&mut self) {
+        let Some(receiver) = self.session_load_rx.take() else {
+            return;
+        };
+        match receiver.try_recv() {
+            Ok(message) => {
+                self.session_load_in_flight = false;
+                match message.result {
+                    Ok((session, ndjson)) => {
+                        let path_obj = Path::new(&message.path);
+                        self.session = session;
+                        self.ndjson_mode = ndjson;
+                        self.offset = file_size(path_obj).unwrap_or(0);
+                        self.buffer.clear();
+                        self.status = format!("Loaded {}", path_obj.display());
+                    }
+                    Err(err) => {
+                        self.status = format!("Failed to load session: {err}");
+                    }
+                }
+            }
+            Err(TryRecvError::Empty) => {
+                self.session_load_rx = Some(receiver);
+            }
+            Err(TryRecvError::Disconnected) => {
+                self.session_load_in_flight = false;
+                self.status = "Failed to load session: background loader disconnected".to_string();
             }
         }
     }
@@ -958,6 +1037,11 @@ impl ViewerApp {
 
     fn draw_bit_similarity(&mut self, ui: &mut egui::Ui) {
         ui.heading("Bit Similarity");
+        #[cfg(not(target_arch = "wasm32"))]
+        if self.session_load_in_flight {
+            ui.label(&self.status);
+            return;
+        }
         let Some(feature) = self.session.feature("information_sufficiency") else {
             ui.label("Bit similarity data not found.");
             return;
@@ -1761,9 +1845,20 @@ async fn fetch_text(url: &str) -> Result<String, JsValue> {
 
 #[cfg(not(target_arch = "wasm32"))]
 fn load_session_from_path(path: &Path) -> Result<(Session, bool), String> {
-    let mut file = File::open(path).map_err(|err| err.to_string())?;
+    let file = File::open(path).map_err(|err| err.to_string())?;
+    let mut reader = BufReader::new(file);
+    if reader_looks_like_event_stream(&mut reader).map_err(|err| err.to_string())? {
+        reader
+            .seek(SeekFrom::Start(0))
+            .map_err(|err| err.to_string())?;
+        return load_ndjson_session_from_reader(&mut reader);
+    }
+    reader
+        .seek(SeekFrom::Start(0))
+        .map_err(|err| err.to_string())?;
     let mut raw = String::new();
-    file.read_to_string(&mut raw)
+    reader
+        .read_to_string(&mut raw)
         .map_err(|err| err.to_string())?;
     parse_session_from_str(&raw)
 }
@@ -1771,6 +1866,9 @@ fn load_session_from_path(path: &Path) -> Result<(Session, bool), String> {
 fn parse_session_from_str(raw: &str) -> Result<(Session, bool), String> {
     if raw.trim().is_empty() {
         return Ok((Session::default(), false));
+    }
+    if string_looks_like_event_stream(raw) {
+        return Ok((build_session_from_event_lines(raw.lines()), true));
     }
     if let Ok(value) = serde_json::from_str::<Value>(raw) {
         if let Some(obj) = value.as_object() {
@@ -1793,21 +1891,7 @@ fn parse_session_from_str(raw: &str) -> Result<(Session, bool), String> {
             return Ok((normalize_session(&Map::new()), false));
         }
     }
-    let mut events = Vec::new();
-    for line in raw.lines() {
-        let trimmed = line.trim();
-        if trimmed.is_empty() {
-            continue;
-        }
-        if let Ok(value) = serde_json::from_str::<Value>(trimmed) {
-            if let Some(obj) = value.as_object() {
-                if obj.contains_key("event") {
-                    events.push(obj.clone());
-                }
-            }
-        }
-    }
-    Ok((build_session_from_events(&events), true))
+    Ok((build_session_from_event_lines(raw.lines()), true))
 }
 
 fn build_session_from_events(events: &[Map<String, Value>]) -> Session {
@@ -1817,6 +1901,128 @@ fn build_session_from_events(events: &[Map<String, Value>]) -> Session {
     }
     normalize_session_values(&mut session);
     session
+}
+
+/// Builds a session from an iterator of NDJSON event lines.
+///
+/// # Parameters
+/// - `lines`: Iterator of raw text lines that may contain serialized event envelopes.
+///
+/// # Returns
+/// - `Session`: Session reconstructed from every complete event line.
+///
+/// # Expected Output
+/// - Consumes the provided lines and returns normalized session data; no side effects.
+fn build_session_from_event_lines<'a, I>(lines: I) -> Session
+where
+    I: IntoIterator<Item = &'a str>,
+{
+    let mut session = Session::default();
+    for line in lines {
+        if let Some(event) = parse_event_line(line) {
+            apply_event_to_session(&mut session, &event);
+        }
+    }
+    normalize_session_values(&mut session);
+    session
+}
+
+/// Parses a single NDJSON event line.
+///
+/// # Parameters
+/// - `line`: Raw line that may contain a serialized event envelope.
+///
+/// # Returns
+/// - `Option<Map<String, Value>>`: Parsed event object when the line is a complete event envelope.
+///
+/// # Expected Output
+/// - Returns parsed JSON data for complete event lines; no side effects.
+fn parse_event_line(line: &str) -> Option<Map<String, Value>> {
+    let trimmed = line.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let value = serde_json::from_str::<Value>(trimmed).ok()?;
+    let obj = value.as_object()?;
+    if obj.contains_key("event") && obj.contains_key("payload") {
+        Some(obj.clone())
+    } else {
+        None
+    }
+}
+
+/// Detects whether the first complete non-empty line in a buffer is an NDJSON event.
+///
+/// # Parameters
+/// - `raw`: Buffer that may contain a session JSON document or NDJSON event stream.
+///
+/// # Returns
+/// - `bool`: `true` when the first complete non-empty line is an event envelope.
+///
+/// # Expected Output
+/// - Inspects the provided string and returns a format hint; no side effects.
+fn string_looks_like_event_stream(raw: &str) -> bool {
+    for line in raw.lines() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        return parse_event_line(line).is_some();
+    }
+    false
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+/// Detects whether a file reader begins with an NDJSON event stream.
+///
+/// # Parameters
+/// - `reader`: Seekable buffered reader positioned anywhere within the file.
+///
+/// # Returns
+/// - `Result<bool, std::io::Error>`: `true` when the first non-empty line is an event envelope.
+///
+/// # Expected Output
+/// - Reads ahead from `reader` and leaves repositioning to the caller; no stdout/stderr output.
+fn reader_looks_like_event_stream<R: BufRead>(reader: &mut R) -> Result<bool, std::io::Error> {
+    let mut line = String::new();
+    loop {
+        line.clear();
+        let read = reader.read_line(&mut line)?;
+        if read == 0 {
+            return Ok(false);
+        }
+        if line.trim().is_empty() {
+            continue;
+        }
+        return Ok(parse_event_line(&line).is_some());
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+/// Loads an NDJSON session from a buffered reader without reading the entire file into one string.
+///
+/// # Parameters
+/// - `reader`: Buffered reader positioned at the start of an NDJSON session log.
+///
+/// # Returns
+/// - `Result<(Session, bool), String>`: Parsed session and `true` for NDJSON mode.
+///
+/// # Expected Output
+/// - Reads the stream line by line and reconstructs session state; no stdout/stderr output.
+fn load_ndjson_session_from_reader<R: BufRead>(reader: &mut R) -> Result<(Session, bool), String> {
+    let mut session = Session::default();
+    let mut line = String::new();
+    loop {
+        line.clear();
+        let read = reader.read_line(&mut line).map_err(|err| err.to_string())?;
+        if read == 0 {
+            break;
+        }
+        if let Some(event) = parse_event_line(&line) {
+            apply_event_to_session(&mut session, &event);
+        }
+    }
+    normalize_session_values(&mut session);
+    Ok((session, true))
 }
 
 fn apply_event_to_session(session: &mut Session, event: &Map<String, Value>) {
@@ -2487,7 +2693,7 @@ fn build_bit_similarity_rows(
     hide_shifted: bool,
     sort_mode: BitSimilaritySort,
 ) -> Vec<BitSimilarityRow> {
-    let filtered = if hide_shifted {
+    let mut filtered = if hide_shifted {
         entries
             .iter()
             .cloned()
@@ -2496,26 +2702,23 @@ fn build_bit_similarity_rows(
     } else {
         entries.to_vec()
     };
-    let mut by_index: HashMap<usize, Vec<BitSimilarityEntry>> = HashMap::new();
-    for entry in filtered {
-        by_index.entry(entry.index).or_default().push(entry);
-    }
+    filtered.sort_by_key(|entry| entry.orig_index);
     let mut rows = Vec::new();
-    for (idx, mut entries) in by_index {
-        entries.sort_by_key(|entry| entry.shift);
-        let base_entry = entries
-            .iter()
-            .find(|entry| entry.shift == 0)
-            .unwrap_or_else(|| &entries[0]);
-        rows.push(BitSimilarityRow {
-            index: idx,
-            r: base_entry.r.clone(),
-            e: base_entry.e.clone(),
-            x: base_entry.x.clone(),
-            base_match_pct: base_entry.base_match_pct,
-            base_matching_bits: base_entry.base_matching_bits,
-            entries,
-        });
+    let mut current_entries = Vec::new();
+    for entry in filtered {
+        let starts_new_row = current_entries
+            .last()
+            .map(|prev| !can_group_bit_similarity_entries(prev, &entry))
+            .unwrap_or(false);
+        if starts_new_row {
+            rows.push(build_bit_similarity_row(std::mem::take(
+                &mut current_entries,
+            )));
+        }
+        current_entries.push(entry);
+    }
+    if !current_entries.is_empty() {
+        rows.push(build_bit_similarity_row(current_entries));
     }
 
     match sort_mode {
@@ -2538,6 +2741,54 @@ fn build_bit_similarity_rows(
         }
     }
     rows
+}
+
+/// Returns whether two bit-similarity entries belong to the same rendered row.
+///
+/// # Parameters
+/// - `prev`: Previous entry in original log order.
+/// - `next`: Candidate next entry in original log order.
+///
+/// # Returns
+/// - `bool`: `true` when `next` continues the same candidate's shift sequence.
+///
+/// # Expected Output
+/// - Compares entry metadata and returns a grouping decision; no side effects.
+fn can_group_bit_similarity_entries(prev: &BitSimilarityEntry, next: &BitSimilarityEntry) -> bool {
+    prev.index == next.index
+        && prev.r == next.r
+        && prev.e == next.e
+        && prev.x == next.x
+        && prev.base_matching_bits == next.base_matching_bits
+        && (prev.base_match_pct - next.base_match_pct).abs() < f64::EPSILON
+        && next.shift > prev.shift
+}
+
+/// Builds one rendered bit-similarity row from a grouped entry sequence.
+///
+/// # Parameters
+/// - `entries`: Shift-ordered entries for a single candidate.
+///
+/// # Returns
+/// - `BitSimilarityRow`: Row metadata plus the grouped entries.
+///
+/// # Expected Output
+/// - Returns one row value; no side effects.
+fn build_bit_similarity_row(mut entries: Vec<BitSimilarityEntry>) -> BitSimilarityRow {
+    entries.sort_by_key(|entry| entry.shift);
+    let base_entry = entries
+        .iter()
+        .find(|entry| entry.shift == 0)
+        .unwrap_or_else(|| &entries[0]);
+    BitSimilarityRow {
+        index: base_entry.index,
+        r: base_entry.r.clone(),
+        e: base_entry.e.clone(),
+        x: base_entry.x.clone(),
+        base_match_pct: base_entry.base_match_pct,
+        base_matching_bits: base_entry.base_matching_bits,
+        entries,
+    }
 }
 
 fn build_match_counts(
@@ -3014,6 +3265,34 @@ fn text_color_for(color: egui::Color32) -> egui::Color32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(not(target_arch = "wasm32"))]
+    use std::fs;
+    #[cfg(not(target_arch = "wasm32"))]
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn bit_similarity_entry(
+        orig_index: usize,
+        index: usize,
+        shift: usize,
+        r: &str,
+    ) -> BitSimilarityEntry {
+        BitSimilarityEntry {
+            orig_index,
+            index,
+            shift,
+            r: r.to_string(),
+            e: Some("17".to_string()),
+            x: Some("3".to_string()),
+            candidate_hex: "01".to_string(),
+            match_pct: 75.0,
+            matching_bits: 12,
+            adjusted_match_pct: 75.0,
+            adjusted_matching_bits: 12,
+            masked_bits: shift,
+            base_match_pct: 75.0,
+            base_matching_bits: 12,
+        }
+    }
 
     #[test]
     fn viewer_cli_accepts_host_and_port_flags() {
@@ -3048,5 +3327,123 @@ mod tests {
     fn viewer_cli_reports_help_without_launching_ui() {
         let err = ViewerArgs::try_parse_from(["viewer", "--help"]).expect_err("help should exit");
         assert_eq!(err.kind(), clap::error::ErrorKind::DisplayHelp);
+    }
+
+    #[test]
+    fn parse_session_from_str_handles_streaming_ndjson_with_partial_tail() {
+        let raw = concat!(
+            "{\"event\":\"session_start\",\"payload\":{\"started_unix_ms\":100,\"cli\":{\"bits\":32,\"config_path\":\"config/live.json\"}}}\n",
+            "{\"event\":\"step\",\"payload\":{\"name\":\"seed\",\"duration_ms\":7}}\n",
+            "{\"event\":\"session_finish\",\"payload\":{\"finished_unix_ms\":250,\"errors\":[\"warn\"]}}\n",
+            "{\"event\":\"step\",\"payload\":{\"name\":\"partial\""
+        );
+
+        let (session, ndjson) = parse_session_from_str(raw).expect("streaming NDJSON should parse");
+
+        assert!(ndjson);
+        assert_eq!(session.started_unix_ms, Some(100));
+        assert_eq!(session.finished_unix_ms, Some(250));
+        assert_eq!(session.cli.bits, 32);
+        assert_eq!(session.cli.config_path, "config/live.json");
+        assert_eq!(session.steps.len(), 1);
+        assert_eq!(session.steps[0].name, "seed");
+        assert_eq!(session.errors, vec!["warn".to_string()]);
+    }
+
+    #[test]
+    fn parse_session_from_str_preserves_legacy_json_sessions() {
+        let raw = r#"{
+            "started_unix_ms": 11,
+            "finished_unix_ms": 42,
+            "cli": {
+                "bits": 16,
+                "config_path": "config/rsa_config.json"
+            },
+            "steps": [
+                {
+                    "name": "phase",
+                    "duration_ms": 9
+                }
+            ],
+            "errors": ["done"]
+        }"#;
+
+        let (session, ndjson) =
+            parse_session_from_str(raw).expect("legacy JSON session should parse");
+
+        assert!(!ndjson);
+        assert_eq!(session.started_unix_ms, Some(11));
+        assert_eq!(session.finished_unix_ms, Some(42));
+        assert_eq!(session.cli.bits, 16);
+        assert_eq!(session.steps.len(), 1);
+        assert_eq!(session.steps[0].duration_ms, 9);
+        assert_eq!(session.errors, vec!["done".to_string()]);
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn load_session_from_path_streams_ndjson_files() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time should be after epoch")
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!("viewer_session_{unique}.log"));
+        let raw = concat!(
+            "{\"event\":\"session_start\",\"payload\":{\"started_unix_ms\":5,\"cli\":{\"bits\":8,\"config_path\":\"config/live.json\"}}}\n",
+            "{\"event\":\"step_summary\",\"payload\":{\"name\":\"phase\",\"count\":2,\"total_ms\":20,\"mean_ms\":10.0}}\n",
+            "{\"event\":\"session_finish\",\"payload\":{\"finished_unix_ms\":15,\"errors\":[]}}\n",
+            "{\"event\":\"step_summary\",\"payload\":{\"name\":\"partial\""
+        );
+        fs::write(&path, raw).expect("temp session log should be written");
+
+        let result = load_session_from_path(&path);
+        let _ = fs::remove_file(&path);
+        let (session, ndjson) = result.expect("streaming file should parse");
+
+        assert!(ndjson);
+        assert_eq!(session.started_unix_ms, Some(5));
+        assert_eq!(session.finished_unix_ms, Some(15));
+        assert_eq!(session.step_summaries.len(), 1);
+        assert_eq!(session.step_summaries[0].name, "phase");
+        assert_eq!(session.step_summaries[0].count, 2);
+    }
+
+    #[test]
+    fn build_bit_similarity_rows_keeps_distinct_candidates_with_reused_indices() {
+        let entries = vec![
+            bit_similarity_entry(0, 0, 1, "101"),
+            bit_similarity_entry(1, 0, 2, "101"),
+            bit_similarity_entry(2, 0, 1, "202"),
+            bit_similarity_entry(3, 0, 2, "202"),
+            bit_similarity_entry(4, 1, 1, "303"),
+        ];
+
+        let rows = build_bit_similarity_rows(&entries, false, BitSimilaritySort::Original);
+
+        assert_eq!(rows.len(), 3);
+        assert_eq!(rows[0].r, "101");
+        assert_eq!(rows[0].entries.len(), 2);
+        assert_eq!(rows[1].r, "202");
+        assert_eq!(rows[1].entries.len(), 2);
+        assert_eq!(rows[2].r, "303");
+        assert_eq!(rows[2].entries.len(), 1);
+    }
+
+    #[test]
+    fn build_bit_similarity_rows_does_not_merge_hide_shifted_rows() {
+        let entries = vec![
+            bit_similarity_entry(0, 7, 0, "101"),
+            bit_similarity_entry(1, 7, 1, "101"),
+            bit_similarity_entry(2, 7, 0, "202"),
+            bit_similarity_entry(3, 7, 1, "202"),
+        ];
+
+        let rows = build_bit_similarity_rows(&entries, true, BitSimilaritySort::Original);
+
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].r, "101");
+        assert_eq!(rows[0].entries.len(), 1);
+        assert_eq!(rows[1].r, "202");
+        assert_eq!(rows[1].entries.len(), 1);
     }
 }
