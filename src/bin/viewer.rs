@@ -1437,6 +1437,7 @@ struct CliInfo {
     ciphertext_modify: bool,
     use_hamming_distance: bool,
     mirror_invert_candidates: bool,
+    beam_bit_one_threshold: f64,
     bits_decrypt: Option<u64>,
 }
 
@@ -2010,6 +2011,7 @@ fn parse_cli(map: Option<&Map<String, Value>>) -> CliInfo {
         ciphertext_modify: value_as_bool(map.get("ciphertext_modify")),
         use_hamming_distance: value_as_bool(map.get("use_hamming_distance")),
         mirror_invert_candidates: value_as_bool(map.get("mirror_invert_candidates")),
+        beam_bit_one_threshold: value_as_f64(map.get("beam_bit_one_threshold")),
         bits_decrypt: value_as_opt_u64(map.get("bits_decrypt")),
     }
 }

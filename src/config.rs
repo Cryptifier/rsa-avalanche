@@ -113,6 +113,9 @@ pub struct EngineConfig {
     pub ciphertext_modify: bool,
     #[serde(default = "default_oracle_accuracy_threshold")]
     pub oracle_accuracy_threshold: f64,
+    /// Minimum stored beam value interpreted as bit `1`.
+    #[serde(default = "default_beam_bit_one_threshold")]
+    pub beam_bit_one_threshold: f64,
     /// Whether to sort avalanche candidates by Hamming distance.
     #[serde(default = "default_use_hamming_distance")]
     pub use_hamming_distance: bool,
@@ -266,6 +269,7 @@ impl Default for EngineConfig {
             same_r_batch: default_same_r_batch(),
             ciphertext_modify: default_ciphertext_modify(),
             oracle_accuracy_threshold: default_oracle_accuracy_threshold(),
+            beam_bit_one_threshold: default_beam_bit_one_threshold(),
             use_hamming_distance: default_use_hamming_distance(),
             mirror_invert_candidates: default_mirror_invert_candidates(),
             r_use_list_enable: default_r_use_list_enable(),
@@ -861,16 +865,20 @@ fn default_oracle_accuracy_threshold() -> f64 {
     55.0
 }
 
-/// Default avalanche bias threshold for beam search normalization.
+/// Default cutoff for interpreting stored beam values as bit `1`.
 ///
 /// # Parameters
 /// - None.
 ///
 /// # Returns
-/// - `f64`: Default avalanche bias normalization threshold.
+/// - `f64`: Default beam bit-one threshold.
 ///
 /// # Expected Output
 /// - Returns a constant default value; no side effects.
+fn default_beam_bit_one_threshold() -> f64 {
+    0.4
+}
+
 /// Default toggle for Hamming-distance sorting in avalanche candidate ordering.
 ///
 /// # Parameters

@@ -150,6 +150,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         ciphertext_modify: args.ciphertext_modify,
         use_hamming_distance: args.use_hamming_distance,
         mirror_invert_candidates: args.mirror_invert_candidates,
+        beam_bit_one_threshold: config.engine.beam_bit_one_threshold,
         bits_decrypt: args.bits_decrypt,
         r_candidate_target_exponent: args
             .r_candidate_target_exponent

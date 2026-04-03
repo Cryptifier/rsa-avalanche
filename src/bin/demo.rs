@@ -19,7 +19,10 @@ use rayon::prelude::*;
 
 use rsademo::avalanche::{AvalancheNode, search_avalanche_tree};
 use rsademo::config::{Config, EngineConfig, load_config};
-use rsademo::helpers::{format_beam_float, hamming_distance_bits, normalize_avalanche_biases};
+use rsademo::helpers::{
+    format_beam_float, hamming_distance_bits, normalize_avalanche_biases,
+    stored_beam_value_is_one,
+};
 use rsademo::math::{compute_totient, mod_inverse, random_biguint_bits, to_hex};
 use rsademo::r_candidates::{
     RCandidateSettings, generate_r_candidates_batch,
@@ -709,6 +712,7 @@ fn run_avalanche_beam_search(
         .count();
     let msb_zero_count = avalanche_nodes.len().saturating_sub(msb_one_count);
     let avalanche_result = search_avalanche_tree(avalanche_nodes)?;
+    let beam_bit_one_threshold = engine.beam_bit_one_threshold;
     let raw_bias_line = avalanche_result
         .biases
         .iter()
@@ -756,7 +760,11 @@ fn run_avalanche_beam_search(
                 .enumerate()
                 .map(|(idx, bit)| {
                     let bias = normalized_biases.get(idx).copied().unwrap_or(0.0);
-                    if *bit >= 0.5 { bias } else { 1.0 - bias }
+                    if stored_beam_value_is_one(*bit, beam_bit_one_threshold) {
+                        bias
+                    } else {
+                        1.0 - bias
+                    }
                 })
                 .sum()
         },
@@ -768,7 +776,11 @@ fn run_avalanche_beam_search(
     );
     for (idx, candidate) in beam_result.beam.iter().enumerate() {
         let candidate_bits: Vec<bool> =
-            candidate.vector.iter().map(|value| *value >= 0.5).collect();
+            candidate
+                .vector
+                .iter()
+                .map(|value| stored_beam_value_is_one(*value, beam_bit_one_threshold))
+                .collect();
         let mut candidate_hex = to_hex(&bits_le_to_biguint(&candidate_bits));
         let hex_len = (bit_width + 3) / 4;
         if candidate_hex.len() < hex_len {
@@ -790,7 +802,11 @@ fn run_avalanche_beam_search(
         );
     }
     if let Some(top) = beam_result.beam.first() {
-        let top_bits: Vec<bool> = top.vector.iter().map(|value| *value >= 0.5).collect();
+        let top_bits: Vec<bool> = top
+            .vector
+            .iter()
+            .map(|value| stored_beam_value_is_one(*value, beam_bit_one_threshold))
+            .collect();
         let msb = top_bits.last().copied().unwrap_or(false);
         println!("Avalanche beam top MSB: {}", if msb { 1 } else { 0 });
     }
@@ -847,7 +863,11 @@ fn run_avalanche_beam_search(
         .cloned()
         .map(|candidate| BeamCandidateBits {
             score: candidate.score,
-            bits: candidate.vector.iter().map(|value| *value >= 0.5).collect(),
+            bits: candidate
+                .vector
+                .iter()
+                .map(|value| stored_beam_value_is_one(*value, beam_bit_one_threshold))
+                .collect(),
         });
     Ok(top)
 }

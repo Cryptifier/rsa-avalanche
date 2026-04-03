@@ -42,7 +42,7 @@ use crate::avalanche::{AvalancheNode, search_avalanche_tree, search_avalanche_tr
 use crate::combiner::majority_vote_with_distribution;
 use crate::config::{Config, EngineConfig};
 use crate::dsp::{find_ramp_signals_f64, ramp_signal_strength_f64};
-use crate::helpers::{format_beam_float, normalize_avalanche_biases};
+use crate::helpers::{format_beam_float, normalize_avalanche_biases, stored_beam_value_is_one};
 use crate::math::{
     bit_length, choose_exponent, compute_totient, factor_composite_with_timeout,
     is_probable_prime_big, mod_inverse, random_biguint_bits, random_prime_with_bits,
@@ -2392,6 +2392,7 @@ fn run_avalanche_search(
     });
 
     let bit_width = avalanche_result.message_bits.len().max(1);
+    let beam_bit_one_threshold = engine.beam_bit_one_threshold;
     let raw_bias_line = avalanche_result
         .biases
         .iter()
@@ -2448,7 +2449,11 @@ fn run_avalanche_search(
                 .enumerate()
                 .map(|(idx, bit)| {
                     let bias = normalized_biases.get(idx).copied().unwrap_or(0.0);
-                    if *bit >= 0.5 { bias } else { 1.0 - bias }
+                    if stored_beam_value_is_one(*bit, beam_bit_one_threshold) {
+                        bias
+                    } else {
+                        1.0 - bias
+                    }
                 })
                 .sum()
         },
@@ -2461,7 +2466,11 @@ fn run_avalanche_search(
     );
     for (idx, candidate) in beam_result.beam.iter().enumerate() {
         let candidate_bits: Vec<bool> =
-            candidate.vector.iter().map(|value| *value >= 0.5).collect();
+            candidate
+                .vector
+                .iter()
+                .map(|value| stored_beam_value_is_one(*value, beam_bit_one_threshold))
+                .collect();
         let (_, matching_total) = count_matching_bits_le(&candidate_bits, &message_bits);
         let match_pct = matching_total as f64 / bit_width as f64 * 100.0;
         let candidate_ones = candidate_bits.iter().filter(|bit| **bit).count();
@@ -2498,7 +2507,11 @@ fn run_avalanche_search(
         );
     }
     if let Some(top) = beam_result.beam.first() {
-        let top_bits: Vec<bool> = top.vector.iter().map(|value| *value >= 0.5).collect();
+        let top_bits: Vec<bool> = top
+            .vector
+            .iter()
+            .map(|value| stored_beam_value_is_one(*value, beam_bit_one_threshold))
+            .collect();
         let msb = top_bits.last().copied().unwrap_or(false);
         println!("Avalanche beam top MSB: {}", if msb { 1 } else { 0 });
     }
@@ -4692,6 +4705,7 @@ fn beam_max_candidate_from_avalanche(
     println!("Avalanche tree instances: {}", avalanche_nodes.len());
     let avalanche_result = search_avalanche_tree(avalanche_nodes)?;
     let bit_width = avalanche_result.message_bits.len().max(1);
+    let beam_bit_one_threshold = engine.beam_bit_one_threshold;
     let normalized_biases = normalize_avalanche_biases(&avalanche_result.biases);
     let beam_result = beam_search_top_k(
         vec![Vec::new()],
@@ -4713,7 +4727,11 @@ fn beam_max_candidate_from_avalanche(
                 .enumerate()
                 .map(|(idx, bit)| {
                     let bias = normalized_biases.get(idx).copied().unwrap_or(0.0);
-                    if *bit >= 0.5 { bias } else { 1.0 - bias }
+                    if stored_beam_value_is_one(*bit, beam_bit_one_threshold) {
+                        bias
+                    } else {
+                        1.0 - bias
+                    }
                 })
                 .sum()
         },
@@ -4721,7 +4739,11 @@ fn beam_max_candidate_from_avalanche(
     let best = beam_result.beam.first().cloned();
     Ok(best.map(|candidate| BeamCandidateBits {
         score: candidate.score,
-        bits: candidate.vector.iter().map(|value| *value >= 0.5).collect(),
+        bits: candidate
+            .vector
+            .iter()
+            .map(|value| stored_beam_value_is_one(*value, beam_bit_one_threshold))
+            .collect(),
     }))
 }
 
@@ -5165,6 +5187,7 @@ mod tests {
             ciphertext_modify: false,
             use_hamming_distance: false,
             mirror_invert_candidates: false,
+            beam_bit_one_threshold: 0.4,
             bits_decrypt: None,
             r_candidate_target_exponent: None,
         })));
@@ -5223,6 +5246,7 @@ mod tests {
             ciphertext_modify: false,
             use_hamming_distance: false,
             mirror_invert_candidates: false,
+            beam_bit_one_threshold: 0.4,
             bits_decrypt: None,
             r_candidate_target_exponent: None,
         })));
