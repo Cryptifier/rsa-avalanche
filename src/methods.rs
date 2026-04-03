@@ -40,7 +40,8 @@ use crate::analytics::{
     RCandidateTraceEntry, SessionAnalytics, generate_r_candidates_with_analytics,
 };
 use crate::avalanche::{
-    AvalancheNode, search_avalanche_tree_with_scores, sort_candidates_by_hamming_distance,
+    AvalancheNode, mirror_inverted_candidates, search_avalanche_tree_with_scores,
+    sort_candidates_by_hamming_distance,
 };
 use crate::combiner::majority_vote_with_distribution;
 use crate::config::{Config, EngineConfig};
@@ -2350,6 +2351,11 @@ fn build_avalanche_nodes_unique_d(
             }
             collected_nodes.push(entry.node);
         }
+    }
+
+    if engine.mirror_invert_candidates {
+        collected_nodes = mirror_inverted_candidates(collected_nodes)
+            .map_err(|err| -> Box<dyn Error> { Box::new(err) })?;
     }
 
     if use_distance {
@@ -4887,6 +4893,11 @@ fn build_avalanche_nodes_from_scored_inputs(
         })
         .collect();
 
+    if engine.mirror_invert_candidates {
+        nodes =
+            mirror_inverted_candidates(nodes).map_err(|err| -> Box<dyn Error> { Box::new(err) })?;
+    }
+
     if engine.use_hamming_distance {
         return sort_candidates_by_hamming_distance(nodes, message_bits)
             .map_err(|err| -> Box<dyn Error> { Box::new(err) });
@@ -5848,6 +5859,33 @@ mod tests {
                 .iter()
                 .all(|variant| mod_inverse(&variant.e_x, &candidate_phi).is_some())
         );
+    }
+
+    #[test]
+    fn test_build_avalanche_nodes_from_scored_inputs_mirrors_when_enabled() {
+        let mut config = Config::default();
+        config.engine.mirror_invert_candidates = true;
+        config.engine.use_hamming_distance = true;
+
+        let inputs = vec![ScoredAvalancheInput {
+            batch_candidate_index: 0,
+            message_index: 0,
+            r: BigUint::from(3u8),
+            r_bits: 2,
+            target_exponent: "1".to_string(),
+            x: BigUint::from(1u8),
+            score_match_pct: 75.0,
+            hbc_ciphertext_r: "1".to_string(),
+            candidate_decryption: "1".to_string(),
+            message_bits: vec![true, false],
+        }];
+
+        let nodes =
+            build_avalanche_nodes_from_scored_inputs(&inputs, &config.engine, &[true, true])
+                .expect("sampled avalanche nodes should build");
+
+        let bits: Vec<Vec<bool>> = nodes.iter().map(|node| node.message_bits.clone()).collect();
+        assert_eq!(bits, vec![vec![true, false], vec![false, true]]);
     }
 
     #[test]

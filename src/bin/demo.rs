@@ -18,7 +18,8 @@ use rand::RngCore;
 use rayon::prelude::*;
 
 use rsademo::avalanche::{
-    AvalancheNode, search_avalanche_tree, sort_candidates_by_hamming_distance,
+    AvalancheNode, mirror_inverted_candidates, search_avalanche_tree,
+    sort_candidates_by_hamming_distance,
 };
 use rsademo::config::{Config, EngineConfig, load_config};
 use rsademo::helpers::{
@@ -650,6 +651,11 @@ fn build_avalanche_nodes_unique_d_demo(
             }
             collected_nodes.push(entry.node);
         }
+    }
+
+    if engine.mirror_invert_candidates {
+        collected_nodes = mirror_inverted_candidates(collected_nodes)
+            .map_err(|err| -> Box<dyn Error> { Box::new(err) })?;
     }
 
     if use_distance {

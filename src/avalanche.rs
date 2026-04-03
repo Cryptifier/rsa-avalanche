@@ -37,14 +37,14 @@ pub struct AvalancheSearchResult {
     pub level_pair_counts: Vec<usize>,
 }
 
-/// Mirrors candidates with their bitwise inversions and sorts by Hamming distance.
+/// Sorts candidates by Hamming distance to the reference bits.
 ///
 /// # Parameters
-/// - `candidates`: Candidate nodes to duplicate and sort.
+/// - `candidates`: Candidate nodes to sort.
 /// - `reference_bits`: Reference bit vector used for distance ordering.
 ///
 /// # Returns
-/// - `Result<Vec<AvalancheNode>, AvalancheError>`: Original and inverted candidates sorted by distance.
+/// - `Result<Vec<AvalancheNode>, AvalancheError>`: Candidates sorted by distance.
 ///
 /// # Expected Output
 /// - Returns a sorted candidate list; no stdout/stderr output.
@@ -57,17 +57,35 @@ pub fn sort_candidates_by_hamming_distance(
         return Err(AvalancheError::InconsistentBitWidth);
     }
 
+    let mut sorted = candidates;
+    sorted.sort_by(|left, right| {
+        hamming_distance_bits(&left.message_bits, reference_bits)
+            .cmp(&hamming_distance_bits(&right.message_bits, reference_bits))
+            .then_with(|| compare_message_bits_le(&left.message_bits, &right.message_bits))
+    });
+    Ok(sorted)
+}
+
+/// Mirrors candidates with their bitwise inversions.
+///
+/// # Parameters
+/// - `candidates`: Candidate nodes to duplicate with inverted copies.
+///
+/// # Returns
+/// - `Result<Vec<AvalancheNode>, AvalancheError>`: Original and inverted candidates.
+///
+/// # Expected Output
+/// - Returns the expanded candidate list; no stdout/stderr output.
+pub fn mirror_inverted_candidates(
+    candidates: Vec<AvalancheNode>,
+) -> Result<Vec<AvalancheNode>, AvalancheError> {
+    validate_candidates(&candidates)?;
+
     let mut mirrored = Vec::with_capacity(candidates.len() * 2);
     for candidate in candidates {
         mirrored.push(candidate.clone());
         mirrored.push(invert_candidate(&candidate));
     }
-
-    mirrored.sort_by(|left, right| {
-        hamming_distance_bits(&left.message_bits, reference_bits)
-            .cmp(&hamming_distance_bits(&right.message_bits, reference_bits))
-            .then_with(|| compare_message_bits_le(&left.message_bits, &right.message_bits))
-    });
     Ok(mirrored)
 }
 
@@ -409,8 +427,8 @@ fn combine_candidates(
 #[cfg(test)]
 mod tests {
     use super::{
-        AvalancheError, AvalancheNode, search_avalanche_tree, search_avalanche_tree_with_scores,
-        sort_candidates_by_hamming_distance,
+        AvalancheError, AvalancheNode, mirror_inverted_candidates, search_avalanche_tree,
+        search_avalanche_tree_with_scores, sort_candidates_by_hamming_distance,
     };
     use insta::assert_yaml_snapshot;
     use serde_json::json;
@@ -508,7 +526,7 @@ mod tests {
     }
 
     #[test]
-    fn test_sort_candidates_by_hamming_distance_mirrors_inversions() {
+    fn test_sort_candidates_by_hamming_distance_orders_without_mirroring() {
         let candidates = vec![
             node(&[true, false], &[0.5, 1.5]),
             node(&[false, false], &[2.0, 3.0]),
@@ -522,21 +540,39 @@ mod tests {
             .collect();
         let biases: Vec<Vec<f64>> = sorted.iter().map(|node| node.biases.clone()).collect();
 
+        assert_eq!(bits, vec![vec![true, false], vec![false, false],]);
+        assert_eq!(biases, vec![vec![0.5, 1.5], vec![2.0, 3.0],]);
+    }
+
+    #[test]
+    fn test_mirror_inverted_candidates_duplicates_inversions() {
+        let candidates = vec![
+            node(&[true, false], &[0.5, 1.5]),
+            node(&[false, false], &[2.0, 3.0]),
+        ];
+        let mirrored = mirror_inverted_candidates(candidates).expect("mirror failed");
+
+        let bits: Vec<Vec<bool>> = mirrored
+            .iter()
+            .map(|node| node.message_bits.clone())
+            .collect();
+        let biases: Vec<Vec<f64>> = mirrored.iter().map(|node| node.biases.clone()).collect();
+
         assert_eq!(
             bits,
             vec![
-                vec![true, true],
                 vec![true, false],
                 vec![false, true],
                 vec![false, false],
+                vec![true, true],
             ]
         );
         assert_eq!(
             biases,
             vec![
+                vec![0.5, 1.5],
+                vec![0.5, 1.5],
                 vec![2.0, 3.0],
-                vec![0.5, 1.5],
-                vec![0.5, 1.5],
                 vec![2.0, 3.0],
             ]
         );
