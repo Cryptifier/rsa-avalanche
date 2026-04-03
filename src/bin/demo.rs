@@ -365,6 +365,65 @@ fn odd_ciphertext_exponent(e: &BigUint, instance_idx: usize) -> Result<BigUint, 
     Ok(BigUint::from(x_value))
 }
 
+/// Prepared ciphertext exponent variant guaranteed invertible for targeted demo candidates.
+#[derive(Clone, Debug)]
+struct CiphertextVariant {
+    x: BigUint,
+    e_x: BigUint,
+    shifted: BigUint,
+}
+
+/// Collects ciphertext variants whose `e * x` values are invertible for every target modulus.
+///
+/// # Parameters
+/// - `ctx`: Demo context containing the modulus and public exponent.
+/// - `base_ciphertext`: Base ciphertext to exponentiate.
+/// - `phi_values`: Candidate totients that must admit inverses for every accepted `e * x`.
+/// - `count`: Number of ciphertext variants to collect.
+/// - `shift`: Whether to shift the accepted ciphertexts by encrypted `2`.
+///
+/// # Returns
+/// - `Result<Vec<CiphertextVariant>, Box<dyn Error>>`: Accepted ciphertext variants in generation order.
+///
+/// # Expected Output
+/// - Returns exactly `count` accepted variants or an error on exponent-index overflow; no stdout/stderr output.
+fn collect_invertible_ciphertext_variants(
+    ctx: &DemoContext,
+    base_ciphertext: &BigUint,
+    phi_values: &[&BigUint],
+    count: usize,
+    shift: bool,
+) -> Result<Vec<CiphertextVariant>, Box<dyn Error>> {
+    if count == 0 {
+        return Ok(Vec::new());
+    }
+
+    let e_big = ctx.e.clone();
+    let mut variants = Vec::with_capacity(count);
+    let mut instance_idx = 0usize;
+    while variants.len() < count {
+        let x = odd_ciphertext_exponent(&e_big, instance_idx)?;
+        instance_idx = instance_idx
+            .checked_add(1)
+            .ok_or("demo batch exponent index overflow")?;
+
+        let e_x = &e_big * &x;
+        if !phi_values.iter().all(|phi| e_x.gcd(phi).is_one()) {
+            continue;
+        }
+
+        let ciphertext_x = if x.is_one() {
+            base_ciphertext.clone()
+        } else {
+            base_ciphertext.modpow(&x, &ctx.n)
+        };
+        let shifted = maybe_shift_ciphertext(ctx, &ciphertext_x, shift);
+        variants.push(CiphertextVariant { x, e_x, shifted });
+    }
+
+    Ok(variants)
+}
+
 /// Runs the speculative decryption pipeline using r candidates.
 ///
 /// # Parameters
@@ -528,7 +587,6 @@ fn build_avalanche_nodes_unique_d_demo(
         return Ok(Vec::new());
     }
 
-    let e_big = ctx.e.clone();
     let use_distance = engine.use_hamming_distance && reference_bits.is_some();
 
     struct CandidateInstanceNode {
@@ -537,22 +595,27 @@ fn build_avalanche_nodes_unique_d_demo(
         node: AvalancheNode,
     }
 
-    let per_instance_nodes: Vec<Vec<CandidateInstanceNode>> = (0..batch_size)
+    let phi_values: Vec<&BigUint> = candidates
+        .iter()
+        .map(|candidate| &candidate.phi_new)
+        .collect();
+    let ciphertext_variants =
+        collect_invertible_ciphertext_variants(ctx, ciphertext, &phi_values, batch_size, shift)?;
+    let per_instance_nodes: Vec<Vec<CandidateInstanceNode>> = ciphertext_variants
         .into_par_iter()
-        .map(|instance_idx| {
-            let x_big =
-                odd_ciphertext_exponent(&e_big, instance_idx).map_err(|err| err.to_string())?;
-            let ciphertext_x = ciphertext.modpow(&x_big, &ctx.n);
-            let shifted = maybe_shift_ciphertext(ctx, &ciphertext_x, shift);
-            let e_x = &e_big * &x_big;
+        .map(|variant| {
+            let x_label = variant.x.to_string();
 
             let mut nodes = Vec::with_capacity(candidates.len());
             for (candidate_idx, candidate) in candidates.iter().enumerate() {
-                let Some(d_new) = mod_inverse(&e_x, &candidate.phi_new) else {
-                    continue;
-                };
+                let d_new = mod_inverse(&variant.e_x, &candidate.phi_new).ok_or_else(|| {
+                    format!(
+                        "demo avalanche missing modular inverse for candidate {} and x {}",
+                        candidate_idx, x_label
+                    )
+                })?;
                 let prepared_ciphertext =
-                    prepare_candidate_ciphertext(engine, &shifted, &candidate.r, &ctx.n);
+                    prepare_candidate_ciphertext(engine, &variant.shifted, &candidate.r, &ctx.n);
                 let dm = derive_candidate_message_from_result(
                     ctx,
                     engine,
@@ -1371,8 +1434,6 @@ fn build_oracle_bits_by_instance(
         return Err("demo batch size must be >= 1".into());
     }
 
-    let e_big = ctx.e.clone();
-
     let mut unique_oracle_indices = std::collections::HashSet::new();
     for selections in per_bit_oracles {
         for selection in selections {
@@ -1382,23 +1443,28 @@ fn build_oracle_bits_by_instance(
     let mut oracle_index_list: Vec<usize> = unique_oracle_indices.into_iter().collect();
     oracle_index_list.sort_unstable();
 
-    let oracle_bits_by_instance: Vec<Vec<Option<Vec<bool>>>> = (0..batch_size)
+    let phi_values: Vec<&BigUint> = oracle_index_list
+        .iter()
+        .map(|&oracle_idx| &candidates[oracle_idx].phi_new)
+        .collect();
+    let ciphertext_variants =
+        collect_invertible_ciphertext_variants(ctx, ciphertext, &phi_values, batch_size, shift)?;
+    let oracle_bits_by_instance: Vec<Vec<Option<Vec<bool>>>> = ciphertext_variants
         .into_par_iter()
-        .map(|instance_idx| {
-            let x_big =
-                odd_ciphertext_exponent(&ctx.e, instance_idx).map_err(|err| err.to_string())?;
-            let ciphertext_x = ciphertext.modpow(&x_big, &ctx.n);
-            let shifted = maybe_shift_ciphertext(ctx, &ciphertext_x, shift);
+        .map(|variant| {
+            let x_label = variant.x.to_string();
 
             let mut oracle_bits: Vec<Option<Vec<bool>>> = vec![None; candidates.len()];
             for oracle_idx in oracle_index_list.iter().copied() {
                 let candidate = &candidates[oracle_idx];
-                let e_x = &e_big * &x_big;
-                let Some(d_new) = mod_inverse(&e_x, &candidate.phi_new) else {
-                    continue;
-                };
+                let d_new = mod_inverse(&variant.e_x, &candidate.phi_new).ok_or_else(|| {
+                    format!(
+                        "demo batch missing modular inverse for oracle {} and x {}",
+                        oracle_idx, x_label
+                    )
+                })?;
                 let prepared_ciphertext =
-                    prepare_candidate_ciphertext(engine, &shifted, &candidate.r, &ctx.n);
+                    prepare_candidate_ciphertext(engine, &variant.shifted, &candidate.r, &ctx.n);
                 let dm = derive_candidate_message_from_result(
                     ctx,
                     engine,

@@ -35,10 +35,9 @@ const BLUE: RGBColor = (30, 144, 255);
 const BLACK: RGBColor = (0, 0, 0);
 
 use crate::analytics::{
-    AvalancheCombinationBeamResult, AvalancheCombinationSample,
-    AvalancheCombinationSampleInput, RCandidateAccuracyBatch, RCandidateAccuracyEntry,
-    RCandidateFactor, RCandidateTraceBatch, RCandidateTraceEntry, SessionAnalytics,
-    generate_r_candidates_with_analytics,
+    AvalancheCombinationBeamResult, AvalancheCombinationSample, AvalancheCombinationSampleInput,
+    RCandidateAccuracyBatch, RCandidateAccuracyEntry, RCandidateFactor, RCandidateTraceBatch,
+    RCandidateTraceEntry, SessionAnalytics, generate_r_candidates_with_analytics,
 };
 use crate::avalanche::{
     AvalancheNode, search_avalanche_tree_with_scores, sort_candidates_by_hamming_distance,
@@ -746,6 +745,73 @@ fn odd_ciphertext_exponent(
         .and_then(|value| value.checked_add(1))
         .ok_or_else(|| format!("{context} message index exceeds u64 range"))?;
     Ok(BigUint::from(x_value))
+}
+
+/// Prepared ciphertext exponent variant guaranteed invertible for targeted candidates.
+#[derive(Clone, Debug)]
+struct CiphertextVariant {
+    x: BigUint,
+    e_x: BigUint,
+    ciphertext: BigUint,
+    shifted: BigUint,
+}
+
+/// Collects ciphertext variants whose `e * x` values are invertible for every target modulus.
+///
+/// # Parameters
+/// - `ctx`: RSA context containing the modulus and public exponent.
+/// - `base_ciphertext`: Base ciphertext to exponentiate.
+/// - `phi_values`: Candidate totients that must admit inverses for every accepted `e * x`.
+/// - `count`: Number of ciphertext variants to collect.
+/// - `shift`: Whether to shift the accepted ciphertexts by encrypted `2`.
+/// - `context`: Label used in overflow/error messages.
+///
+/// # Returns
+/// - `Result<Vec<CiphertextVariant>, Box<dyn Error>>`: Accepted ciphertext variants in generation order.
+///
+/// # Expected Output
+/// - Returns exactly `count` accepted variants or an error on exponent-index overflow; no stdout/stderr output.
+fn collect_invertible_ciphertext_variants(
+    ctx: &RSAContext,
+    base_ciphertext: &BigUint,
+    phi_values: &[&BigUint],
+    count: usize,
+    shift: bool,
+    context: &str,
+) -> Result<Vec<CiphertextVariant>, Box<dyn Error>> {
+    if count == 0 {
+        return Ok(Vec::new());
+    }
+
+    let e_big = ctx.e.clone();
+    let mut variants = Vec::with_capacity(count);
+    let mut instance_idx = 0usize;
+    while variants.len() < count {
+        let x = odd_ciphertext_exponent(&e_big, instance_idx, context)?;
+        instance_idx = instance_idx
+            .checked_add(1)
+            .ok_or_else(|| format!("{context} exponent index overflow"))?;
+
+        let e_x = &e_big * &x;
+        if !phi_values.iter().all(|phi| e_x.gcd(phi).is_one()) {
+            continue;
+        }
+
+        let ciphertext = if x.is_one() {
+            base_ciphertext.clone()
+        } else {
+            base_ciphertext.modpow(&x, &ctx.n)
+        };
+        let shifted = maybe_shift_ciphertext(ctx, &ciphertext, shift);
+        variants.push(CiphertextVariant {
+            x,
+            e_x,
+            ciphertext,
+            shifted,
+        });
+    }
+
+    Ok(variants)
 }
 
 /// Computes the ciphertext variant for a candidate using its exponent `x`.
@@ -2036,7 +2102,6 @@ fn run_bitwise_speculative_oracle_attempt(
         per_bit_oracles[0].len().max(1)
     };
 
-    let e_big = ctx.e.clone();
     let base_ciphertext = message.modpow(&ctx.e, &ctx.n);
 
     let mut unique_oracle_indices = std::collections::HashSet::new();
@@ -2058,23 +2123,34 @@ fn run_bitwise_speculative_oracle_attempt(
 
     let mut oracle_index_list: Vec<usize> = unique_oracle_indices.iter().copied().collect();
     oracle_index_list.sort_unstable();
-    let oracle_bits_by_instance: Vec<Vec<Option<Vec<bool>>>> = (0..batch_size)
+    let phi_values: Vec<&BigUint> = oracle_index_list
+        .iter()
+        .map(|&oracle_idx| &candidates[oracle_idx].phi_new)
+        .collect();
+    let ciphertext_variants = collect_invertible_ciphertext_variants(
+        ctx,
+        &base_ciphertext,
+        &phi_values,
+        batch_size,
+        shift,
+        "analysis batch",
+    )?;
+    let oracle_bits_by_instance: Vec<Vec<Option<Vec<bool>>>> = ciphertext_variants
         .into_par_iter()
-        .map(|instance_idx| {
-            let x_big = odd_ciphertext_exponent(&e_big, instance_idx, "analysis batch")
-                .map_err(|err| err.to_string())?;
-            let ciphertext = base_ciphertext.modpow(&x_big, &ctx.n);
-            let shifted = maybe_shift_ciphertext(ctx, &ciphertext, shift);
+        .map(|variant| {
+            let x_label = variant.x.to_string();
 
             let mut oracle_bits: Vec<Option<Vec<bool>>> = vec![None; candidates.len()];
             for oracle_idx in oracle_index_list.iter().copied() {
                 let candidate = &candidates[oracle_idx];
-                let e_x = &e_big * &x_big;
-                let Some(d_new) = mod_inverse(&e_x, &candidate.phi_new) else {
-                    continue;
-                };
+                let d_new = mod_inverse(&variant.e_x, &candidate.phi_new).ok_or_else(|| {
+                    format!(
+                        "analysis batch missing modular inverse for oracle {} and x {}",
+                        oracle_idx, x_label
+                    )
+                })?;
                 let prepared_ciphertext =
-                    prepare_candidate_ciphertext(engine, &shifted, &candidate.r, &ctx.n);
+                    prepare_candidate_ciphertext(engine, &variant.shifted, &candidate.r, &ctx.n);
                 let dm = derive_candidate_message_from_result(
                     ctx,
                     engine,
@@ -2203,7 +2279,6 @@ fn build_avalanche_nodes_unique_d(
     }
 
     let bit_width = resolve_decrypt_bit_width(message, bits_decrypt)?;
-    let e_big = ctx.e.clone();
     let base_ciphertext = message.modpow(&ctx.e, &ctx.n);
 
     let use_distance = engine.use_hamming_distance;
@@ -2217,22 +2292,33 @@ fn build_avalanche_nodes_unique_d(
         node: AvalancheNode,
     }
 
-    let per_instance_nodes: Vec<Vec<CandidateInstanceNode>> = (0..batch_size)
+    let phi_values: Vec<&BigUint> = candidates
+        .iter()
+        .map(|candidate| &candidate.phi_new)
+        .collect();
+    let ciphertext_variants = collect_invertible_ciphertext_variants(
+        ctx,
+        &base_ciphertext,
+        &phi_values,
+        batch_size,
+        shift,
+        "analysis avalanche",
+    )?;
+    let per_instance_nodes: Vec<Vec<CandidateInstanceNode>> = ciphertext_variants
         .into_par_iter()
-        .map(|instance_idx| {
-            let x_big = odd_ciphertext_exponent(&e_big, instance_idx, "analysis avalanche")
-                .map_err(|err| err.to_string())?;
-            let ciphertext = base_ciphertext.modpow(&x_big, &ctx.n);
-            let shifted = maybe_shift_ciphertext(ctx, &ciphertext, shift);
-            let e_x = &e_big * &x_big;
+        .map(|variant| {
+            let x_label = variant.x.to_string();
 
             let mut nodes = Vec::with_capacity(candidates.len());
             for (candidate_idx, candidate) in candidates.iter().enumerate() {
-                let Some(d_new) = mod_inverse(&e_x, &candidate.phi_new) else {
-                    continue;
-                };
+                let d_new = mod_inverse(&variant.e_x, &candidate.phi_new).ok_or_else(|| {
+                    format!(
+                        "analysis avalanche missing modular inverse for candidate {} and x {}",
+                        candidate_idx, x_label
+                    )
+                })?;
                 let prepared_ciphertext =
-                    prepare_candidate_ciphertext(engine, &shifted, &candidate.r, &ctx.n);
+                    prepare_candidate_ciphertext(engine, &variant.shifted, &candidate.r, &ctx.n);
                 let dm = derive_candidate_message_from_result(
                     ctx,
                     engine,
@@ -4761,11 +4847,7 @@ fn format_bits_hex_le(bits: &[bool]) -> String {
 ///
 /// # Expected Output
 /// - Returns sampled indices; no stdout/stderr output.
-fn sample_unique_indices(
-    pool_size: usize,
-    sample_size: usize,
-    rng: &mut RngChoice,
-) -> Vec<usize> {
+fn sample_unique_indices(pool_size: usize, sample_size: usize, rng: &mut RngChoice) -> Vec<usize> {
     let mut indices: Vec<usize> = (0..pool_size).collect();
     for offset in 0..sample_size.min(pool_size) {
         let remaining = pool_size - offset;
@@ -4892,8 +4974,16 @@ fn run_sampled_avalanche_beam_search(
         combination_size,
         sample_count,
         if majority_vote_enabled { "on" } else { "off" },
-        if sample_smoothing_enabled { "on" } else { "off" },
-        if majority_vote_print_enabled { "on" } else { "off" }
+        if sample_smoothing_enabled {
+            "on"
+        } else {
+            "off"
+        },
+        if majority_vote_print_enabled {
+            "on"
+        } else {
+            "off"
+        }
     );
 
     for sample_index in 0..sample_count {
@@ -4902,8 +4992,12 @@ fn run_sampled_avalanche_beam_search(
             .into_iter()
             .map(|idx| pool[idx].clone())
             .collect();
-        let average_score_pct =
-            mean_f64(&selected_inputs.iter().map(|entry| entry.score_match_pct).collect::<Vec<_>>());
+        let average_score_pct = mean_f64(
+            &selected_inputs
+                .iter()
+                .map(|entry| entry.score_match_pct)
+                .collect::<Vec<_>>(),
+        );
         let avalanche_nodes =
             build_avalanche_nodes_from_scored_inputs(&selected_inputs, engine, &message_bits)?;
         evaluated_candidates += avalanche_nodes.len();
@@ -5203,25 +5297,32 @@ fn run_r_candidate_accuracy_batches(
         let mut e_x_values = Vec::with_capacity(message_count);
         let mut x_values = Vec::with_capacity(message_count);
 
-        for msg_idx in 0..message_count {
-            let x_big = if engine.ciphertext_modify {
-                odd_ciphertext_exponent(&e_big, msg_idx, "analysis_batch")?
-            } else {
-                BigUint::one()
-            };
-            let ciphertext = if engine.ciphertext_modify {
-                base_ciphertext.modpow(&x_big, &ctx.n)
-            } else {
-                base_ciphertext.clone()
-            };
-            let shifted = maybe_shift_ciphertext(ctx, &ciphertext, shift);
-
-            if engine.ciphertext_modify {
-                e_x_values.push(&e_big * &x_big);
+        if engine.ciphertext_modify {
+            let phi_values: Vec<&BigUint> = batch_candidates
+                .iter()
+                .map(|candidate| &candidate.phi_new)
+                .collect();
+            let ciphertext_variants = collect_invertible_ciphertext_variants(
+                ctx,
+                &base_ciphertext,
+                &phi_values,
+                message_count,
+                shift,
+                "analysis_batch",
+            )?;
+            for variant in ciphertext_variants {
+                e_x_values.push(variant.e_x);
+                x_values.push(variant.x);
+                ciphertexts.push(variant.ciphertext);
+                shifted_ciphertexts.push(variant.shifted);
             }
-            x_values.push(x_big);
-            ciphertexts.push(ciphertext);
-            shifted_ciphertexts.push(shifted);
+        } else {
+            let shifted = maybe_shift_ciphertext(ctx, &base_ciphertext, shift);
+            for _ in 0..message_count {
+                x_values.push(BigUint::one());
+                ciphertexts.push(base_ciphertext.clone());
+                shifted_ciphertexts.push(shifted.clone());
+            }
         }
 
         let avalanche_bit_width = resolve_decrypt_bit_width(&message, bits_decrypt)?;
@@ -5242,51 +5343,51 @@ fn run_r_candidate_accuracy_batches(
                     let shifted = &shifted_ciphertexts[idx];
                     let hbc_result =
                         prepare_candidate_ciphertext(engine, shifted, &candidate.r, &ctx.n);
+                    let x_value = x_values.get(idx).cloned().ok_or_else(|| {
+                        "missing ciphertext exponent for message index".to_string()
+                    })?;
                     let d_new = if engine.ciphertext_modify {
                         let e_x = e_x_values.get(idx).ok_or_else(|| {
                             "missing ciphertext exponent for message index".to_string()
                         })?;
-                        mod_inverse(e_x, &candidate.phi_new)
+                        mod_inverse(e_x, &candidate.phi_new).ok_or_else(|| {
+                            format!("analysis_batch missing modular inverse for x {}", x_value)
+                        })?
                     } else {
-                        Some(candidate.d_new.clone())
+                        candidate.d_new.clone()
                     };
 
-                    if let Some(d_new) = d_new {
-                        let dm = derive_candidate_message_from_result(
-                            ctx,
-                            engine,
-                            &hbc_result,
-                            &candidate.r,
-                            &d_new,
-                        );
-                        let message_bits = msg.bits().max(1) as f64;
-                        let (_, matching_total) = count_matching_bits(&dm, msg);
-                        let match_pct = (matching_total as f64 / message_bits) * 100.0;
-                        total_accuracy += match_pct;
-                        cx_evaluated_candidates += 1;
-                        if cx_max_match_pct.is_none_or(|current| match_pct > current) {
-                            cx_max_match_pct = Some(match_pct);
-                            cx_max_x = x_values.get(idx).cloned();
-                        }
-
-                        scored_samples.push(ScoredAvalancheInput {
-                            batch_candidate_index,
-                            message_index: idx,
-                            r: candidate.r.clone(),
-                            r_bits: candidate.r.bits(),
-                            target_exponent: target_exponent.clone(),
-                            x: x_values.get(idx).cloned().unwrap_or_else(BigUint::one),
-                            score_match_pct: match_pct,
-                            hbc_ciphertext_r: hbc_result.to_string(),
-                            candidate_decryption: dm.to_string(),
-                            message_bits: biguint_to_bits_le(&dm, avalanche_bit_width),
-                        });
-                        hbc_ciphertexts_r.push(hbc_result.to_string());
-                        candidate_decryptions.push(dm.to_string());
-                    } else {
-                        hbc_ciphertexts_r.push(hbc_result.to_string());
-                        candidate_decryptions.push("0".to_string());
+                    let dm = derive_candidate_message_from_result(
+                        ctx,
+                        engine,
+                        &hbc_result,
+                        &candidate.r,
+                        &d_new,
+                    );
+                    let message_bits = msg.bits().max(1) as f64;
+                    let (_, matching_total) = count_matching_bits(&dm, msg);
+                    let match_pct = (matching_total as f64 / message_bits) * 100.0;
+                    total_accuracy += match_pct;
+                    cx_evaluated_candidates += 1;
+                    if cx_max_match_pct.is_none_or(|current| match_pct > current) {
+                        cx_max_match_pct = Some(match_pct);
+                        cx_max_x = Some(x_value.clone());
                     }
+
+                    scored_samples.push(ScoredAvalancheInput {
+                        batch_candidate_index,
+                        message_index: idx,
+                        r: candidate.r.clone(),
+                        r_bits: candidate.r.bits(),
+                        target_exponent: target_exponent.clone(),
+                        x: x_value,
+                        score_match_pct: match_pct,
+                        hbc_ciphertext_r: hbc_result.to_string(),
+                        candidate_decryption: dm.to_string(),
+                        message_bits: biguint_to_bits_le(&dm, avalanche_bit_width),
+                    });
+                    hbc_ciphertexts_r.push(hbc_result.to_string());
+                    candidate_decryptions.push(dm.to_string());
                 }
 
                 let accuracy_pct = total_accuracy / message_count as f64;
@@ -5324,7 +5425,8 @@ fn run_r_candidate_accuracy_batches(
         let mut batch_scored_inputs = Vec::new();
         for computation in computations {
             batch_cx_evaluated_candidates += computation.cx_evaluated_candidates;
-            if let (Some(match_pct), Some(x)) = (computation.cx_max_match_pct, computation.cx_max_x) {
+            if let (Some(match_pct), Some(x)) = (computation.cx_max_match_pct, computation.cx_max_x)
+            {
                 if batch_cx_max_match_pct.is_none_or(|current| match_pct > current) {
                     batch_cx_max_match_pct = Some(match_pct);
                     batch_cx_max_x = Some(x.clone());
@@ -5354,18 +5456,18 @@ fn run_r_candidate_accuracy_batches(
         let mut beam_bit_width = None;
         let mut batch_selected_sample_index = None;
         let mut batch_selected_sample_average_score_pct = None;
-        let sampled_avalanche_result =
-            run_sampled_avalanche_beam_search(
-                engine,
-                &message,
-                &batch_scored_inputs,
-                batch_number,
-                rng,
-            )?;
+        let sampled_avalanche_result = run_sampled_avalanche_beam_search(
+            engine,
+            &message,
+            &batch_scored_inputs,
+            batch_number,
+            rng,
+        )?;
         total_avalanche_evaluated_candidates += sampled_avalanche_result.evaluated_candidates;
         if let Some(selected_sample) = sampled_avalanche_result.selected_sample.as_ref() {
             batch_selected_sample_index = Some(selected_sample.sample.sample_index);
-            batch_selected_sample_average_score_pct = Some(selected_sample.sample.average_score_pct);
+            batch_selected_sample_average_score_pct =
+                Some(selected_sample.sample.average_score_pct);
             println!(
                 "Accuracy batch {} selected avalanche sample {} of {} with average source score {}%",
                 batch_number,
@@ -5469,10 +5571,7 @@ fn run_r_candidate_accuracy_batches(
                 println!("Avalanche beam max MSB: {}", if msb { 1 } else { 0 });
                 if engine.avalanche_combination_majority_vote_print {
                     let (majority_match_pct, majority_ones_match_pct) =
-                        compute_bit_match_percentages(
-                            &max.majority_vote_bits,
-                            &max.message_bits,
-                        );
+                        compute_bit_match_percentages(&max.majority_vote_bits, &max.message_bits);
                     let majority_hex = format_bits_hex_le(&max.majority_vote_bits);
                     println!(
                         "Avalanche majority vote run max: avg-score {}% batch {} sample {} match {}% ones-match {}% hex {}",
@@ -5547,8 +5646,10 @@ fn run_r_candidate_accuracy_batches(
                 beam_score,
                 beam_bit_width,
                 avalanche_selected_sample_index: batch_selected_sample_index,
-                avalanche_selected_sample_average_score_pct: batch_selected_sample_average_score_pct,
-                avalanche_sampled_candidates_evaluated: sampled_avalanche_result.evaluated_candidates,
+                avalanche_selected_sample_average_score_pct:
+                    batch_selected_sample_average_score_pct,
+                avalanche_sampled_candidates_evaluated: sampled_avalanche_result
+                    .evaluated_candidates,
                 avalanche_combination_samples: sampled_avalanche_result.all_samples,
             });
         });
@@ -5611,11 +5712,7 @@ fn run_r_candidate_accuracy_batches(
                 "cx_max_batch_number",
                 json!(max.batch_number),
             );
-            a.set_feature_stat(
-                "r_candidate_accuracy",
-                "cx_max_r",
-                json!(max.r.to_string()),
-            );
+            a.set_feature_stat("r_candidate_accuracy", "cx_max_r", json!(max.r.to_string()));
             a.set_feature_stat(
                 "r_candidate_accuracy",
                 "cx_total_evaluated_candidates",
@@ -5710,6 +5807,47 @@ mod tests {
         // Check that at least one ramp is detected and signal strength is correct
         assert!(!ramps.is_empty());
         assert!(strength > 0);
+    }
+
+    #[test]
+    fn test_collect_invertible_ciphertext_variants_retries_noninvertible_x() {
+        let p = BigUint::from(61u8);
+        let q = BigUint::from(53u8);
+        let n = &p * &q;
+        let phi = (&p - BigUint::one()) * (&q - BigUint::one());
+        let e = choose_exponent(3, &phi);
+        let d = mod_inverse(&e, &phi).expect("missing inverse");
+
+        let ctx = RSAContext { p, q, n, phi, e, d };
+        let base_ciphertext = BigUint::from(17u8);
+        let candidate_phi = BigUint::from(10u8);
+        let phi_values = vec![&candidate_phi];
+
+        let variants = collect_invertible_ciphertext_variants(
+            &ctx,
+            &base_ciphertext,
+            &phi_values,
+            4,
+            false,
+            "test",
+        )
+        .expect("missing variants");
+
+        let x_values: Vec<BigUint> = variants.iter().map(|variant| variant.x.clone()).collect();
+        assert_eq!(
+            x_values,
+            vec![
+                BigUint::from(1u8),
+                BigUint::from(3u8),
+                BigUint::from(7u8),
+                BigUint::from(9u8)
+            ]
+        );
+        assert!(
+            variants
+                .iter()
+                .all(|variant| mod_inverse(&variant.e_x, &candidate_phi).is_some())
+        );
     }
 
     #[test]
