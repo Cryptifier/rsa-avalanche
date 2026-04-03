@@ -37,6 +37,40 @@ pub struct AvalancheSearchResult {
     pub level_pair_counts: Vec<usize>,
 }
 
+/// Mirrors candidates with their bitwise inversions and sorts by Hamming distance.
+///
+/// # Parameters
+/// - `candidates`: Candidate nodes to duplicate and sort.
+/// - `reference_bits`: Reference bit vector used for distance ordering.
+///
+/// # Returns
+/// - `Result<Vec<AvalancheNode>, AvalancheError>`: Original and inverted candidates sorted by distance.
+///
+/// # Expected Output
+/// - Returns a sorted candidate list; no stdout/stderr output.
+pub fn sort_candidates_by_hamming_distance(
+    candidates: Vec<AvalancheNode>,
+    reference_bits: &[bool],
+) -> Result<Vec<AvalancheNode>, AvalancheError> {
+    let bit_width = validate_candidates(&candidates)?;
+    if reference_bits.len() != bit_width {
+        return Err(AvalancheError::InconsistentBitWidth);
+    }
+
+    let mut mirrored = Vec::with_capacity(candidates.len() * 2);
+    for candidate in candidates {
+        mirrored.push(candidate.clone());
+        mirrored.push(invert_candidate(&candidate));
+    }
+
+    mirrored.sort_by(|left, right| {
+        hamming_distance_bits(&left.message_bits, reference_bits)
+            .cmp(&hamming_distance_bits(&right.message_bits, reference_bits))
+            .then_with(|| compare_message_bits_le(&left.message_bits, &right.message_bits))
+    });
+    Ok(mirrored)
+}
+
 /// Recursively reduces candidates by bitwise AND with bias accumulation.
 ///
 /// # Parameters
@@ -136,6 +170,44 @@ fn validate_candidates(candidates: &[AvalancheNode]) -> Result<usize, AvalancheE
         }
     }
     Ok(bit_width)
+}
+
+/// Builds the bitwise inversion of a candidate node.
+///
+/// # Parameters
+/// - `candidate`: Candidate node to invert.
+///
+/// # Returns
+/// - `AvalancheNode`: Inverted node with the same bias vector.
+///
+/// # Expected Output
+/// - Returns the inverted node; no stdout/stderr output.
+fn invert_candidate(candidate: &AvalancheNode) -> AvalancheNode {
+    AvalancheNode {
+        biases: candidate.biases.clone(),
+        message_bits: candidate.message_bits.iter().map(|bit| !*bit).collect(),
+    }
+}
+
+/// Compares little-endian bit vectors by their numeric value.
+///
+/// # Parameters
+/// - `left`: Left-hand little-endian bit vector.
+/// - `right`: Right-hand little-endian bit vector.
+///
+/// # Returns
+/// - `std::cmp::Ordering`: Ordering of the represented integer values.
+///
+/// # Expected Output
+/// - Returns the numeric ordering; no stdout/stderr output.
+fn compare_message_bits_le(left: &[bool], right: &[bool]) -> std::cmp::Ordering {
+    for idx in (0..left.len()).rev() {
+        let ordering = left[idx].cmp(&right[idx]);
+        if ordering != std::cmp::Ordering::Equal {
+            return ordering;
+        }
+    }
+    std::cmp::Ordering::Equal
 }
 
 /// Builds the next avalanche level by pairing most-similar candidates.
@@ -336,7 +408,10 @@ fn combine_candidates(
 
 #[cfg(test)]
 mod tests {
-    use super::{AvalancheNode, search_avalanche_tree, search_avalanche_tree_with_scores};
+    use super::{
+        AvalancheError, AvalancheNode, search_avalanche_tree, search_avalanche_tree_with_scores,
+        sort_candidates_by_hamming_distance,
+    };
     use insta::assert_yaml_snapshot;
     use serde_json::json;
 
@@ -430,5 +505,48 @@ mod tests {
             "level_pair_counts": result.level_pair_counts,
         });
         assert_yaml_snapshot!(snapshot);
+    }
+
+    #[test]
+    fn test_sort_candidates_by_hamming_distance_mirrors_inversions() {
+        let candidates = vec![
+            node(&[true, false], &[0.5, 1.5]),
+            node(&[false, false], &[2.0, 3.0]),
+        ];
+        let sorted = sort_candidates_by_hamming_distance(candidates, &[true, true])
+            .expect("distance sort failed");
+
+        let bits: Vec<Vec<bool>> = sorted
+            .iter()
+            .map(|node| node.message_bits.clone())
+            .collect();
+        let biases: Vec<Vec<f64>> = sorted.iter().map(|node| node.biases.clone()).collect();
+
+        assert_eq!(
+            bits,
+            vec![
+                vec![true, true],
+                vec![true, false],
+                vec![false, true],
+                vec![false, false],
+            ]
+        );
+        assert_eq!(
+            biases,
+            vec![
+                vec![2.0, 3.0],
+                vec![0.5, 1.5],
+                vec![0.5, 1.5],
+                vec![2.0, 3.0],
+            ]
+        );
+    }
+
+    #[test]
+    fn test_sort_candidates_by_hamming_distance_rejects_reference_width_mismatch() {
+        let candidates = vec![node(&[true, false], &[1.0, 2.0])];
+        let err = sort_candidates_by_hamming_distance(candidates, &[true])
+            .expect_err("expected width mismatch");
+        assert_eq!(err, AvalancheError::InconsistentBitWidth);
     }
 }

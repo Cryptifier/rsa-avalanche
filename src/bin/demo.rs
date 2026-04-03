@@ -17,11 +17,13 @@ use num_traits::{One, Zero};
 use rand::RngCore;
 use rayon::prelude::*;
 
-use rsademo::avalanche::{AvalancheNode, search_avalanche_tree};
+use rsademo::avalanche::{
+    AvalancheNode, search_avalanche_tree, sort_candidates_by_hamming_distance,
+};
 use rsademo::config::{Config, EngineConfig, load_config};
 use rsademo::helpers::{
-    format_beam_float, hamming_distance_bits, normalize_avalanche_biases,
-    spread_normalized_avalanche_biases, stored_beam_value_is_one,
+    format_beam_float, normalize_avalanche_biases, spread_normalized_avalanche_biases,
+    stored_beam_value_is_one,
 };
 use rsademo::math::{compute_totient, mod_inverse, random_biguint_bits, to_hex};
 use rsademo::r_candidates::{
@@ -528,15 +530,11 @@ fn build_avalanche_nodes_unique_d_demo(
 
     let e_big = ctx.e.clone();
     let use_distance = engine.use_hamming_distance && reference_bits.is_some();
-    let mirror_invert =
-        engine.use_hamming_distance && engine.mirror_invert_candidates && reference_bits.is_some();
 
     struct CandidateInstanceNode {
         candidate_idx: usize,
         d_new: BigUint,
-        message_value: BigUint,
         node: AvalancheNode,
-        distance: Option<usize>,
     }
 
     let per_instance_nodes: Vec<Vec<CandidateInstanceNode>> = (0..batch_size)
@@ -567,19 +565,10 @@ fn build_avalanche_nodes_unique_d_demo(
                     biases: vec![0.0; bit_width],
                     message_bits,
                 };
-                let message_value = bits_le_to_biguint(&node.message_bits);
-                let distance = if use_distance {
-                    reference_bits
-                        .map(|reference| hamming_distance_bits(&node.message_bits, reference))
-                } else {
-                    None
-                };
                 nodes.push(CandidateInstanceNode {
                     candidate_idx,
                     d_new,
-                    message_value,
                     node,
-                    distance,
                 });
             }
             Ok::<_, String>(nodes)
@@ -588,78 +577,34 @@ fn build_avalanche_nodes_unique_d_demo(
         .map_err(|err| -> Box<dyn Error> { err.into() })?;
 
     let mut seen: Vec<HashSet<BigUint>> = vec![HashSet::new(); candidates.len()];
-    let mut nodes_with_value: Vec<(BigUint, AvalancheNode)> = Vec::new();
-    let mut nodes_with_distance: Vec<(usize, BigUint, AvalancheNode)> = Vec::new();
+    let mut collected_nodes: Vec<AvalancheNode> = Vec::new();
 
-    for nodes in per_instance_nodes {
-        for entry in nodes {
+    for instance_nodes in per_instance_nodes {
+        for entry in instance_nodes {
             let seen_set = &mut seen[entry.candidate_idx];
             if !seen_set.insert(entry.d_new) {
                 continue;
             }
-            if engine.use_hamming_distance {
-                if let Some(distance) = entry.distance {
-                    let node = entry.node;
-                    let message_value = entry.message_value;
-                    if mirror_invert {
-                        let mut inverted_bits = node.message_bits.clone();
-                        for bit in &mut inverted_bits {
-                            *bit = !*bit;
-                        }
-                        let inverted_node = AvalancheNode {
-                            biases: vec![0.0; bit_width],
-                            message_bits: inverted_bits,
-                        };
-                        let inverted_value = bits_le_to_biguint(&inverted_node.message_bits);
-                        let reference = reference_bits.expect("checked mirror_invert");
-                        let inverted_distance =
-                            hamming_distance_bits(&inverted_node.message_bits, reference);
-                        nodes_with_distance.push((
-                            inverted_distance,
-                            inverted_value,
-                            inverted_node,
-                        ));
-                    }
-                    nodes_with_distance.push((distance, message_value, node));
-                } else {
-                    nodes_with_value.push((entry.message_value, entry.node));
-                }
-            } else {
-                nodes_with_value.push((entry.message_value, entry.node));
-            }
+            collected_nodes.push(entry.node);
         }
     }
 
-    let mut nodes: Vec<AvalancheNode> = if engine.use_hamming_distance {
-        if !nodes_with_distance.is_empty() {
-            nodes_with_distance.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
-            nodes_with_distance
-                .into_iter()
-                .map(|(_, _, node)| node)
-                .collect()
-        } else {
-            Vec::new()
-        }
-    } else if !nodes_with_value.is_empty() {
-        nodes_with_value.sort_by(|a, b| a.0.cmp(&b.0));
-        nodes_with_value.into_iter().map(|(_, node)| node).collect()
-    } else {
-        Vec::new()
-    };
+    if use_distance {
+        let reference = reference_bits.expect("distance ordering requires reference bits");
+        return sort_candidates_by_hamming_distance(collected_nodes, reference)
+            .map_err(|err| -> Box<dyn Error> { Box::new(err) });
+    }
 
-    if !nodes.is_empty() {
-        let mut sorted_with_value: Vec<(BigUint, AvalancheNode)> = nodes
+    if !collected_nodes.is_empty() {
+        let mut nodes_with_value: Vec<(BigUint, AvalancheNode)> = collected_nodes
             .into_iter()
             .map(|node| (bits_le_to_biguint(&node.message_bits), node))
             .collect();
-        sorted_with_value.sort_by(|a, b| a.0.cmp(&b.0));
-        nodes = sorted_with_value
-            .into_iter()
-            .map(|(_, node)| node)
-            .collect();
+        nodes_with_value.sort_by(|a, b| a.0.cmp(&b.0));
+        collected_nodes = nodes_with_value.into_iter().map(|(_, node)| node).collect();
     }
 
-    Ok(nodes)
+    Ok(collected_nodes)
 }
 
 /// Runs avalanche tree and beam search for demo candidates.

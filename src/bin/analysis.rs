@@ -89,7 +89,7 @@ struct Args {
     #[arg(long = "use-hamming-distance")]
     use_hamming_distance: bool,
 
-    /// Add bitwise-inverted avalanche candidates to the Hamming-distance grid
+    /// Legacy compatibility flag; inversion is now automatic in Hamming-distance mode
     #[arg(long = "mirror-invert-candidates")]
     mirror_invert_candidates: bool,
 

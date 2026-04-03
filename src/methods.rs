@@ -38,7 +38,10 @@ use crate::analytics::{
     RCandidateAccuracyBatch, RCandidateAccuracyEntry, RCandidateFactor, RCandidateTraceBatch,
     RCandidateTraceEntry, SessionAnalytics, generate_r_candidates_with_analytics,
 };
-use crate::avalanche::{AvalancheNode, search_avalanche_tree, search_avalanche_tree_with_scores};
+use crate::avalanche::{
+    AvalancheNode, search_avalanche_tree, search_avalanche_tree_with_scores,
+    sort_candidates_by_hamming_distance,
+};
 use crate::combiner::majority_vote_with_distribution;
 use crate::config::{Config, EngineConfig};
 use crate::dsp::{find_ramp_signals_f64, ramp_signal_strength_f64};
@@ -2181,19 +2184,14 @@ fn build_avalanche_nodes_unique_d(
     let base_ciphertext = message.modpow(&ctx.e, &ctx.n);
 
     let use_distance = engine.use_hamming_distance;
-    let mirror_invert = engine.use_hamming_distance && engine.mirror_invert_candidates;
     let mut seen: Vec<HashSet<BigUint>> = vec![HashSet::new(); candidates.len()];
-    let mut nodes = Vec::new();
-    let target_bits = biguint_to_bits_le(message, bit_width);
-    let mut nodes_with_value: Vec<(BigUint, AvalancheNode)> = Vec::new();
-    let mut nodes_with_distance: Vec<(usize, BigUint, AvalancheNode)> = Vec::new();
+    let target_bits = use_distance.then(|| biguint_to_bits_le(message, bit_width));
+    let mut collected_nodes = Vec::new();
 
     struct CandidateInstanceNode {
         candidate_idx: usize,
         d_new: BigUint,
-        message_value: BigUint,
         node: AvalancheNode,
-        distance: Option<usize>,
     }
 
     let per_instance_nodes: Vec<Vec<CandidateInstanceNode>> = (0..batch_size)
@@ -2224,24 +2222,10 @@ fn build_avalanche_nodes_unique_d(
                     biases: vec![0.0; bit_width],
                     message_bits,
                 };
-                let message_value = bits_le_to_biguint(&node.message_bits);
-                let distance = if use_distance {
-                    Some(
-                        node.message_bits
-                            .iter()
-                            .zip(target_bits.iter())
-                            .filter(|(cand, target)| cand != target)
-                            .count(),
-                    )
-                } else {
-                    None
-                };
                 nodes.push(CandidateInstanceNode {
                     candidate_idx,
                     d_new,
-                    message_value,
                     node,
-                    distance,
                 });
             }
             Ok::<_, String>(nodes)
@@ -2249,74 +2233,34 @@ fn build_avalanche_nodes_unique_d(
         .collect::<Result<_, _>>()
         .map_err(|err| -> Box<dyn Error> { err.into() })?;
 
-    for nodes in per_instance_nodes {
-        for entry in nodes {
+    for instance_nodes in per_instance_nodes {
+        for entry in instance_nodes {
             let seen_set = &mut seen[entry.candidate_idx];
             if !seen_set.insert(entry.d_new) {
                 continue;
             }
-            if use_distance {
-                if let Some(distance) = entry.distance {
-                    let node = entry.node;
-                    let message_value = entry.message_value;
-                    if mirror_invert {
-                        let mut inverted_bits = node.message_bits.clone();
-                        for bit in &mut inverted_bits {
-                            *bit = !*bit;
-                        }
-                        let inverted_node = AvalancheNode {
-                            biases: vec![0.0; bit_width],
-                            message_bits: inverted_bits,
-                        };
-                        let inverted_value = bits_le_to_biguint(&inverted_node.message_bits);
-                        let inverted_distance = inverted_node
-                            .message_bits
-                            .iter()
-                            .zip(target_bits.iter())
-                            .filter(|(cand, target)| cand != target)
-                            .count();
-                        nodes_with_distance.push((
-                            inverted_distance,
-                            inverted_value,
-                            inverted_node,
-                        ));
-                    }
-                    nodes_with_distance.push((distance, message_value, node));
-                } else {
-                    nodes_with_value.push((entry.message_value, entry.node));
-                }
-            } else {
-                nodes_with_value.push((entry.message_value, entry.node));
-            }
+            collected_nodes.push(entry.node);
         }
     }
 
-    if engine.use_hamming_distance {
-        if !nodes_with_distance.is_empty() {
-            nodes_with_distance.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
-            nodes = nodes_with_distance
-                .into_iter()
-                .map(|(_, _, node)| node)
-                .collect();
-        }
-    } else if !nodes_with_value.is_empty() {
-        nodes_with_value.sort_by(|a, b| a.0.cmp(&b.0));
-        nodes = nodes_with_value.into_iter().map(|(_, node)| node).collect();
+    if use_distance {
+        let reference_bits = target_bits
+            .as_deref()
+            .expect("distance ordering requires a reference bit vector");
+        return sort_candidates_by_hamming_distance(collected_nodes, reference_bits)
+            .map_err(|err| -> Box<dyn Error> { Box::new(err) });
     }
 
-    if !nodes.is_empty() {
-        let mut sorted_with_value: Vec<(BigUint, AvalancheNode)> = nodes
+    if !collected_nodes.is_empty() {
+        let mut nodes_with_value: Vec<(BigUint, AvalancheNode)> = collected_nodes
             .into_iter()
             .map(|node| (bits_le_to_biguint(&node.message_bits), node))
             .collect();
-        sorted_with_value.sort_by(|a, b| a.0.cmp(&b.0));
-        return Ok(sorted_with_value
-            .into_iter()
-            .map(|(_, node)| node)
-            .collect());
+        nodes_with_value.sort_by(|a, b| a.0.cmp(&b.0));
+        collected_nodes = nodes_with_value.into_iter().map(|(_, node)| node).collect();
     }
 
-    Ok(nodes)
+    Ok(collected_nodes)
 }
 
 const BEAM_SCORE_DECIMALS: usize = 8;

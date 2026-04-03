@@ -122,7 +122,7 @@ pub struct EngineConfig {
     /// Whether to sort avalanche candidates by Hamming distance.
     #[serde(default = "default_use_hamming_distance")]
     pub use_hamming_distance: bool,
-    /// Whether to add bitwise-inverted avalanche candidates to the Hamming-distance grid.
+    /// Legacy compatibility flag for avalanche inversion in Hamming-distance mode.
     #[serde(default = "default_mirror_invert_candidates")]
     pub mirror_invert_candidates: bool,
     #[serde(default = "default_r_use_list_enable")]
