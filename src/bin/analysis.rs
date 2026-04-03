@@ -93,6 +93,14 @@ struct Args {
     #[arg(long = "avalanche-combination-majority-vote")]
     avalanche_combination_majority_vote: Option<bool>,
 
+    /// Whether sampled avalanche smooths per-bit majority-vote probabilities before beam search
+    #[arg(long = "avalanche-combination-sample-smoothing")]
+    avalanche_combination_sample_smoothing: Option<bool>,
+
+    /// Whether sampled avalanche prints a separate majority-vote summary for the selected sample
+    #[arg(long = "avalanche-combination-majority-vote-print")]
+    avalanche_combination_majority_vote_print: Option<bool>,
+
     /// Raise ciphertext to a monotonically increasing exponent per batch
     #[arg(long)]
     ciphertext_modify: bool,
@@ -150,6 +158,12 @@ fn main() -> Result<(), Box<dyn Error>> {
     if let Some(majority_vote) = args.avalanche_combination_majority_vote {
         config.engine.avalanche_combination_majority_vote = majority_vote;
     }
+    if let Some(sample_smoothing) = args.avalanche_combination_sample_smoothing {
+        config.engine.avalanche_combination_sample_smoothing = sample_smoothing;
+    }
+    if let Some(majority_vote_print) = args.avalanche_combination_majority_vote_print {
+        config.engine.avalanche_combination_majority_vote_print = majority_vote_print;
+    }
     config.engine.analysis_batch_enable = batch_enable;
     if args.ciphertext_modify {
         config.engine.ciphertext_modify = true;
@@ -186,6 +200,8 @@ fn main() -> Result<(), Box<dyn Error>> {
         avalanche_combination_size: config.engine.avalanche_combination_size,
         avalanche_combination_pool_size: config.engine.avalanche_combination_pool_size,
         avalanche_combination_majority_vote: config.engine.avalanche_combination_majority_vote,
+        avalanche_combination_sample_smoothing: config.engine.avalanche_combination_sample_smoothing,
+        avalanche_combination_majority_vote_print: config.engine.avalanche_combination_majority_vote_print,
         bits_decrypt: args.bits_decrypt,
         r_candidate_target_exponent: args
             .r_candidate_target_exponent

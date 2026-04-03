@@ -53,6 +53,10 @@ pub struct AnalyticsCliArgs {
     pub avalanche_combination_pool_size: usize,
     /// Whether sampled avalanche uses per-bit majority-vote probabilities from the combination outputs.
     pub avalanche_combination_majority_vote: bool,
+    /// Whether sampled avalanche smooths per-bit majority-vote probabilities before beam search.
+    pub avalanche_combination_sample_smoothing: bool,
+    /// Whether sampled avalanche prints a separate majority-vote summary for the selected sample.
+    pub avalanche_combination_majority_vote_print: bool,
     /// Expected bit width for decryptions.
     pub bits_decrypt: Option<u32>,
     /// Optional CLI override for speculative r-candidate target exponent.
@@ -80,6 +84,8 @@ pub(crate) struct AnalyticsCliInfo {
     avalanche_combination_size: usize,
     avalanche_combination_pool_size: usize,
     avalanche_combination_majority_vote: bool,
+    avalanche_combination_sample_smoothing: bool,
+    avalanche_combination_majority_vote_print: bool,
     bits_decrypt: Option<u32>,
     r_candidate_target_exponent: Option<String>,
 }
@@ -299,6 +305,8 @@ pub struct AvalancheCombinationSample {
     pub average_score_pct: f64,
     /// Whether this sample used per-bit majority-vote probabilities.
     pub majority_vote_enabled: bool,
+    /// Whether this sample smoothed per-bit majority-vote probabilities before beam search.
+    pub sample_smoothing_enabled: bool,
     /// Source scored candidates used to build the avalanche sample.
     pub inputs: Vec<AvalancheCombinationSampleInput>,
     /// Majority-vote bit values for the sample when enabled.
@@ -307,7 +315,7 @@ pub struct AvalancheCombinationSample {
     pub majority_vote_ones_count: Vec<usize>,
     /// Per-bit count of `0` votes across the sampled combination.
     pub majority_vote_zeros_count: Vec<usize>,
-    /// Per-bit probability of `1` derived from the sampled combination.
+    /// Per-bit probability of `1` derived from the sampled combination, optionally smoothed.
     pub majority_vote_probability_one: Vec<f64>,
     /// Similarity percentages recorded at each avalanche reduction level.
     pub level_similarity_pct: Vec<f64>,
@@ -392,6 +400,10 @@ impl SessionAnalytics {
                 avalanche_combination_size: args.avalanche_combination_size,
                 avalanche_combination_pool_size: args.avalanche_combination_pool_size,
                 avalanche_combination_majority_vote: args.avalanche_combination_majority_vote,
+                avalanche_combination_sample_smoothing: args
+                    .avalanche_combination_sample_smoothing,
+                avalanche_combination_majority_vote_print: args
+                    .avalanche_combination_majority_vote_print,
                 bits_decrypt: args.bits_decrypt,
                 r_candidate_target_exponent: args.r_candidate_target_exponent,
             },

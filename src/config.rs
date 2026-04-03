@@ -119,6 +119,12 @@ pub struct EngineConfig {
     /// Whether sampled avalanche uses per-bit majority-vote probabilities from the combination outputs.
     #[serde(default = "default_avalanche_combination_majority_vote")]
     pub avalanche_combination_majority_vote: bool,
+    /// Whether sampled avalanche smooths per-bit majority-vote probabilities before beam search.
+    #[serde(default = "default_avalanche_combination_sample_smoothing")]
+    pub avalanche_combination_sample_smoothing: bool,
+    /// Whether sampled avalanche prints a separate majority-vote summary for the selected sample.
+    #[serde(default = "default_avalanche_combination_majority_vote_print")]
+    pub avalanche_combination_majority_vote_print: bool,
     #[serde(default = "default_same_r_batch")]
     pub same_r_batch: bool,
     #[serde(default = "default_ciphertext_modify")]
@@ -285,6 +291,8 @@ impl Default for EngineConfig {
             avalanche_combination_size: default_avalanche_combination_size(),
             avalanche_combination_pool_size: default_avalanche_combination_pool_size(),
             avalanche_combination_majority_vote: default_avalanche_combination_majority_vote(),
+            avalanche_combination_sample_smoothing: default_avalanche_combination_sample_smoothing(),
+            avalanche_combination_majority_vote_print: default_avalanche_combination_majority_vote_print(),
             same_r_batch: default_same_r_batch(),
             ciphertext_modify: default_ciphertext_modify(),
             oracle_accuracy_threshold: default_oracle_accuracy_threshold(),
@@ -896,6 +904,34 @@ fn default_avalanche_combination_pool_size() -> usize {
 /// # Expected Output
 /// - Returns a constant default value; no side effects.
 fn default_avalanche_combination_majority_vote() -> bool {
+    true
+}
+
+/// Default flag for smoothing per-bit majority-vote probabilities across sampled avalanche combinations.
+///
+/// # Parameters
+/// - None.
+///
+/// # Returns
+/// - `bool`: Default sample-smoothing setting for sampled avalanche runs.
+///
+/// # Expected Output
+/// - Returns a constant default value; no side effects.
+fn default_avalanche_combination_sample_smoothing() -> bool {
+    false
+}
+
+/// Default flag for printing the sampled-combination majority vote alongside beam output.
+///
+/// # Parameters
+/// - None.
+///
+/// # Returns
+/// - `bool`: Default majority-vote console-output setting for sampled avalanche runs.
+///
+/// # Expected Output
+/// - Returns a constant default value; no side effects.
+fn default_avalanche_combination_majority_vote_print() -> bool {
     true
 }
 

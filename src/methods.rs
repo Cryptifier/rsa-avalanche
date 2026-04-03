@@ -2652,20 +2652,74 @@ fn compute_per_bit_best_case_match(
 /// # Expected Output
 /// - Prints two hex strings with color highlighting; no file output.
 fn print_best_case_hex(message: &BigUint, best_case_bits: &[bool]) {
-    let best_case = bits_le_to_biguint(best_case_bits);
-    let original_hex = to_hex(message);
-    let best_hex = to_hex(&best_case);
+    let message_bits = biguint_to_bits_le(message, best_case_bits.len().max(1));
+    print_colored_hex_comparison(
+        "Original message",
+        &message_bits,
+        "Best-case message",
+        best_case_bits,
+    );
+}
 
-    let max_len = original_hex.len().max(best_hex.len());
-    let original_padded = pad_left_hex(&original_hex, max_len);
-    let best_padded = pad_left_hex(&best_hex, max_len);
+/// Prints two bit vectors as color-coded hex strings.
+///
+/// # Parameters
+/// - `reference_label`: Label printed for the reference bit vector.
+/// - `reference_bits`: Reference bit vector shown as the comparison target.
+/// - `candidate_label`: Label printed for the candidate bit vector.
+/// - `candidate_bits`: Candidate bit vector shown with match highlighting.
+///
+/// # Returns
+/// - `()`: This function returns nothing.
+///
+/// # Expected Output
+/// - Prints two hex strings with color highlighting; no file output.
+fn print_colored_hex_comparison(
+    reference_label: &str,
+    reference_bits: &[bool],
+    candidate_label: &str,
+    candidate_bits: &[bool],
+) {
+    let reference_hex = format_bits_hex_le(reference_bits);
+    let candidate_hex = format_bits_hex_le(candidate_bits);
+    let max_len = reference_hex.len().max(candidate_hex.len());
+    let reference_padded = pad_left_hex(&reference_hex, max_len);
+    let candidate_padded = pad_left_hex(&candidate_hex, max_len);
 
-    let original_colored = colorize_hex_matches(&original_padded, &best_padded);
-    let best_colored = colorize_hex_matches(&best_padded, &original_padded);
+    let reference_colored = colorize_hex_matches(&reference_padded, &candidate_padded);
+    let candidate_colored = colorize_hex_matches(&candidate_padded, &reference_padded);
 
-    println!("Original message (hex): {}", original_colored);
-    println!("Best-case message (hex): {}", best_colored);
+    println!("{} (hex): {}", reference_label, reference_colored);
+    println!("{} (hex): {}", candidate_label, candidate_colored);
     println!("Hex match key: green = match, red = mismatch");
+}
+
+/// Computes bit-match percentages for a candidate bit vector against a reference.
+///
+/// # Parameters
+/// - `candidate_bits`: Candidate bit vector to score.
+/// - `message_bits`: Reference bit vector to compare against.
+///
+/// # Returns
+/// - `(f64, f64)`: `(match_pct, ones_match_pct)` in percent.
+///
+/// # Expected Output
+/// - Returns percentage scores; no side effects.
+fn compute_bit_match_percentages(candidate_bits: &[bool], message_bits: &[bool]) -> (f64, f64) {
+    let (_, matching_total) = count_matching_bits_le(candidate_bits, message_bits);
+    let match_pct = matching_total as f64 / candidate_bits.len().max(1) as f64 * 100.0;
+    let candidate_ones = candidate_bits.iter().filter(|bit| **bit).count();
+    let matched_ones = candidate_bits
+        .iter()
+        .zip(message_bits.iter())
+        .filter(|(cand, msg)| **cand && **msg)
+        .count();
+    let ones_match_pct = if candidate_ones == 0 {
+        0.0
+    } else {
+        matched_ones as f64 / candidate_ones as f64 * 100.0
+    };
+    (match_pct, ones_match_pct)
 }
 
 /// Pads a hex string with leading zeros to the requested length.
@@ -4633,6 +4687,7 @@ struct BeamMaxCandidate {
     top_beam_score: f64,
     beam_results: Vec<AvalancheCombinationBeamResult>,
     best_bits: Vec<bool>,
+    majority_vote_bits: Vec<bool>,
     message_bits: Vec<bool>,
     batch_number: usize,
     sample_index: usize,
@@ -4821,6 +4876,8 @@ fn run_sampled_avalanche_beam_search(
     let beam_bit_one_threshold = engine.beam_bit_one_threshold;
     let spread_exponent = engine.avalanche_probability_spread_exponent;
     let majority_vote_enabled = engine.avalanche_combination_majority_vote;
+    let sample_smoothing_enabled = engine.avalanche_combination_sample_smoothing;
+    let majority_vote_print_enabled = engine.avalanche_combination_majority_vote_print;
     let message_bits = biguint_to_bits_le(message, pool[0].message_bits.len());
     let mut all_samples = Vec::with_capacity(sample_count);
     let mut selected_sample: Option<SampledAvalancheExecution> = None;
@@ -4828,13 +4885,15 @@ fn run_sampled_avalanche_beam_search(
     let mut next_sample_pct = 10u64;
 
     println!(
-        "Avalanche combination setup for batch {}: scored inputs {} pool {} combination-size {} samples {} majority-vote {}",
+        "Avalanche combination setup for batch {}: scored inputs {} pool {} combination-size {} samples {} majority-vote {} sample-smoothing {} majority-print {}",
         batch_number,
         scored_inputs.len(),
         pool_size,
         combination_size,
         sample_count,
-        if majority_vote_enabled { "on" } else { "off" }
+        if majority_vote_enabled { "on" } else { "off" },
+        if sample_smoothing_enabled { "on" } else { "off" },
+        if majority_vote_print_enabled { "on" } else { "off" }
     );
 
     for sample_index in 0..sample_count {
@@ -4860,10 +4919,14 @@ fn run_sampled_avalanche_beam_search(
         let majority_distribution =
             majority_vote_with_distribution(&selected_oracles, engine.combiner_tie_breaker)
                 .map_err(|err| -> Box<dyn Error> { Box::new(err) })?;
-        let majority_probabilities = smooth_probability_one_jeffreys(
-            &majority_distribution.ones_count,
-            majority_distribution.total_oracles,
-        );
+        let majority_probabilities = if sample_smoothing_enabled {
+            smooth_probability_one_jeffreys(
+                &majority_distribution.ones_count,
+                majority_distribution.total_oracles,
+            )
+        } else {
+            majority_distribution.probability_one.clone()
+        };
         let normalized_biases = if majority_vote_enabled {
             majority_probabilities.clone()
         } else {
@@ -4916,19 +4979,8 @@ fn run_sampled_avalanche_beam_search(
                 if rank == 0 {
                     best_bits = candidate_bits.clone();
                 }
-                let (_, matching_total) = count_matching_bits_le(&candidate_bits, &message_bits);
-                let match_pct = matching_total as f64 / bit_width as f64 * 100.0;
-                let candidate_ones = candidate_bits.iter().filter(|bit| **bit).count();
-                let matched_ones = candidate_bits
-                    .iter()
-                    .zip(message_bits.iter())
-                    .filter(|(cand, msg)| **cand && **msg)
-                    .count();
-                let ones_match_pct = if candidate_ones == 0 {
-                    0.0
-                } else {
-                    matched_ones as f64 / candidate_ones as f64 * 100.0
-                };
+                let (match_pct, ones_match_pct) =
+                    compute_bit_match_percentages(&candidate_bits, &message_bits);
                 AvalancheCombinationBeamResult {
                     rank: rank + 1,
                     score: candidate.score,
@@ -4946,6 +4998,7 @@ fn run_sampled_avalanche_beam_search(
             combination_size: selected_inputs.len(),
             average_score_pct,
             majority_vote_enabled,
+            sample_smoothing_enabled,
             inputs: selected_inputs
                 .iter()
                 .map(|input| AvalancheCombinationSampleInput {
@@ -5050,13 +5103,23 @@ fn run_r_candidate_accuracy_batches(
 
     let total_candidates = candidates_per_batch * batch_count;
     println!(
-        "Starting r-candidate accuracy batches: batches {} candidates-per-batch {} messages-per-batch {} avalanche-samples {} combination-size {} pool-source full-batch majority-vote {}",
+        "Starting r-candidate accuracy batches: batches {} candidates-per-batch {} messages-per-batch {} avalanche-samples {} combination-size {} pool-source full-batch majority-vote {} sample-smoothing {} majority-print {}",
         batch_count,
         candidates_per_batch,
         message_count,
         engine.avalanche_combination_samples,
         engine.avalanche_combination_size,
         if engine.avalanche_combination_majority_vote {
+            "on"
+        } else {
+            "off"
+        },
+        if engine.avalanche_combination_sample_smoothing {
+            "on"
+        } else {
+            "off"
+        },
+        if engine.avalanche_combination_majority_vote_print {
             "on"
         } else {
             "off"
@@ -5331,6 +5394,7 @@ fn run_r_candidate_accuracy_batches(
                     top_beam_score: selected_sample.top_beam_score,
                     beam_results: selected_sample.sample.beam_results.clone(),
                     best_bits: selected_sample.best_bits.clone(),
+                    majority_vote_bits: selected_sample.sample.majority_vote_bits.clone(),
                     message_bits,
                     batch_number,
                     sample_index: selected_sample.sample.sample_index,
@@ -5355,22 +5419,8 @@ fn run_r_candidate_accuracy_batches(
                     .first()
                     .cloned()
                     .ok_or("missing top beam for selected avalanche sample")?;
-                let (_, matching_total) =
-                    count_matching_bits_le(&max.best_bits, &max.message_bits);
-                let match_pct =
-                    matching_total as f64 / max.best_bits.len().max(1) as f64 * 100.0;
-                let candidate_ones = max.best_bits.iter().filter(|bit| **bit).count();
-                let matched_ones = max
-                    .best_bits
-                    .iter()
-                    .zip(max.message_bits.iter())
-                    .filter(|(cand, msg)| **cand && **msg)
-                    .count();
-                let ones_match_pct = if candidate_ones == 0 {
-                    0.0
-                } else {
-                    matched_ones as f64 / candidate_ones as f64 * 100.0
-                };
+                let (match_pct, ones_match_pct) =
+                    compute_bit_match_percentages(&max.best_bits, &max.message_bits);
                 println!(
                     "Avalanche beam run max: avg-score {}% beam-score {} batch {} sample {} match {}% ones-match {}% hex {}",
                     format_beam_float(max.average_score_pct, BEAM_PCT_DECIMALS),
@@ -5417,10 +5467,42 @@ fn run_r_candidate_accuracy_batches(
                 );
                 let msb = max.best_bits.last().copied().unwrap_or(false);
                 println!("Avalanche beam max MSB: {}", if msb { 1 } else { 0 });
+                if engine.avalanche_combination_majority_vote_print {
+                    let (majority_match_pct, majority_ones_match_pct) =
+                        compute_bit_match_percentages(
+                            &max.majority_vote_bits,
+                            &max.message_bits,
+                        );
+                    let majority_hex = format_bits_hex_le(&max.majority_vote_bits);
+                    println!(
+                        "Avalanche majority vote run max: avg-score {}% batch {} sample {} match {}% ones-match {}% hex {}",
+                        format_beam_float(max.average_score_pct, BEAM_PCT_DECIMALS),
+                        max.batch_number,
+                        max.sample_index,
+                        format_beam_float(majority_match_pct, BEAM_PCT_DECIMALS),
+                        format_beam_float(majority_ones_match_pct, BEAM_PCT_DECIMALS),
+                        majority_hex
+                    );
+                    println!(
+                        "Avalanche majority vote colored hex (best sample avg {}%, batch {}, sample {}, lsb0 order):",
+                        format_beam_float(max.average_score_pct, BEAM_PCT_DECIMALS),
+                        max.batch_number,
+                        max.sample_index
+                    );
+                    print_colored_hex_comparison(
+                        "Original message",
+                        &max.message_bits,
+                        "Majority-vote message",
+                        &max.majority_vote_bits,
+                    );
+                }
             } else {
                 println!("Avalanche beam run max: N/A");
                 println!("Avalanche beam max after {} batches: N/A", batch_count);
                 println!("Avalanche beam search results: N/A");
+                if engine.avalanche_combination_majority_vote_print {
+                    println!("Avalanche majority vote results: N/A");
+                }
             }
             if let Some(ref max) = cx_run_max {
                 println!(
@@ -5681,6 +5763,8 @@ mod tests {
             avalanche_combination_size: 50,
             avalanche_combination_pool_size: 100,
             avalanche_combination_majority_vote: true,
+            avalanche_combination_sample_smoothing: false,
+            avalanche_combination_majority_vote_print: true,
             bits_decrypt: None,
             r_candidate_target_exponent: None,
         })));
@@ -5745,6 +5829,8 @@ mod tests {
             avalanche_combination_size: 50,
             avalanche_combination_pool_size: 100,
             avalanche_combination_majority_vote: true,
+            avalanche_combination_sample_smoothing: false,
+            avalanche_combination_majority_vote_print: true,
             bits_decrypt: None,
             r_candidate_target_exponent: None,
         })));

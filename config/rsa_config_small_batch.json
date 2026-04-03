@@ -68,7 +68,9 @@
     "avalanche_combination_samples": 1000, // N: number of sampled combinations evaluated by avalanche per batch.
     "avalanche_combination_size": 25, // Number of scored items taken in each sampled combination.
     "avalanche_combination_pool_size": 200, // Legacy compatibility field; runtime sampling now always uses the full batch-sized pool.
-    "avalanche_combination_majority_vote": true, // Use smoothed per-bit majority-vote probabilities from each sampled combination.
+    "avalanche_combination_majority_vote": true, // Use per-bit majority-vote probabilities from each sampled combination.
+    "avalanche_combination_sample_smoothing": false, // Apply Jeffreys smoothing to the sampled majority-vote probabilities before beam search.
+    "avalanche_combination_majority_vote_print": true, // Print a separate sampled-combination majority-vote summary alongside the beam output.
     "same_r_batch": true,
     "ciphertext_modify": true,
     "enciphered_export_enable": false,

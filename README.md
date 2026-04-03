@@ -42,7 +42,9 @@ cargo run --bin analysis -- --config config/rsa_config.json
 - `--avalanche-combination-samples <u64>`: Number of sampled combinations evaluated by avalanche per batch. Default `100`.
 - `--avalanche-combination-size <u64>`: Number of scored items taken in each sampled combination. Default `50`.
 - `--avalanche-combination-pool-size <u64>`: Legacy compatibility override recorded in session metadata; runtime sampling now uses the full batch-sized pool.
-- `--avalanche-combination-majority-vote <bool>`: Use per-bit majority-vote probabilities, with smoothing, from each sampled combination. Default `true`.
+- `--avalanche-combination-majority-vote <bool>`: Use per-bit majority-vote probabilities from each sampled combination. Default `true`.
+- `--avalanche-combination-sample-smoothing <bool>`: Apply Jeffreys smoothing to sampled majority-vote probabilities before beam search. Default `false`.
+- `--avalanche-combination-majority-vote-print <bool>`: Print a separate sampled-combination majority-vote summary for the selected sample. Default `true`.
 
 # Command Line (demo)
 ```bash
@@ -91,7 +93,9 @@ Notes:
 | `engine.avalanche_combination_samples` | u64 | `100` | Number of sampled combinations evaluated by avalanche per batch. |
 | `engine.avalanche_combination_size` | usize | `50` | Number of scored items taken in each sampled combination. |
 | `engine.avalanche_combination_pool_size` | usize | `100` | Legacy compatibility field; runtime sampling now uses the full batch-sized pool. |
-| `engine.avalanche_combination_majority_vote` | bool | `true` | Use smoothed per-bit majority-vote probabilities from each sampled combination. |
+| `engine.avalanche_combination_majority_vote` | bool | `true` | Use per-bit majority-vote probabilities from each sampled combination. |
+| `engine.avalanche_combination_sample_smoothing` | bool | `false` | Apply Jeffreys smoothing to sampled majority-vote probabilities before beam search. |
+| `engine.avalanche_combination_majority_vote_print` | bool | `true` | Print a separate sampled-combination majority-vote summary for the selected sample. |
 | `engine.process_min_count` | u64 | `25` | Minimum r candidates to process. |
 | `engine.process_count` | u64 | `25` | Target r candidates per batch. |
 | `engine.process_scale` | u32 | `12` | Scaling factor for candidate generation. |
@@ -134,7 +138,7 @@ Notes:
 | `engine.message.bits` | u32 | `128` | Random message bit length. |
 | `engine.message.fixed_message` | string | `HeloWrld1234` | Fixed message when `is_random` is `false`. |
 
-For `config/rsa_config_small_batch.json`, sampled avalanche now draws every combination from the full scored batch-sized pool rather than truncating to a separate top-pool limit. When `engine.avalanche_combination_majority_vote` is enabled, which is the default, the beam probabilities come from smoothed per-bit majority-vote frequencies across each sampled combination.
+For `config/rsa_config_small_batch.json`, sampled avalanche now draws every combination from the full scored batch-sized pool rather than truncating to a separate top-pool limit. When `engine.avalanche_combination_majority_vote` is enabled, which is the default, the beam probabilities come from per-bit majority-vote frequencies across each sampled combination. Enable `engine.avalanche_combination_sample_smoothing` or `--avalanche-combination-sample-smoothing true` to apply Jeffreys smoothing to those frequencies before beam search. `engine.avalanche_combination_majority_vote_print` controls the separate console summary for the sampled-combination majority vote and defaults to `true`.
 
 # Configuration (demo verification inputs)
 These optional keys are used by `demo` when `--ciphertext` is not provided.
