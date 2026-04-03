@@ -89,6 +89,10 @@ struct Args {
     #[arg(long = "avalanche-combination-pool-size", value_parser = clap::value_parser!(u64).range(1..))]
     avalanche_combination_pool_size: Option<u64>,
 
+    /// Whether sampled avalanche uses per-bit majority-vote probabilities from the combination outputs
+    #[arg(long = "avalanche-combination-majority-vote")]
+    avalanche_combination_majority_vote: Option<bool>,
+
     /// Raise ciphertext to a monotonically increasing exponent per batch
     #[arg(long)]
     ciphertext_modify: bool,
@@ -143,6 +147,9 @@ fn main() -> Result<(), Box<dyn Error>> {
         config.engine.avalanche_combination_pool_size = usize::try_from(pool_size)
             .map_err(|_| "avalanche combination pool size exceeds usize range")?;
     }
+    if let Some(majority_vote) = args.avalanche_combination_majority_vote {
+        config.engine.avalanche_combination_majority_vote = majority_vote;
+    }
     config.engine.analysis_batch_enable = batch_enable;
     if args.ciphertext_modify {
         config.engine.ciphertext_modify = true;
@@ -178,6 +185,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         avalanche_combination_samples: config.engine.avalanche_combination_samples,
         avalanche_combination_size: config.engine.avalanche_combination_size,
         avalanche_combination_pool_size: config.engine.avalanche_combination_pool_size,
+        avalanche_combination_majority_vote: config.engine.avalanche_combination_majority_vote,
         bits_decrypt: args.bits_decrypt,
         r_candidate_target_exponent: args
             .r_candidate_target_exponent

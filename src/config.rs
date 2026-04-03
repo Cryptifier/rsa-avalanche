@@ -113,9 +113,12 @@ pub struct EngineConfig {
     /// Number of scored candidates included in each avalanche combination sample.
     #[serde(default = "default_avalanche_combination_size")]
     pub avalanche_combination_size: usize,
-    /// Number of top scored candidates available for avalanche combination sampling.
+    /// Legacy pool-size setting retained for compatibility; sampled pools now use the full batch.
     #[serde(default = "default_avalanche_combination_pool_size")]
     pub avalanche_combination_pool_size: usize,
+    /// Whether sampled avalanche uses per-bit majority-vote probabilities from the combination outputs.
+    #[serde(default = "default_avalanche_combination_majority_vote")]
+    pub avalanche_combination_majority_vote: bool,
     #[serde(default = "default_same_r_batch")]
     pub same_r_batch: bool,
     #[serde(default = "default_ciphertext_modify")]
@@ -281,6 +284,7 @@ impl Default for EngineConfig {
             avalanche_combination_samples: default_avalanche_combination_samples(),
             avalanche_combination_size: default_avalanche_combination_size(),
             avalanche_combination_pool_size: default_avalanche_combination_pool_size(),
+            avalanche_combination_majority_vote: default_avalanche_combination_majority_vote(),
             same_r_batch: default_same_r_batch(),
             ciphertext_modify: default_ciphertext_modify(),
             oracle_accuracy_threshold: default_oracle_accuracy_threshold(),
@@ -879,6 +883,20 @@ fn default_avalanche_combination_size() -> usize {
 /// - Returns a constant default value; no side effects.
 fn default_avalanche_combination_pool_size() -> usize {
     100
+}
+
+/// Default flag for per-bit majority voting across sampled avalanche combinations.
+///
+/// # Parameters
+/// - None.
+///
+/// # Returns
+/// - `bool`: Default majority-vote setting for sampled avalanche runs.
+///
+/// # Expected Output
+/// - Returns a constant default value; no side effects.
+fn default_avalanche_combination_majority_vote() -> bool {
+    true
 }
 
 /// Default flag for using the same r candidate across a batch.

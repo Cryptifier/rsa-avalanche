@@ -1058,6 +1058,28 @@ fn mean_f64(values: &[f64]) -> f64 {
     sum / values.len() as f64
 }
 
+/// Applies Jeffreys smoothing to per-bit `P(1)` estimates.
+///
+/// # Parameters
+/// - `ones_count`: Count of `1` votes at each bit position.
+/// - `total_oracles`: Number of sampled oracle bit vectors contributing to each count.
+///
+/// # Returns
+/// - `Vec<f64>`: Smoothed per-bit probabilities of observing `1`.
+///
+/// # Expected Output
+/// - Returns probabilities in `(0, 1)` when `total_oracles > 0`; no stdout/stderr output.
+fn smooth_probability_one_jeffreys(ones_count: &[usize], total_oracles: usize) -> Vec<f64> {
+    if total_oracles == 0 {
+        return vec![0.5; ones_count.len()];
+    }
+    let denominator = total_oracles as f64 + 1.0;
+    ones_count
+        .iter()
+        .map(|ones| (*ones as f64 + 0.5) / denominator)
+        .collect()
+}
+
 /// Precomputed r-candidate data for oracle and timeline tests.
 #[derive(Clone, Debug)]
 struct OracleCandidate {
@@ -4768,9 +4790,6 @@ fn run_sampled_avalanche_beam_search(
     if engine.avalanche_combination_size == 0 {
         return Err("avalanche_combination_size must be >= 1".into());
     }
-    if engine.avalanche_combination_pool_size == 0 {
-        return Err("avalanche_combination_pool_size must be >= 1".into());
-    }
     if scored_inputs.is_empty() {
         return Ok(SampledAvalancheBatchResult {
             selected_sample: None,
@@ -4787,9 +4806,7 @@ fn run_sampled_avalanche_beam_search(
             .then_with(|| left.message_index.cmp(&right.message_index))
     });
 
-    let pool_size = engine
-        .avalanche_combination_pool_size
-        .min(ranked_inputs.len());
+    let pool_size = ranked_inputs.len();
     let combination_size = engine.avalanche_combination_size.min(pool_size);
     if combination_size == 0 {
         return Ok(SampledAvalancheBatchResult {
@@ -4803,6 +4820,7 @@ fn run_sampled_avalanche_beam_search(
     let sample_count = engine.avalanche_combination_samples as usize;
     let beam_bit_one_threshold = engine.beam_bit_one_threshold;
     let spread_exponent = engine.avalanche_probability_spread_exponent;
+    let majority_vote_enabled = engine.avalanche_combination_majority_vote;
     let message_bits = biguint_to_bits_le(message, pool[0].message_bits.len());
     let mut all_samples = Vec::with_capacity(sample_count);
     let mut selected_sample: Option<SampledAvalancheExecution> = None;
@@ -4810,12 +4828,13 @@ fn run_sampled_avalanche_beam_search(
     let mut next_sample_pct = 10u64;
 
     println!(
-        "Avalanche combination setup for batch {}: scored inputs {} pool {} combination-size {} samples {}",
+        "Avalanche combination setup for batch {}: scored inputs {} pool {} combination-size {} samples {} majority-vote {}",
         batch_number,
         scored_inputs.len(),
         pool_size,
         combination_size,
-        sample_count
+        sample_count,
+        if majority_vote_enabled { "on" } else { "off" }
     );
 
     for sample_index in 0..sample_count {
@@ -4834,7 +4853,22 @@ fn run_sampled_avalanche_beam_search(
         }
 
         let avalanche_search = search_avalanche_tree_with_scores(avalanche_nodes)?;
-        let normalized_biases = normalize_avalanche_biases(&avalanche_search.node.biases);
+        let selected_oracles = selected_inputs
+            .iter()
+            .map(|input| input.message_bits.clone())
+            .collect::<Vec<_>>();
+        let majority_distribution =
+            majority_vote_with_distribution(&selected_oracles, engine.combiner_tie_breaker)
+                .map_err(|err| -> Box<dyn Error> { Box::new(err) })?;
+        let majority_probabilities = smooth_probability_one_jeffreys(
+            &majority_distribution.ones_count,
+            majority_distribution.total_oracles,
+        );
+        let normalized_biases = if majority_vote_enabled {
+            majority_probabilities.clone()
+        } else {
+            normalize_avalanche_biases(&avalanche_search.node.biases)
+        };
         let beam_probabilities =
             spread_normalized_avalanche_biases(&normalized_biases, spread_exponent);
         let bit_width = avalanche_search.node.message_bits.len().max(1);
@@ -4911,6 +4945,7 @@ fn run_sampled_avalanche_beam_search(
             pool_size,
             combination_size: selected_inputs.len(),
             average_score_pct,
+            majority_vote_enabled,
             inputs: selected_inputs
                 .iter()
                 .map(|input| AvalancheCombinationSampleInput {
@@ -4925,6 +4960,10 @@ fn run_sampled_avalanche_beam_search(
                     candidate_decryption: input.candidate_decryption.clone(),
                 })
                 .collect(),
+            majority_vote_bits: majority_distribution.majority_bits,
+            majority_vote_ones_count: majority_distribution.ones_count,
+            majority_vote_zeros_count: majority_distribution.zeros_count,
+            majority_vote_probability_one: majority_probabilities,
             level_similarity_pct: avalanche_search.level_similarity_pct,
             level_pair_counts: avalanche_search.level_pair_counts,
             normalized_bias_probabilities: normalized_biases,
@@ -5011,13 +5050,17 @@ fn run_r_candidate_accuracy_batches(
 
     let total_candidates = candidates_per_batch * batch_count;
     println!(
-        "Starting r-candidate accuracy batches: batches {} candidates-per-batch {} messages-per-batch {} avalanche-samples {} combination-size {} pool-size {}",
+        "Starting r-candidate accuracy batches: batches {} candidates-per-batch {} messages-per-batch {} avalanche-samples {} combination-size {} pool-source full-batch majority-vote {}",
         batch_count,
         candidates_per_batch,
         message_count,
         engine.avalanche_combination_samples,
         engine.avalanche_combination_size,
-        engine.avalanche_combination_pool_size
+        if engine.avalanche_combination_majority_vote {
+            "on"
+        } else {
+            "off"
+        }
     );
     let settings = build_r_candidate_settings(engine);
     let mut candidates = generate_r_candidates_with_analytics(
@@ -5637,6 +5680,7 @@ mod tests {
             avalanche_combination_samples: 100,
             avalanche_combination_size: 50,
             avalanche_combination_pool_size: 100,
+            avalanche_combination_majority_vote: true,
             bits_decrypt: None,
             r_candidate_target_exponent: None,
         })));
@@ -5700,6 +5744,7 @@ mod tests {
             avalanche_combination_samples: 100,
             avalanche_combination_size: 50,
             avalanche_combination_pool_size: 100,
+            avalanche_combination_majority_vote: true,
             bits_decrypt: None,
             r_candidate_target_exponent: None,
         })));
