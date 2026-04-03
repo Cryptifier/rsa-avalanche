@@ -45,7 +45,7 @@ use crate::dsp::{find_ramp_signals_f64, ramp_signal_strength_f64};
 use crate::helpers::{format_beam_float, normalize_avalanche_biases};
 use crate::math::{
     bit_length, choose_exponent, compute_totient, factor_composite_with_timeout,
-    is_probable_prime_big, mod_inverse, modular_sqrt, random_biguint_bits, random_prime_with_bits,
+    is_probable_prime_big, mod_inverse, random_biguint_bits, random_prime_with_bits,
     shannon_entropy_bit, to_hex,
 };
 use crate::r_candidates::{RCandidate, RCandidateSettings};
@@ -865,8 +865,6 @@ fn build_bit_similarity_entries(
     let max_shift = (base_shift + shift_levels).min(bit_width.saturating_sub(1));
     let mut match_counts = vec![0u32; bit_width];
 
-    let y = engine.rabin_exponent as u32;
-    let n_pow_y = ctx.n.pow(y);
     let e_value = ctx.e.to_string();
     let base_ciphertext = message.modpow(&ctx.e, &ctx.n);
     let enc_two = BigUint::from(2u8).modpow(&ctx.e, &ctx.n);
@@ -888,21 +886,18 @@ fn build_bit_similarity_entries(
                 continue;
             }
             let shifted_ciphertext = (&candidate_ciphertext * &enc_two_pow) % &ctx.n;
-            let result_default = get_larger_number(&shifted_ciphertext, &ctx.n, y, true, false);
-            shift_results.push((shift_idx, result_default));
+            let prepared_ciphertext =
+                prepare_candidate_ciphertext(engine, &shifted_ciphertext, &candidate.r, &ctx.n);
+            shift_results.push((shift_idx, prepared_ciphertext));
         }
 
-        for (shift_idx, result_default) in &shift_results {
+        for (shift_idx, prepared_ciphertext) in &shift_results {
             let dm = derive_candidate_message_from_result(
                 ctx,
                 engine,
-                result_default,
+                prepared_ciphertext,
                 &candidate.r,
                 &candidate.d_new,
-                &n_pow_y,
-                &candidate.r_pow_y,
-                y,
-                false,
             );
             let dm_bits = biguint_to_bits_le(&dm, bit_width);
             let masked_bits = (*shift_idx).min(bit_width);
@@ -1062,7 +1057,6 @@ struct OracleCandidate {
     r: BigUint,
     d_new: BigUint,
     phi_new: BigUint,
-    r_pow_y: BigUint,
     x: BigUint,
     target_exponent: BigDecimal,
 }
@@ -1274,11 +1268,8 @@ fn collect_speculative_oracle_bits(
         return Err("no r candidates generated for combiner".into());
     }
 
-    let y = engine.rabin_exponent as u32;
-    let n_pow_y = ctx.n.pow(y);
     let ciphertext = message.modpow(&ctx.e, &ctx.n);
     let shifted = maybe_shift_ciphertext(ctx, &ciphertext, shift);
-    let result_default = get_larger_number(&shifted, &ctx.n, y, true, false);
 
     record_r_candidate_trace_batch_from_factors(
         ctx,
@@ -1301,17 +1292,14 @@ fn collect_speculative_oracle_bits(
             continue;
         };
 
-        let r_pow_y = candidate.r.pow(y);
+        let prepared_ciphertext =
+            prepare_candidate_ciphertext(engine, &shifted, &candidate.r, &ctx.n);
         let dm = derive_candidate_message_from_result(
             ctx,
             engine,
-            &result_default,
+            &prepared_ciphertext,
             &candidate.r,
             &d_new,
-            &n_pow_y,
-            &r_pow_y,
-            y,
-            false,
         );
 
         oracles.push(biguint_to_bits_le(&dm, bit_width));
@@ -1410,7 +1398,6 @@ fn build_oracle_candidates(
         return Err("no r candidates generated for analysis tests".into());
     }
 
-    let y = engine.rabin_exponent as u32;
     let e_big = ctx.e.clone();
     let target_count = candidates.len();
     let mut prepared = Vec::with_capacity(target_count);
@@ -1427,7 +1414,6 @@ fn build_oracle_candidates(
 
         let (candidate, phi_new) =
             selected.ok_or("no valid r candidates available for same-r analysis tests")?;
-        let r_pow_y = candidate.r.pow(y);
 
         let mut instance_idx = 0usize;
         let mut attempts = 0usize;
@@ -1440,7 +1426,6 @@ fn build_oracle_candidates(
                     r: candidate.r.clone(),
                     d_new,
                     phi_new: phi_new.clone(),
-                    r_pow_y: r_pow_y.clone(),
                     x,
                     target_exponent: candidate.target_exponent.clone(),
                 });
@@ -1457,12 +1442,10 @@ fn build_oracle_candidates(
         for candidate in candidates {
             let phi_new = compute_totient(&candidate.factors);
             if let Some(d_new) = mod_inverse(&e_big, &phi_new) {
-                let r_pow_y = candidate.r.pow(y);
                 prepared.push(OracleCandidate {
                     r: candidate.r,
                     d_new,
                     phi_new,
-                    r_pow_y,
                     x: BigUint::one(),
                     target_exponent: candidate.target_exponent,
                 });
@@ -1502,25 +1485,20 @@ fn select_best_candidate(
         return None;
     }
 
-    let y = engine.rabin_exponent as u32;
-    let n_pow_y = ctx.n.pow(y);
     let base_ciphertext = message.modpow(&ctx.e, &ctx.n);
 
     let mut best: Option<CandidateScore> = None;
     for candidate in candidates {
         let ciphertext = ciphertext_for_candidate(ctx, &base_ciphertext, candidate);
         let shifted = maybe_shift_ciphertext(ctx, &ciphertext, shift);
-        let result_default = get_larger_number(&shifted, &ctx.n, y, true, false);
+        let prepared_ciphertext =
+            prepare_candidate_ciphertext(engine, &shifted, &candidate.r, &ctx.n);
         let dm = derive_candidate_message_from_result(
             ctx,
             engine,
-            &result_default,
+            &prepared_ciphertext,
             &candidate.r,
             &candidate.d_new,
-            &n_pow_y,
-            &candidate.r_pow_y,
-            y,
-            false,
         );
         let (matching_lsb, matching_total) = count_matching_bits(&dm, message);
         let score = CandidateScore {
@@ -1584,9 +1562,6 @@ fn run_oracle_entropy_timeline(
     let fixed_message = resolve_fixed_message_for_tests(engine, &ctx.n)?;
     let bit_width = analysis_bit_width(engine, &ctx.n, &fixed_message);
 
-    let y = engine.rabin_exponent as u32;
-    let n_pow_y = ctx.n.pow(y);
-
     let mut seeds = Vec::with_capacity(iterations);
     for _ in 0..iterations {
         seeds.push(rng.next_u64());
@@ -1606,17 +1581,14 @@ fn run_oracle_entropy_timeline(
             for candidate in candidates.iter().take(oracle_count) {
                 let ciphertext = ciphertext_for_candidate(ctx, &base_ciphertext, candidate);
                 let shifted = maybe_shift_ciphertext(ctx, &ciphertext, shift);
-                let result_default = get_larger_number(&shifted, &ctx.n, y, true, false);
+                let prepared_ciphertext =
+                    prepare_candidate_ciphertext(engine, &shifted, &candidate.r, &ctx.n);
                 let dm = derive_candidate_message_from_result(
                     ctx,
                     engine,
-                    &result_default,
+                    &prepared_ciphertext,
                     &candidate.r,
                     &candidate.d_new,
-                    &n_pow_y,
-                    &candidate.r_pow_y,
-                    y,
-                    false,
                 );
                 oracles.push(biguint_to_bits_le(&dm, bit_width));
             }
@@ -1724,9 +1696,6 @@ fn run_match_entropy_timeline(
     let fixed_message = resolve_fixed_message_for_tests(engine, &ctx.n)?;
     let bit_width = analysis_bit_width(engine, &ctx.n, &fixed_message);
 
-    let y = engine.rabin_exponent as u32;
-    let n_pow_y = ctx.n.pow(y);
-
     let mut seeds = Vec::with_capacity(iterations);
     for _ in 0..iterations {
         seeds.push(rng.next_u64());
@@ -1749,10 +1718,6 @@ fn run_match_entropy_timeline(
                 &ciphertext,
                 &candidate.r,
                 &candidate.d_new,
-                &n_pow_y,
-                &candidate.r_pow_y,
-                y,
-                false,
                 shift,
             );
 
@@ -1888,8 +1853,6 @@ fn screen_oracles_per_bit(
     let top_k = top_k.max(1).min(candidates.len());
 
     let bit_width = analysis_bit_width(engine, &ctx.n, &None);
-    let y = engine.rabin_exponent as u32;
-    let n_pow_y = ctx.n.pow(y);
 
     let mut seeds = Vec::with_capacity(iterations);
     for _ in 0..iterations {
@@ -1949,17 +1912,14 @@ fn screen_oracles_per_bit(
             for sample in samples.iter() {
                 let ciphertext = ciphertext_for_candidate(ctx, &sample.ciphertext, candidate);
                 let shifted = maybe_shift_ciphertext(ctx, &ciphertext, shift);
-                let result_default = get_larger_number(&shifted, &ctx.n, y, true, false);
+                let prepared_ciphertext =
+                    prepare_candidate_ciphertext(engine, &shifted, &candidate.r, &ctx.n);
                 let dm = derive_candidate_message_from_result(
                     ctx,
                     engine,
-                    &result_default,
+                    &prepared_ciphertext,
                     &candidate.r,
                     &candidate.d_new,
-                    &n_pow_y,
-                    &candidate.r_pow_y,
-                    y,
-                    false,
                 );
                 let dm_bits = biguint_to_bits_le(&dm, bit_width);
                 for (bit_idx, bit) in dm_bits.iter().enumerate() {
@@ -2047,8 +2007,6 @@ fn run_bitwise_speculative_oracle_attempt(
         per_bit_oracles[0].len().max(1)
     };
 
-    let y = engine.rabin_exponent as u32;
-    let n_pow_y = ctx.n.pow(y);
     let e_big = ctx.e.clone();
     let base_ciphertext = message.modpow(&ctx.e, &ctx.n);
 
@@ -2078,7 +2036,6 @@ fn run_bitwise_speculative_oracle_attempt(
                 .map_err(|err| err.to_string())?;
             let ciphertext = base_ciphertext.modpow(&x_big, &ctx.n);
             let shifted = maybe_shift_ciphertext(ctx, &ciphertext, shift);
-            let result_default = get_larger_number(&shifted, &ctx.n, y, true, false);
 
             let mut oracle_bits: Vec<Option<Vec<bool>>> = vec![None; candidates.len()];
             for oracle_idx in oracle_index_list.iter().copied() {
@@ -2087,16 +2044,14 @@ fn run_bitwise_speculative_oracle_attempt(
                 let Some(d_new) = mod_inverse(&e_x, &candidate.phi_new) else {
                     continue;
                 };
+                let prepared_ciphertext =
+                    prepare_candidate_ciphertext(engine, &shifted, &candidate.r, &ctx.n);
                 let dm = derive_candidate_message_from_result(
                     ctx,
                     engine,
-                    &result_default,
+                    &prepared_ciphertext,
                     &candidate.r,
                     &d_new,
-                    &n_pow_y,
-                    &candidate.r_pow_y,
-                    y,
-                    false,
                 );
                 oracle_bits[oracle_idx] = Some(biguint_to_bits_le(&dm, bit_width));
             }
@@ -2219,8 +2174,6 @@ fn build_avalanche_nodes_unique_d(
     }
 
     let bit_width = resolve_decrypt_bit_width(message, bits_decrypt)?;
-    let y = engine.rabin_exponent as u32;
-    let n_pow_y = ctx.n.pow(y);
     let e_big = ctx.e.clone();
     let base_ciphertext = message.modpow(&ctx.e, &ctx.n);
 
@@ -2247,7 +2200,6 @@ fn build_avalanche_nodes_unique_d(
                 .map_err(|err| err.to_string())?;
             let ciphertext = base_ciphertext.modpow(&x_big, &ctx.n);
             let shifted = maybe_shift_ciphertext(ctx, &ciphertext, shift);
-            let result_default = get_larger_number(&shifted, &ctx.n, y, true, false);
             let e_x = &e_big * &x_big;
 
             let mut nodes = Vec::with_capacity(candidates.len());
@@ -2255,16 +2207,14 @@ fn build_avalanche_nodes_unique_d(
                 let Some(d_new) = mod_inverse(&e_x, &candidate.phi_new) else {
                     continue;
                 };
+                let prepared_ciphertext =
+                    prepare_candidate_ciphertext(engine, &shifted, &candidate.r, &ctx.n);
                 let dm = derive_candidate_message_from_result(
                     ctx,
                     engine,
-                    &result_default,
+                    &prepared_ciphertext,
                     &candidate.r,
                     &d_new,
-                    &n_pow_y,
-                    &candidate.r_pow_y,
-                    y,
-                    false,
                 );
                 let message_bits = biguint_to_bits_le(&dm, bit_width);
                 let node = AvalancheNode {
@@ -2632,8 +2582,6 @@ fn compute_per_bit_best_case_match(
     }
 
     let bit_width = resolve_decrypt_bit_width(message, bits_decrypt)?;
-    let y = engine.rabin_exponent as u32;
-    let n_pow_y = ctx.n.pow(y);
     let base_ciphertext = message.modpow(&ctx.e, &ctx.n);
     let message_bits = biguint_to_bits_le(message, bit_width);
 
@@ -2649,17 +2597,14 @@ fn compute_per_bit_best_case_match(
         let candidate = &candidates[oracle_idx];
         let ciphertext = ciphertext_for_candidate(ctx, &base_ciphertext, candidate);
         let shifted = maybe_shift_ciphertext(ctx, &ciphertext, shift);
-        let result_default = get_larger_number(&shifted, &ctx.n, y, true, false);
+        let prepared_ciphertext =
+            prepare_candidate_ciphertext(engine, &shifted, &candidate.r, &ctx.n);
         let dm = derive_candidate_message_from_result(
             ctx,
             engine,
-            &result_default,
+            &prepared_ciphertext,
             &candidate.r,
             &candidate.d_new,
-            &n_pow_y,
-            &candidate.r_pow_y,
-            y,
-            false,
         );
         oracle_bits[oracle_idx] = Some(biguint_to_bits_le(&dm, bit_width));
     }
@@ -3347,8 +3292,6 @@ fn run_enciphered_export(
         .unwrap_or(0);
     let bit_width = engine.message.bits.max(1).max(fixed_message_bits as u32) as usize;
 
-    let y = engine.rabin_exponent as u32;
-    let n_pow_y = ctx.n.pow(y);
     let settings = build_r_candidate_settings(engine);
     let batch_size = engine.process_count.max(engine.process_min_count).max(1) as usize;
     let mut candidates = generate_r_candidates_with_analytics(
@@ -3375,7 +3318,6 @@ fn run_enciphered_export(
         candidate.r, candidate.factors
     );
 
-    let r_pow_y = candidate.r.pow(y);
     let mut seeds = Vec::with_capacity(iterations);
     for _ in 0..iterations {
         seeds.push(rng.next_u64());
@@ -3400,10 +3342,6 @@ fn run_enciphered_export(
                 &ciphertext,
                 &candidate.r,
                 &d_new,
-                &n_pow_y,
-                &r_pow_y,
-                y,
-                false,
                 shift,
             );
 
@@ -3979,9 +3917,6 @@ fn run_message_trial(
     let mut best: Option<TestReport> = None;
     let mut worst: Option<TestReport> = None;
 
-    let y = engine.rabin_exponent as u32;
-    let n_pow_y = ctx.n.pow(y);
-
     let settings = build_r_candidate_settings(engine);
     let batch_size = engine.process_count.max(engine.process_min_count).max(1) as usize;
     let candidates = generate_r_candidates_with_analytics(
@@ -4012,7 +3947,6 @@ fn run_message_trial(
         }
 
         let shifted = maybe_shift_ciphertext(ctx, &ciphertext, shift);
-        let result_default = get_larger_number(&shifted, &ctx.n, y, true, false);
 
         let (attempt_best, attempt_worst, attempt_hist) = candidates
             .par_iter()
@@ -4030,17 +3964,14 @@ fn run_message_trial(
                         return acc;
                     };
 
-                    let r_pow_y = candidate.r.pow(y);
+                    let prepared_ciphertext =
+                        prepare_candidate_ciphertext(engine, &shifted, &candidate.r, &ctx.n);
                     let dm = derive_candidate_message_from_result(
                         ctx,
                         engine,
-                        &result_default,
+                        &prepared_ciphertext,
                         &candidate.r,
                         &d_new,
-                        &n_pow_y,
-                        &r_pow_y,
-                        y,
-                        false,
                     );
                     acc.2.update(&dm, &msg);
 
@@ -4180,10 +4111,7 @@ fn run_fixed_r_trials(
 
     let engine = &config.engine;
 
-    let y = engine.rabin_exponent as u32;
-    let n_pow_y = ctx.n.pow(y);
     let r = &r_report.best_r;
-    let r_pow_y = r.pow(y);
     let phi_new = compute_totient(&r_report.factors);
     let d_new = mod_inverse(&ctx.e, &phi_new)?;
 
@@ -4212,10 +4140,6 @@ fn run_fixed_r_trials(
                 &ciphertext,
                 r,
                 &d_new,
-                &n_pow_y,
-                &r_pow_y,
-                y,
-                true,
                 shift,
             );
 
@@ -4407,44 +4331,6 @@ fn count_matching_bits(a: &BigUint, b: &BigUint) -> (usize, usize) {
 /// - `x`: Input value.
 /// - `p`: Modulus base.
 /// - `y`: Exponent parameter.
-/// - `apply_mod`: Whether to apply modulus at the end.
-/// - `use_other_root`: Whether to use the alternate square root branch.
-///
-/// # Returns
-/// - `BigUint`: Derived value based on modular square roots and exponentiation.
-///
-/// # Expected Output
-/// - Returns a computed `BigUint`; no side effects.
-fn get_larger_number(
-    x: &BigUint,
-    p: &BigUint,
-    y: u32,
-    apply_mod: bool,
-    use_other_root: bool,
-) -> BigUint {
-    let p_y = p.pow(y);
-    let p_y_minus_one = p.pow(y.saturating_sub(1));
-
-    let x2_mod_p = x.modpow(&BigUint::from(2u8), p);
-    let x2_mod_p_y = x.modpow(&BigUint::from(2u8), &p_y);
-
-    let test_1 = modular_sqrt(&x2_mod_p, p);
-    let base_root = if use_other_root {
-        (p - &test_1) % p
-    } else {
-        test_1
-    };
-    let big_x = base_root.modpow(&p_y_minus_one, &p_y);
-
-    let tmp_1 = (&p_y - &(BigUint::from(2u8) * &p_y_minus_one) + BigUint::one()) >> 1;
-    let factor = x2_mod_p_y.modpow(&tmp_1, &p_y);
-    if apply_mod {
-        (big_x * factor) % p_y
-    } else {
-        big_x * factor
-    }
-}
-
 /// Applies the homomorphic base conversion formula.
 ///
 /// # Parameters
@@ -4487,6 +4373,28 @@ fn hbc(x: &BigUint, r: &BigUint, p: &BigUint, engine: &EngineConfig) -> BigUint 
     }
 }
 
+/// Prepares a candidate-modulus ciphertext by applying HBC from the source modulus.
+///
+/// # Parameters
+/// - `engine`: Engine configuration controlling HBC behavior.
+/// - `ciphertext`: Ciphertext to convert into the candidate modulus.
+/// - `target_modulus`: Candidate modulus that receives the converted ciphertext.
+/// - `source_modulus`: Source modulus currently associated with `ciphertext`.
+///
+/// # Returns
+/// - `BigUint`: HBC-converted ciphertext reduced modulo `target_modulus`.
+///
+/// # Expected Output
+/// - Returns the prepared ciphertext; no side effects.
+fn prepare_candidate_ciphertext(
+    engine: &EngineConfig,
+    ciphertext: &BigUint,
+    target_modulus: &BigUint,
+    source_modulus: &BigUint,
+) -> BigUint {
+    hbc(ciphertext, target_modulus, source_modulus, engine)
+}
+
 /// Derives the candidate message for a given ciphertext and r candidate.
 ///
 /// # Parameters
@@ -4495,10 +4403,6 @@ fn hbc(x: &BigUint, r: &BigUint, p: &BigUint, engine: &EngineConfig) -> BigUint 
 /// - `ciphertext`: Ciphertext to transform through the HBC flow.
 /// - `r`: Candidate modulus for alternate decryption.
 /// - `d_new`: Private exponent corresponding to `r`.
-/// - `n_pow_y`: Precomputed `n^y` value.
-/// - `r_pow_y`: Precomputed `r^y` value.
-/// - `y`: Rabin exponent used for modular transforms.
-/// - `use_other_root`: Whether to use the alternate square root branch.
 /// - `shift`: Whether to shift ciphertext by encrypted 2 before conversion.
 ///
 /// # Returns
@@ -4512,39 +4416,21 @@ fn derive_candidate_message(
     ciphertext: &BigUint,
     r: &BigUint,
     d_new: &BigUint,
-    n_pow_y: &BigUint,
-    r_pow_y: &BigUint,
-    y: u32,
-    use_other_root: bool,
     shift: bool,
 ) -> BigUint {
     let shifted = maybe_shift_ciphertext(ctx, ciphertext, shift);
-    let result_default = get_larger_number(&shifted, &ctx.n, y, true, use_other_root);
-    derive_candidate_message_from_result(
-        ctx,
-        engine,
-        &result_default,
-        r,
-        d_new,
-        n_pow_y,
-        r_pow_y,
-        y,
-        use_other_root,
-    )
+    let prepared_ciphertext = prepare_candidate_ciphertext(engine, &shifted, r, &ctx.n);
+    derive_candidate_message_from_result(ctx, engine, &prepared_ciphertext, r, d_new)
 }
 
-/// Derives the candidate message given a precomputed first-stage result.
+/// Derives the candidate message given a candidate-modulus ciphertext.
 ///
 /// # Parameters
 /// - `ctx`: RSA context containing key material.
 /// - `engine`: Engine configuration controlling HBC behavior.
-/// - `result_default`: Output from the first `get_larger_number` stage.
+/// - `candidate_ciphertext_r`: Ciphertext prepared in the candidate modulus via HBC.
 /// - `r`: Candidate modulus for alternate decryption.
 /// - `d_new`: Private exponent corresponding to `r`.
-/// - `n_pow_y`: Precomputed `n^y` value.
-/// - `r_pow_y`: Precomputed `r^y` value.
-/// - `y`: Rabin exponent used for modular transforms.
-/// - `use_other_root`: Whether to use the alternate square root branch.
 ///
 /// # Returns
 /// - `BigUint`: Derived candidate message modulo `n`.
@@ -4554,26 +4440,19 @@ fn derive_candidate_message(
 fn derive_candidate_message_from_result(
     ctx: &RSAContext,
     engine: &EngineConfig,
-    result_default: &BigUint,
+    candidate_ciphertext_r: &BigUint,
     r: &BigUint,
     d_new: &BigUint,
-    n_pow_y: &BigUint,
-    _r_pow_y: &BigUint,
-    _y: u32,
-    _use_other_root: bool,
 ) -> BigUint {
-    let hbc_result = hbc(result_default, r, n_pow_y, engine);
     let recovered_new = if engine.use_rs_decrypt {
-        hbc_result.modpow(d_new, r)
+        candidate_ciphertext_r.modpow(d_new, r)
     } else {
-        hbc_result
+        candidate_ciphertext_r.clone()
     };
 
-    //let result2_default = get_larger_number(&recovered_new, r, y, true, use_other_root);
-    //let hbc_default = hbc(&result2_default, &ctx.n, r_pow_y, engine);
-    //let hbc_default = hbc(&recovered_new, &ctx.n, r, engine);
-    //let dm_raw = &hbc_default % &ctx.n;
-    let dm_raw = &recovered_new % &ctx.n;
+    let hbc_default = hbc(&recovered_new, &ctx.n, r, engine);
+    let dm_raw = &hbc_default % &ctx.n;
+
     let width = dm_raw.bits().max(1);
     let mask = (BigUint::one() << width) - BigUint::one();
     let inverted_dm = &mask ^ &dm_raw;
@@ -4634,10 +4513,8 @@ fn record_r_candidate_trace_batch_from_factors(
     }
 
     let y = engine.rabin_exponent as u32;
-    let n_pow_y = ctx.n.pow(y);
     let ciphertext = message.modpow(&ctx.e, &ctx.n);
     let shifted = maybe_shift_ciphertext(ctx, &ciphertext, shift);
-    let result_default = get_larger_number(&shifted, &ctx.n, y, true, false);
 
     let mut entries = Vec::with_capacity(candidates.len());
     for candidate in candidates {
@@ -4645,18 +4522,13 @@ fn record_r_candidate_trace_batch_from_factors(
         let Some(d_new) = mod_inverse(&ctx.e, &phi_new) else {
             continue;
         };
-        let r_pow_y = candidate.r.pow(y);
-        let hbc_result = hbc(&result_default, &candidate.r, &n_pow_y, engine);
+        let hbc_result = prepare_candidate_ciphertext(engine, &shifted, &candidate.r, &ctx.n);
         let dm = derive_candidate_message_from_result(
             ctx,
             engine,
-            &result_default,
+            &hbc_result,
             &candidate.r,
             &d_new,
-            &n_pow_y,
-            &r_pow_y,
-            y,
-            false,
         );
         entries.push(RCandidateTraceEntry {
             r: candidate.r.to_string(),
@@ -4678,8 +4550,8 @@ fn record_r_candidate_trace_batch_from_factors(
             ciphertext: ciphertext.to_string(),
             shifted_ciphertext: shifted.to_string(),
             rabin_exponent: y,
-            tonelli_shanks_modulus: n_pow_y.to_string(),
-            tonelli_shanks_ciphertext: result_default.to_string(),
+            tonelli_shanks_modulus: ctx.n.to_string(),
+            tonelli_shanks_ciphertext: shifted.to_string(),
             candidates: entries,
         });
     });
@@ -4715,25 +4587,20 @@ fn record_r_candidate_trace_batch_from_prepared(
     }
 
     let y = engine.rabin_exponent as u32;
-    let n_pow_y = ctx.n.pow(y);
     let base_ciphertext = message.modpow(&ctx.e, &ctx.n);
+    let shifted_base_ciphertext = maybe_shift_ciphertext(ctx, &base_ciphertext, shift);
 
     let mut entries = Vec::with_capacity(candidates.len());
     for candidate in candidates {
         let ciphertext = ciphertext_for_candidate(ctx, &base_ciphertext, candidate);
         let shifted = maybe_shift_ciphertext(ctx, &ciphertext, shift);
-        let result_default = get_larger_number(&shifted, &ctx.n, y, true, false);
-        let hbc_result = hbc(&result_default, &candidate.r, &n_pow_y, engine);
+        let hbc_result = prepare_candidate_ciphertext(engine, &shifted, &candidate.r, &ctx.n);
         let dm = derive_candidate_message_from_result(
             ctx,
             engine,
-            &result_default,
+            &hbc_result,
             &candidate.r,
             &candidate.d_new,
-            &n_pow_y,
-            &candidate.r_pow_y,
-            y,
-            false,
         );
         entries.push(RCandidateTraceEntry {
             r: candidate.r.to_string(),
@@ -4753,17 +4620,10 @@ fn record_r_candidate_trace_batch_from_prepared(
             context: context.to_string(),
             message: message.to_string(),
             ciphertext: base_ciphertext.to_string(),
-            shifted_ciphertext: maybe_shift_ciphertext(ctx, &base_ciphertext, shift).to_string(),
+            shifted_ciphertext: shifted_base_ciphertext.to_string(),
             rabin_exponent: y,
-            tonelli_shanks_modulus: n_pow_y.to_string(),
-            tonelli_shanks_ciphertext: get_larger_number(
-                &maybe_shift_ciphertext(ctx, &base_ciphertext, shift),
-                &ctx.n,
-                y,
-                true,
-                false,
-            )
-            .to_string(),
+            tonelli_shanks_modulus: ctx.n.to_string(),
+            tonelli_shanks_ciphertext: shifted_base_ciphertext.to_string(),
             candidates: entries,
         });
     });
@@ -4775,7 +4635,6 @@ struct AccuracyCandidate {
     factors: Vec<(BigUint, u64)>,
     phi_new: BigUint,
     d_new: BigUint,
-    r_pow_y: BigUint,
     target_exponent: BigDecimal,
 }
 
@@ -4933,13 +4792,11 @@ fn run_r_candidate_accuracy_batches(
         let Some(d_new) = mod_inverse(&e_big, &phi_new) else {
             continue;
         };
-        let r_pow_y = candidate.r.pow(y);
         prepared.push(AccuracyCandidate {
             r: candidate.r,
             factors: candidate.factors,
             phi_new,
             d_new,
-            r_pow_y,
             target_exponent: candidate.target_exponent,
         });
     }
@@ -4953,7 +4810,6 @@ fn run_r_candidate_accuracy_batches(
         .into());
     }
 
-    let n_pow_y = ctx.n.pow(y);
     let mut candidate_offset = 0usize;
     let mut beam_max: Option<BeamMaxCandidate> = None;
     for batch_idx in 0..batch_count {
@@ -4979,7 +4835,6 @@ fn run_r_candidate_accuracy_batches(
         let base_ciphertext = message.modpow(&ctx.e, &ctx.n);
         let mut ciphertexts = Vec::with_capacity(message_count);
         let mut shifted_ciphertexts = Vec::with_capacity(message_count);
-        let mut tonelli_ciphertexts = Vec::with_capacity(message_count);
         let mut e_x_values = Vec::with_capacity(message_count);
 
         for msg_idx in 0..message_count {
@@ -4994,14 +4849,12 @@ fn run_r_candidate_accuracy_batches(
                 base_ciphertext.clone()
             };
             let shifted = maybe_shift_ciphertext(ctx, &ciphertext, shift);
-            let result_default = get_larger_number(&shifted, &ctx.n, y, true, false);
 
             if engine.ciphertext_modify {
                 e_x_values.push(&e_big * &x_big);
             }
             ciphertexts.push(ciphertext);
             shifted_ciphertexts.push(shifted);
-            tonelli_ciphertexts.push(result_default);
         }
 
         let entries: Vec<RCandidateAccuracyEntry> = batch_candidates
@@ -5012,8 +4865,9 @@ fn run_r_candidate_accuracy_batches(
                 let mut total_accuracy = 0.0f64;
 
                 for (idx, msg) in messages.iter().enumerate() {
-                    let result_default = &tonelli_ciphertexts[idx];
-                    let hbc_result = hbc(result_default, &candidate.r, &n_pow_y, engine);
+                    let shifted = &shifted_ciphertexts[idx];
+                    let hbc_result =
+                        prepare_candidate_ciphertext(engine, shifted, &candidate.r, &ctx.n);
                     let d_new = if engine.ciphertext_modify {
                         let e_x = e_x_values.get(idx).ok_or_else(|| {
                             "missing ciphertext exponent for message index".to_string()
@@ -5027,13 +4881,9 @@ fn run_r_candidate_accuracy_batches(
                         let dm = derive_candidate_message_from_result(
                             ctx,
                             engine,
-                            result_default,
+                            &hbc_result,
                             &candidate.r,
                             &d_new,
-                            &n_pow_y,
-                            &candidate.r_pow_y,
-                            y,
-                            false,
                         );
                         let message_bits = msg.bits().max(1) as f64;
                         let (_, matching_total) = count_matching_bits(&dm, msg);
@@ -5076,7 +4926,6 @@ fn run_r_candidate_accuracy_batches(
                 r: candidate.r.clone(),
                 d_new: candidate.d_new.clone(),
                 phi_new: candidate.phi_new.clone(),
-                r_pow_y: candidate.r_pow_y.clone(),
                 x: BigUint::one(),
                 target_exponent: candidate.target_exponent.clone(),
             })
@@ -5177,8 +5026,8 @@ fn run_r_candidate_accuracy_batches(
                 ciphertexts: ciphertexts.iter().map(|c| c.to_string()).collect(),
                 shifted_ciphertexts: shifted_ciphertexts.iter().map(|c| c.to_string()).collect(),
                 rabin_exponent: y,
-                tonelli_shanks_modulus: n_pow_y.to_string(),
-                tonelli_shanks_ciphertexts: tonelli_ciphertexts
+                tonelli_shanks_modulus: ctx.n.to_string(),
+                tonelli_shanks_ciphertexts: shifted_ciphertexts
                     .iter()
                     .map(|c| c.to_string())
                     .collect(),

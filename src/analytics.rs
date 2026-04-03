@@ -196,9 +196,9 @@ pub struct RCandidateAccuracyBatch {
     pub shifted_ciphertexts: Vec<String>,
     /// Rabin exponent used for the batch transforms.
     pub rabin_exponent: u32,
-    /// Tonelli-Shanks modulus value (`n^k`).
+    /// Historical bootstrap-source modulus field (currently the source modulus before HBC).
     pub tonelli_shanks_modulus: String,
-    /// Tonelli-Shanks ciphertexts (per message).
+    /// Historical bootstrap-source ciphertext field (currently the shifted ciphertexts).
     pub tonelli_shanks_ciphertexts: Vec<String>,
     /// Per-candidate accuracy entries.
     pub candidates: Vec<RCandidateAccuracyEntry>,
@@ -225,9 +225,9 @@ pub struct RCandidateTraceBatch {
     pub shifted_ciphertext: String,
     /// Rabin exponent used for the trace transforms.
     pub rabin_exponent: u32,
-    /// Tonelli-Shanks modulus value (`n^k`).
+    /// Historical bootstrap-source modulus field (currently the source modulus before HBC).
     pub tonelli_shanks_modulus: String,
-    /// Tonelli-Shanks ciphertext.
+    /// Historical bootstrap-source ciphertext field (currently the shifted ciphertext).
     pub tonelli_shanks_ciphertext: String,
     /// Per-candidate trace entries.
     pub candidates: Vec<RCandidateTraceEntry>,
