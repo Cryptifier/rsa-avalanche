@@ -4598,6 +4598,14 @@ struct AccuracyCandidate {
     target_exponent: BigDecimal,
 }
 
+#[derive(Debug)]
+struct AccuracyComputation {
+    entry: RCandidateAccuracyEntry,
+    cx_max_match_pct: Option<f64>,
+    cx_max_x: Option<BigUint>,
+    cx_evaluated_candidates: usize,
+}
+
 #[derive(Clone, Debug)]
 struct BeamMaxCandidate {
     score: f64,
@@ -4616,6 +4624,14 @@ struct BeamCandidateBits {
 struct AvalancheBeamBatchResult {
     best: Option<BeamCandidateBits>,
     evaluated_candidates: usize,
+}
+
+#[derive(Clone, Debug)]
+struct CxMatchCandidate {
+    match_pct: f64,
+    x: BigUint,
+    r: BigUint,
+    batch_number: usize,
 }
 
 /// Runs avalanche tree + beam search and returns the best candidate bits.
@@ -4805,6 +4821,8 @@ fn run_r_candidate_accuracy_batches(
     let mut candidate_offset = 0usize;
     let mut beam_max: Option<BeamMaxCandidate> = None;
     let mut total_avalanche_evaluated_candidates = 0usize;
+    let mut cx_run_max: Option<CxMatchCandidate> = None;
+    let mut total_cx_evaluated_candidates = 0usize;
     for batch_idx in 0..batch_count {
         let batch_number = batch_idx + 1;
         let start = candidate_offset;
@@ -4829,6 +4847,7 @@ fn run_r_candidate_accuracy_batches(
         let mut ciphertexts = Vec::with_capacity(message_count);
         let mut shifted_ciphertexts = Vec::with_capacity(message_count);
         let mut e_x_values = Vec::with_capacity(message_count);
+        let mut x_values = Vec::with_capacity(message_count);
 
         for msg_idx in 0..message_count {
             let x_big = if engine.ciphertext_modify {
@@ -4846,16 +4865,20 @@ fn run_r_candidate_accuracy_batches(
             if engine.ciphertext_modify {
                 e_x_values.push(&e_big * &x_big);
             }
+            x_values.push(x_big);
             ciphertexts.push(ciphertext);
             shifted_ciphertexts.push(shifted);
         }
 
-        let entries: Vec<RCandidateAccuracyEntry> = batch_candidates
+        let computations: Vec<AccuracyComputation> = batch_candidates
             .par_iter()
             .map(|candidate| {
                 let mut hbc_ciphertexts_r = Vec::with_capacity(message_count);
                 let mut candidate_decryptions = Vec::with_capacity(message_count);
                 let mut total_accuracy = 0.0f64;
+                let mut cx_max_match_pct = None;
+                let mut cx_max_x = None;
+                let mut cx_evaluated_candidates = 0usize;
 
                 for (idx, msg) in messages.iter().enumerate() {
                     let shifted = &shifted_ciphertexts[idx];
@@ -4882,6 +4905,11 @@ fn run_r_candidate_accuracy_batches(
                         let (_, matching_total) = count_matching_bits(&dm, msg);
                         let match_pct = (matching_total as f64 / message_bits) * 100.0;
                         total_accuracy += match_pct;
+                        cx_evaluated_candidates += 1;
+                        if cx_max_match_pct.is_none_or(|current| match_pct > current) {
+                            cx_max_match_pct = Some(match_pct);
+                            cx_max_x = x_values.get(idx).cloned();
+                        }
 
                         hbc_ciphertexts_r.push(hbc_result.to_string());
                         candidate_decryptions.push(dm.to_string());
@@ -4892,26 +4920,60 @@ fn run_r_candidate_accuracy_batches(
                 }
 
                 let accuracy_pct = total_accuracy / message_count as f64;
-                Ok::<_, String>(RCandidateAccuracyEntry {
-                    r: candidate.r.to_string(),
-                    r_bits: candidate.r.bits(),
-                    target_exponent: candidate.target_exponent.normalized().to_string(),
-                    factors: candidate
-                        .factors
-                        .iter()
-                        .map(|(p, e)| RCandidateFactor {
-                            prime: p.to_string(),
-                            exponent: *e,
-                            prime_bits: p.bits(),
-                        })
-                        .collect(),
-                    accuracy_pct,
-                    hbc_ciphertexts_r,
-                    candidate_decryptions,
+                Ok::<_, String>(AccuracyComputation {
+                    entry: RCandidateAccuracyEntry {
+                        r: candidate.r.to_string(),
+                        r_bits: candidate.r.bits(),
+                        target_exponent: candidate.target_exponent.normalized().to_string(),
+                        factors: candidate
+                            .factors
+                            .iter()
+                            .map(|(p, e)| RCandidateFactor {
+                                prime: p.to_string(),
+                                exponent: *e,
+                                prime_bits: p.bits(),
+                            })
+                            .collect(),
+                        accuracy_pct,
+                        hbc_ciphertexts_r,
+                        candidate_decryptions,
+                    },
+                    cx_max_match_pct,
+                    cx_max_x,
+                    cx_evaluated_candidates,
                 })
             })
             .collect::<Result<_, _>>()
             .map_err(|err| -> Box<dyn Error> { err.into() })?;
+
+        let mut entries = Vec::with_capacity(computations.len());
+        let mut batch_cx_max_match_pct = None;
+        let mut batch_cx_max_x = None;
+        let mut batch_cx_evaluated_candidates = 0usize;
+        for computation in computations {
+            batch_cx_evaluated_candidates += computation.cx_evaluated_candidates;
+            if let (Some(match_pct), Some(x)) = (computation.cx_max_match_pct, computation.cx_max_x) {
+                if batch_cx_max_match_pct.is_none_or(|current| match_pct > current) {
+                    batch_cx_max_match_pct = Some(match_pct);
+                    batch_cx_max_x = Some(x.clone());
+                }
+                let replace = match cx_run_max {
+                    Some(ref current) => match_pct > current.match_pct,
+                    None => true,
+                };
+                if replace {
+                    cx_run_max = Some(CxMatchCandidate {
+                        match_pct,
+                        x,
+                        r: BigUint::parse_bytes(computation.entry.r.as_bytes(), 10)
+                            .unwrap_or_else(BigUint::zero),
+                        batch_number,
+                    });
+                }
+            }
+            entries.push(computation.entry);
+        }
+        total_cx_evaluated_candidates += batch_cx_evaluated_candidates;
 
         let oracle_candidates: Vec<OracleCandidate> = batch_candidates
             .iter()
@@ -5021,6 +5083,21 @@ fn run_r_candidate_accuracy_batches(
                 println!("Avalanche beam run max: N/A");
                 println!("Avalanche beam max after {} batches: N/A", batch_count);
             }
+            if let Some(ref max) = cx_run_max {
+                println!(
+                    "Avalanche c^x run max: match {}% batch {} x {} r {}",
+                    format_beam_float(max.match_pct, BEAM_PCT_DECIMALS),
+                    max.batch_number,
+                    max.x,
+                    max.r
+                );
+            } else {
+                println!("Avalanche c^x run max: N/A");
+            }
+            println!(
+                "Avalanche c^x evaluated total: {}",
+                total_cx_evaluated_candidates
+            );
             println!(
                 "Avalanche evaluated candidates total: {}",
                 total_avalanche_evaluated_candidates
@@ -5040,6 +5117,9 @@ fn run_r_candidate_accuracy_batches(
                     .map(|c| c.to_string())
                     .collect(),
                 candidates: entries,
+                cx_max_match_pct: batch_cx_max_match_pct,
+                cx_max_x: batch_cx_max_x.map(|x| x.to_string()),
+                cx_evaluated_candidates: batch_cx_evaluated_candidates,
                 avalanche_evaluated_candidates: avalanche_result.evaluated_candidates,
                 beam_match_pct,
                 beam_ones_match_pct,
@@ -5080,6 +5160,39 @@ fn run_r_candidate_accuracy_batches(
                 "r_candidate_accuracy",
                 "avalanche_total_evaluated_candidates",
                 json!(total_avalanche_evaluated_candidates),
+            );
+        });
+    }
+    if let Some(ref max) = cx_run_max {
+        with_analytics(analytics, |a| {
+            a.set_feature_stat(
+                "r_candidate_accuracy",
+                "cx_max_match_pct",
+                json!(max.match_pct),
+            );
+            a.set_feature_stat("r_candidate_accuracy", "cx_max_x", json!(max.x.to_string()));
+            a.set_feature_stat(
+                "r_candidate_accuracy",
+                "cx_max_batch_number",
+                json!(max.batch_number),
+            );
+            a.set_feature_stat(
+                "r_candidate_accuracy",
+                "cx_max_r",
+                json!(max.r.to_string()),
+            );
+            a.set_feature_stat(
+                "r_candidate_accuracy",
+                "cx_total_evaluated_candidates",
+                json!(total_cx_evaluated_candidates),
+            );
+        });
+    } else {
+        with_analytics(analytics, |a| {
+            a.set_feature_stat(
+                "r_candidate_accuracy",
+                "cx_total_evaluated_candidates",
+                json!(total_cx_evaluated_candidates),
             );
         });
     }

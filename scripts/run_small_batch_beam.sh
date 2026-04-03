@@ -49,11 +49,13 @@ progress_bar() {
   printf "\r${BLUE}[%-${width}s]${RESET} %3d%% (%d/%d)" "${bar}${pad}" "${percent}" "${current}" "${total}"
 }
 
-max_score_match_sum=0
-max_score_match_sumsq=0
-max_score_match_min=""
-max_score_match_max=""
-max_score_match_count=0
+cx_match_sum=0
+cx_match_sumsq=0
+cx_match_min=""
+cx_match_max=""
+cx_match_count=0
+cx_candidates_sum=0
+cx_candidates_count=0
 avalanche_candidates_sum=0
 avalanche_candidates_count=0
 pass_count=0
@@ -84,22 +86,29 @@ for i in $(seq 1 "${RUNS}"); do
   total_ns=$((total_ns + duration_ns))
   duration_s=$(awk -v ns="${duration_ns}" 'BEGIN { printf "%.3f", ns / 1000000000 }')
 
-  max_score_line=$(grep -m1 "Avalanche beam run max:" "${run_output}" || true)
-  max_score_match_pct=$(echo "${max_score_line}" | sed -n 's/.*match \([0-9.]*\)%.*/\1/p')
+  cx_match_line=$(grep -F -m1 "Avalanche c^x run max:" "${run_output}" || true)
+  cx_match_pct=$(echo "${cx_match_line}" | sed -n 's/.*match \([0-9.]*\)%.*/\1/p')
+  cx_total_line=$(grep -F -m1 "Avalanche c^x evaluated total:" "${run_output}" || true)
+  cx_candidates_total=$(echo "${cx_total_line}" | sed -n 's/.*: \([0-9][0-9]*\)$/\1/p')
   avalanche_total_line=$(grep -m1 "Avalanche evaluated candidates total:" "${run_output}" || true)
   avalanche_candidates_total=$(echo "${avalanche_total_line}" | sed -n 's/.*: \([0-9][0-9]*\)$/\1/p')
   verdict=$(grep -m1 "Sufficiency verdict" "${run_output}" | sed -n 's/.*: //p' || true)
 
-  if [[ -n "${max_score_match_pct}" ]]; then
-    max_score_match_count=$((max_score_match_count + 1))
-    max_score_match_sum=$(awk -v s="${max_score_match_sum}" -v v="${max_score_match_pct}" 'BEGIN { printf "%.6f", s + v }')
-    max_score_match_sumsq=$(awk -v s="${max_score_match_sumsq}" -v v="${max_score_match_pct}" 'BEGIN { printf "%.6f", s + v * v }')
-    if [[ -z "${max_score_match_min}" || $(awk -v a="${max_score_match_pct}" -v b="${max_score_match_min}" 'BEGIN { print (a < b) ? 1 : 0 }') -eq 1 ]]; then
-      max_score_match_min="${max_score_match_pct}"
+  if [[ -n "${cx_match_pct}" ]]; then
+    cx_match_count=$((cx_match_count + 1))
+    cx_match_sum=$(awk -v s="${cx_match_sum}" -v v="${cx_match_pct}" 'BEGIN { printf "%.6f", s + v }')
+    cx_match_sumsq=$(awk -v s="${cx_match_sumsq}" -v v="${cx_match_pct}" 'BEGIN { printf "%.6f", s + v * v }')
+    if [[ -z "${cx_match_min}" || $(awk -v a="${cx_match_pct}" -v b="${cx_match_min}" 'BEGIN { print (a < b) ? 1 : 0 }') -eq 1 ]]; then
+      cx_match_min="${cx_match_pct}"
     fi
-    if [[ -z "${max_score_match_max}" || $(awk -v a="${max_score_match_pct}" -v b="${max_score_match_max}" 'BEGIN { print (a > b) ? 1 : 0 }') -eq 1 ]]; then
-      max_score_match_max="${max_score_match_pct}"
+    if [[ -z "${cx_match_max}" || $(awk -v a="${cx_match_pct}" -v b="${cx_match_max}" 'BEGIN { print (a > b) ? 1 : 0 }') -eq 1 ]]; then
+      cx_match_max="${cx_match_pct}"
     fi
+  fi
+
+  if [[ -n "${cx_candidates_total}" ]]; then
+    cx_candidates_count=$((cx_candidates_count + 1))
+    cx_candidates_sum=$((cx_candidates_sum + cx_candidates_total))
   fi
 
   if [[ -n "${avalanche_candidates_total}" ]]; then
@@ -113,8 +122,8 @@ for i in $(seq 1 "${RUNS}"); do
     fail_count=$((fail_count + 1))
   fi
 
-  if [[ -n "${max_score_match_pct}" ]]; then
-    if awk -v v="${max_score_match_pct}" 'BEGIN { exit (v >= 50.0) ? 0 : 1 }'; then
+  if [[ -n "${cx_match_pct}" ]]; then
+    if awk -v v="${cx_match_pct}" 'BEGIN { exit (v >= 50.0) ? 0 : 1 }'; then
       match_color="${GREEN}"
     else
       match_color="${RED}"
@@ -129,9 +138,9 @@ for i in $(seq 1 "${RUNS}"); do
   fi
 
   if [[ ${status} -eq 0 ]]; then
-    echo "Run ${i} summary: max-score match ${match_color}${max_score_match_pct:-N/A}%${RESET}, avalanche candidates ${avalanche_candidates_total:-N/A}, verdict ${verdict_color}${verdict:-UNKNOWN}${RESET}, duration ${duration_s}s"
+    echo "Run ${i} summary: c^x max match ${match_color}${cx_match_pct:-N/A}%${RESET}, c^x candidates ${cx_candidates_total:-N/A}, avalanche candidates ${avalanche_candidates_total:-N/A}, verdict ${verdict_color}${verdict:-UNKNOWN}${RESET}, duration ${duration_s}s"
   else
-    echo "Run ${i} summary: ${RED}FAILED (exit ${status})${RESET}, max-score match ${match_color}${max_score_match_pct:-N/A}%${RESET}, avalanche candidates ${avalanche_candidates_total:-N/A}, verdict ${verdict_color}${verdict:-UNKNOWN}${RESET}, duration ${duration_s}s"
+    echo "Run ${i} summary: ${RED}FAILED (exit ${status})${RESET}, c^x max match ${match_color}${cx_match_pct:-N/A}%${RESET}, c^x candidates ${cx_candidates_total:-N/A}, avalanche candidates ${avalanche_candidates_total:-N/A}, verdict ${verdict_color}${verdict:-UNKNOWN}${RESET}, duration ${duration_s}s"
   fi
   echo "Session JSON: ${session_path}"
 
@@ -151,15 +160,21 @@ done
 
 printf "\n"
 
-if [[ "${max_score_match_count}" -gt 0 ]]; then
-  max_score_match_mean=$(awk -v s="${max_score_match_sum}" -v n="${max_score_match_count}" 'BEGIN { printf "%.4f", s / n }')
-  max_score_match_variance=$(awk -v s="${max_score_match_sum}" -v ss="${max_score_match_sumsq}" -v n="${max_score_match_count}" 'BEGIN { printf "%.6f", (ss / n) - (s / n) * (s / n) }')
-  max_score_match_stddev=$(awk -v v="${max_score_match_variance}" 'BEGIN { if (v < 0) v = 0; printf "%.4f", sqrt(v) }')
+if [[ "${cx_match_count}" -gt 0 ]]; then
+  cx_match_mean=$(awk -v s="${cx_match_sum}" -v n="${cx_match_count}" 'BEGIN { printf "%.4f", s / n }')
+  cx_match_variance=$(awk -v s="${cx_match_sum}" -v ss="${cx_match_sumsq}" -v n="${cx_match_count}" 'BEGIN { printf "%.6f", (ss / n) - (s / n) * (s / n) }')
+  cx_match_stddev=$(awk -v v="${cx_match_variance}" 'BEGIN { if (v < 0) v = 0; printf "%.4f", sqrt(v) }')
 else
-  max_score_match_mean="N/A"
-  max_score_match_stddev="N/A"
-  max_score_match_min="N/A"
-  max_score_match_max="N/A"
+  cx_match_mean="N/A"
+  cx_match_stddev="N/A"
+  cx_match_min="N/A"
+  cx_match_max="N/A"
+fi
+
+if [[ "${cx_candidates_count}" -gt 0 ]]; then
+  cx_candidates_avg=$(awk -v s="${cx_candidates_sum}" -v n="${cx_candidates_count}" 'BEGIN { printf "%.4f", s / n }')
+else
+  cx_candidates_avg="N/A"
 fi
 
 if [[ "${avalanche_candidates_count}" -gt 0 ]]; then
@@ -172,7 +187,8 @@ avg_time_s=$(awk -v ns="${total_ns}" -v n="${RUNS}" 'BEGIN { printf "%.3f", ns /
 
 echo ""
 echo "===== SUMMARY ====="
-echo "Max-score match % stats: mean ${max_score_match_mean}, std dev ${max_score_match_stddev}, min ${max_score_match_min}, max ${max_score_match_max}, n ${max_score_match_count}"
+echo "c^x max match % stats: mean ${cx_match_mean}, std dev ${cx_match_stddev}, min ${cx_match_min}, max ${cx_match_max}, n ${cx_match_count}"
+echo "c^x evaluated candidates: total ${cx_candidates_sum}, average ${cx_candidates_avg}, n ${cx_candidates_count}"
 echo "Avalanche evaluated candidates: total ${avalanche_candidates_sum}, average ${avalanche_candidates_avg}, n ${avalanche_candidates_count}"
 echo "Verdicts: PASS ${pass_count}, FAIL ${fail_count}"
 echo "Average duration per run: ${avg_time_s}s"

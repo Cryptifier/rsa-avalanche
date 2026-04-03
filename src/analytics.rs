@@ -208,6 +208,12 @@ pub struct RCandidateAccuracyBatch {
     pub tonelli_shanks_ciphertexts: Vec<String>,
     /// Per-candidate accuracy entries.
     pub candidates: Vec<RCandidateAccuracyEntry>,
+    /// Maximum bitwise match percentage among evaluated `c^x` candidates in the batch.
+    pub cx_max_match_pct: Option<f64>,
+    /// Ciphertext exponent `x` that achieved the batch max bitwise match.
+    pub cx_max_x: Option<String>,
+    /// Total evaluated `c^x` candidates in the batch.
+    pub cx_evaluated_candidates: usize,
     /// Total avalanche candidates evaluated for the batch.
     pub avalanche_evaluated_candidates: usize,
     /// Beam search match percentage for the batch (per-bit accuracy).
