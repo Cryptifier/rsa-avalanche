@@ -82,6 +82,8 @@ pub struct RCandidateSettings {
     pub max_factors_per_candidate: usize,
     pub target_bit_length: Option<u64>,
     pub target_exponent: BigDecimal,
+    pub retarget_partition_count: usize,
+    pub retarget_minimum_exponent: BigDecimal,
 }
 
 /// Generates `r` candidates using the configured strategy.
@@ -754,12 +756,14 @@ fn append_reuse_candidates(path: &str, entries: &[RCandidate]) {
     }
 }
 
-/// Retargets candidates to `N_2 = x * y * z` using random decimal exponent partitions.
+/// Retargets candidates using random decimal exponent partitions.
 ///
 /// # Parameters
 /// - `n`: Original RSA modulus used as the base for `N^a`, `N^b`, and `N^c`.
 /// - `candidates`: Mutable candidate list to rewrite in place.
 /// - `target_exponent`: Total exponent budget to partition across the three factors.
+/// - `partition_count`: Maximum number of exponent partitions to generate per candidate.
+/// - `minimum_component_exponent`: Minimum exponent allowed for each retargeted partition.
 /// - `rng`: Random number generator used for the exponent partitioning.
 ///
 /// # Returns
@@ -771,19 +775,22 @@ pub fn retarget_r_candidates_for_speculative_oracles(
     n: &BigUint,
     candidates: &mut [RCandidate],
     target_exponent: &BigDecimal,
+    partition_count: usize,
+    minimum_component_exponent: &BigDecimal,
     rng: &mut RngChoice,
 ) {
-    if candidates.is_empty() {
+    if candidates.is_empty() || partition_count == 0 {
         return;
     }
 
-    let minimum_component =
-        BigDecimal::parse_bytes(b"0.45", 10).expect("valid speculative minimum exponent");
-
     for candidate in candidates {
-        let parts =
-            random_bigdecimal_partition_with_min(target_exponent, 3, &minimum_component, rng);
-        if parts.len() != 3 {
+        let parts = random_bigdecimal_partition_with_min(
+            target_exponent,
+            partition_count,
+            minimum_component_exponent,
+            rng,
+        );
+        if parts.len() != partition_count {
             continue;
         }
 
@@ -963,6 +970,9 @@ mod tests {
             max_factors_per_candidate: 5,
             target_bit_length: Some(16),
             target_exponent: BigDecimal::parse_bytes(b"2.005", 10).expect("valid exponent"),
+            retarget_partition_count: 3,
+            retarget_minimum_exponent: BigDecimal::parse_bytes(b"0.45", 10)
+                .expect("valid minimum exponent"),
         };
         let mut rng = RngChoice::from_seed(RngMode::Standard, 42);
         let candidates = generate_r_candidates_from_small_primes(&settings, &mut rng);
@@ -1000,6 +1010,9 @@ mod tests {
             max_factors_per_candidate: 4,
             target_bit_length: Some(12),
             target_exponent: BigDecimal::parse_bytes(b"2.005", 10).expect("valid exponent"),
+            retarget_partition_count: 3,
+            retarget_minimum_exponent: BigDecimal::parse_bytes(b"0.45", 10)
+                .expect("valid minimum exponent"),
         };
         let mut rng = RngChoice::from_seed(RngMode::Standard, 43);
         let candidates = generate_r_candidates_from_small_primes(&settings, &mut rng);
@@ -1023,6 +1036,9 @@ mod tests {
             max_factors_per_candidate: 4,
             target_bit_length: Some(14),
             target_exponent: BigDecimal::parse_bytes(b"2.005", 10).expect("valid exponent"),
+            retarget_partition_count: 3,
+            retarget_minimum_exponent: BigDecimal::parse_bytes(b"0.45", 10)
+                .expect("valid minimum exponent"),
         };
         let mut rng = RngChoice::from_seed(RngMode::Standard, 44);
         let candidates = generate_r_candidates(&BigUint::from(100u8), &settings, &mut rng);
@@ -1046,6 +1062,9 @@ mod tests {
             max_factors_per_candidate: 6,
             target_bit_length: None,
             target_exponent: BigDecimal::parse_bytes(b"2.005", 10).expect("valid exponent"),
+            retarget_partition_count: 3,
+            retarget_minimum_exponent: BigDecimal::parse_bytes(b"0.45", 10)
+                .expect("valid minimum exponent"),
         };
         let mut rng = RngChoice::from_seed(RngMode::Standard, 46);
         let candidates = generate_r_candidates(&BigUint::from(100u8), &settings, &mut rng);
@@ -1070,6 +1089,9 @@ mod tests {
             max_factors_per_candidate: 6,
             target_bit_length: None,
             target_exponent: BigDecimal::parse_bytes(b"2.005", 10).expect("valid exponent"),
+            retarget_partition_count: 3,
+            retarget_minimum_exponent: BigDecimal::parse_bytes(b"0.45", 10)
+                .expect("valid minimum exponent"),
         };
         let mut rng = RngChoice::from_seed(RngMode::Standard, 45);
         let candidates =
@@ -1096,6 +1118,9 @@ mod tests {
             max_factors_per_candidate: 6,
             target_bit_length: None,
             target_exponent: BigDecimal::parse_bytes(b"2.005", 10).expect("valid exponent"),
+            retarget_partition_count: 3,
+            retarget_minimum_exponent: BigDecimal::parse_bytes(b"0.45", 10)
+                .expect("valid minimum exponent"),
         };
         let mut rng = RngChoice::from_seed(RngMode::Standard, 47);
         let candidates =
@@ -1147,6 +1172,8 @@ mod tests {
             &BigUint::from(1000u16),
             &mut candidates,
             &BigDecimal::parse_bytes(b"2.005", 10).expect("valid exponent"),
+            3,
+            &BigDecimal::parse_bytes(b"0.45", 10).expect("valid minimum exponent"),
             &mut rng,
         );
 

@@ -177,6 +177,15 @@ pub struct EngineConfig {
         deserialize_with = "deserialize_bigdecimal"
     )]
     pub r_candidate_target_exponent: BigDecimal,
+    /// Maximum number of exponent partitions used when retargeting speculative r candidates.
+    #[serde(default = "default_r_candidate_retarget_partition_count")]
+    pub r_candidate_retarget_partition_count: usize,
+    /// Minimum exponent assigned to each retargeted partition when feasible.
+    #[serde(
+        default = "default_r_candidate_retarget_minimum_exponent",
+        deserialize_with = "deserialize_bigdecimal"
+    )]
+    pub r_candidate_retarget_minimum_exponent: BigDecimal,
     #[serde(default = "default_combiner_enable")]
     pub combiner_enable: bool,
     #[serde(default = "default_combiner_k_oracles")]
@@ -317,6 +326,9 @@ impl Default for EngineConfig {
             r_candidate_max_factors: default_r_candidate_max_factors(),
             r_candidate_bit_length: None,
             r_candidate_target_exponent: default_r_candidate_target_exponent(),
+            r_candidate_retarget_partition_count: default_r_candidate_retarget_partition_count(),
+            r_candidate_retarget_minimum_exponent:
+                default_r_candidate_retarget_minimum_exponent(),
             combiner_enable: default_combiner_enable(),
             combiner_k_oracles: default_combiner_k_oracles(),
             combiner_match_probability: default_combiner_match_probability(),
@@ -1173,6 +1185,35 @@ fn default_r_candidate_max_factors() -> usize {
 /// - Returns a constant default value; no side effects.
 fn default_r_candidate_target_exponent() -> BigDecimal {
     BigDecimal::parse_bytes(b"2.005", 10).expect("valid default r candidate target exponent")
+}
+
+/// Default partition count used for speculative r-candidate retargeting.
+///
+/// # Parameters
+/// - None.
+///
+/// # Returns
+/// - `usize`: Default partition count.
+///
+/// # Expected Output
+/// - Returns a constant default value; no side effects.
+fn default_r_candidate_retarget_partition_count() -> usize {
+    3
+}
+
+/// Default minimum exponent per retargeted speculative factor.
+///
+/// # Parameters
+/// - None.
+///
+/// # Returns
+/// - `BigDecimal`: Default minimum per-part exponent.
+///
+/// # Expected Output
+/// - Returns a constant default value; no side effects.
+fn default_r_candidate_retarget_minimum_exponent() -> BigDecimal {
+    BigDecimal::parse_bytes(b"0.45", 10)
+        .expect("valid default r candidate retarget minimum exponent")
 }
 
 /// Default flag for enabling the combiner experiment.

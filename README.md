@@ -113,6 +113,8 @@ Notes:
 | `engine.r_candidate_max_factors` | usize | `6` | Maximum total factors per r candidate. |
 | `engine.r_candidate_bit_length` | u64 | `null` | Optional target bit length for r candidates. |
 | `engine.r_candidate_target_exponent` | number | `2.005` | Total exponent budget used when retargeting speculative r candidates. |
+| `engine.r_candidate_retarget_partition_count` | usize | `3` | Number of exponent partitions required for speculative retargeting. |
+| `engine.r_candidate_retarget_minimum_exponent` | number | `0.45` | Minimum exponent assigned to each retargeted partition when feasible. |
 | `engine.combiner_enable` | bool | `true` | Enable speculative combiner. |
 | `engine.combiner_k_oracles` | usize | `5` | Number of oracles to request. |
 | `engine.combiner_match_probability` | number | `0.75` | Target oracle match probability. |

@@ -358,6 +358,8 @@ fn build_r_candidate_settings(
             .or(target_bit_length_override)
             .or(engine.r_candidate_bit_length),
         target_exponent: engine.r_candidate_target_exponent.clone(),
+        retarget_partition_count: engine.r_candidate_retarget_partition_count,
+        retarget_minimum_exponent: engine.r_candidate_retarget_minimum_exponent.clone(),
     })
 }
 
@@ -597,6 +599,14 @@ fn build_header_lines(
             settings.target_exponent.normalized()
         ));
         lines.push(format!(
+            "# retarget_partition_count={}",
+            settings.retarget_partition_count
+        ));
+        lines.push(format!(
+            "# retarget_minimum_exponent={}",
+            settings.retarget_minimum_exponent.normalized()
+        ));
+        lines.push(format!(
             "# small_prime_factors={}",
             settings.small_prime_factors_per_candidate
         ));
@@ -783,6 +793,9 @@ mod tests {
             target_bit_length: Some(64),
             target_exponent: bigdecimal::BigDecimal::parse_bytes(b"2.005", 10)
                 .expect("valid exponent"),
+            retarget_partition_count: 3,
+            retarget_minimum_exponent: bigdecimal::BigDecimal::parse_bytes(b"0.45", 10)
+                .expect("valid minimum exponent"),
         };
 
         let lines = build_header_lines(None, &settings, 2);
@@ -790,6 +803,8 @@ mod tests {
         assert!(joined.contains("mode=small_primes"));
         assert!(joined.contains("small_primes=3,5,7"));
         assert!(joined.contains("target_exponent=2.005"));
+        assert!(joined.contains("retarget_partition_count=3"));
+        assert!(joined.contains("retarget_minimum_exponent=0.45"));
         assert!(joined.contains("small_prime_factors=3"));
         assert!(joined.contains("max_factors=6"));
         assert!(joined.contains("target_bits=64"));

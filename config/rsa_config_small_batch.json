@@ -52,6 +52,8 @@
     "r_candidate_small_primes": [117, 1009, 1103, 1913],
     "r_candidate_small_prime_factors": 3,
     "r_candidate_target_exponent": 0.92, // 1.4
+    "r_candidate_retarget_partition_count": 3,
+    "r_candidate_retarget_minimum_exponent": 0.45,
     "beam_bit_one_threshold": 0.5,
     "avalanche_probability_spread_exponent": 0.700, //0.45
     "combiner_enable": false,

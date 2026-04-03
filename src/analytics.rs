@@ -639,6 +639,8 @@ pub fn generate_r_candidates_with_analytics(
         n,
         &mut candidates,
         &settings.target_exponent,
+        settings.retarget_partition_count,
+        &settings.retarget_minimum_exponent,
         rng,
     );
     let duration = start.elapsed();

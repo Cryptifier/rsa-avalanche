@@ -3827,6 +3827,8 @@ fn build_r_candidate_settings(engine: &EngineConfig) -> RCandidateSettings {
         max_factors_per_candidate: engine.r_candidate_max_factors,
         target_bit_length: engine.r_candidate_bit_length,
         target_exponent: engine.r_candidate_target_exponent.clone(),
+        retarget_partition_count: engine.r_candidate_retarget_partition_count,
+        retarget_minimum_exponent: engine.r_candidate_retarget_minimum_exponent.clone(),
     }
 }
 
