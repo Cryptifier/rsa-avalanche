@@ -51,7 +51,7 @@
     "r_candidate_mode": "small_primes",
     "r_candidate_small_primes": [117, 1009, 1103, 1913],
     "r_candidate_small_prime_factors": 3,
-    "r_candidate_target_exponent": 1.4,
+    "r_candidate_target_exponent": 0.87, // 1.4
     "beam_bit_one_threshold": 0.5,
     "avalanche_probability_spread_exponent": 0.45,
     "combiner_enable": false,
@@ -64,7 +64,7 @@
     "analysis_batch_enable": true,
     "analysis_batch_messages": 100000,
     "analysis_batch_candidates": 50,
-    "analysis_batch_batches": 10,
+    "analysis_batch_batches": 1,
     "same_r_batch": true,
     "ciphertext_modify": true,
     "enciphered_export_enable": false,
