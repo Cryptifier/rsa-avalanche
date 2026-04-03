@@ -77,6 +77,18 @@ struct Args {
     #[arg(long = "batch-size", value_parser = clap::value_parser!(u64).range(1..))]
     batch_size: Option<u64>,
 
+    /// Number of avalanche combination samples to evaluate per batch
+    #[arg(long = "avalanche-combination-samples", value_parser = clap::value_parser!(u64).range(1..))]
+    avalanche_combination_samples: Option<u64>,
+
+    /// Number of scored candidates included in each avalanche combination sample
+    #[arg(long = "avalanche-combination-size", value_parser = clap::value_parser!(u64).range(1..))]
+    avalanche_combination_size: Option<u64>,
+
+    /// Number of top scored candidates retained for avalanche combination sampling
+    #[arg(long = "avalanche-combination-pool-size", value_parser = clap::value_parser!(u64).range(1..))]
+    avalanche_combination_pool_size: Option<u64>,
+
     /// Raise ciphertext to a monotonically increasing exponent per batch
     #[arg(long)]
     ciphertext_modify: bool,
@@ -120,6 +132,17 @@ fn main() -> Result<(), Box<dyn Error>> {
         config.engine.analysis_batch_batches = batch_count;
         batch_enable = true;
     }
+    if let Some(sample_count) = args.avalanche_combination_samples {
+        config.engine.avalanche_combination_samples = sample_count;
+    }
+    if let Some(sample_size) = args.avalanche_combination_size {
+        config.engine.avalanche_combination_size = usize::try_from(sample_size)
+            .map_err(|_| "avalanche combination size exceeds usize range")?;
+    }
+    if let Some(pool_size) = args.avalanche_combination_pool_size {
+        config.engine.avalanche_combination_pool_size = usize::try_from(pool_size)
+            .map_err(|_| "avalanche combination pool size exceeds usize range")?;
+    }
     config.engine.analysis_batch_enable = batch_enable;
     if args.ciphertext_modify {
         config.engine.ciphertext_modify = true;
@@ -152,6 +175,9 @@ fn main() -> Result<(), Box<dyn Error>> {
         mirror_invert_candidates: args.mirror_invert_candidates,
         beam_bit_one_threshold: config.engine.beam_bit_one_threshold,
         avalanche_probability_spread_exponent: config.engine.avalanche_probability_spread_exponent,
+        avalanche_combination_samples: config.engine.avalanche_combination_samples,
+        avalanche_combination_size: config.engine.avalanche_combination_size,
+        avalanche_combination_pool_size: config.engine.avalanche_combination_pool_size,
         bits_decrypt: args.bits_decrypt,
         r_candidate_target_exponent: args
             .r_candidate_target_exponent

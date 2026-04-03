@@ -45,6 +45,12 @@ pub struct AnalyticsCliArgs {
     pub beam_bit_one_threshold: f64,
     /// Exponent used to spread normalized avalanche beam probabilities.
     pub avalanche_probability_spread_exponent: f64,
+    /// Number of avalanche combination samples evaluated per batch.
+    pub avalanche_combination_samples: u64,
+    /// Number of scored candidates included in each avalanche combination sample.
+    pub avalanche_combination_size: usize,
+    /// Number of top scored candidates retained for avalanche combination sampling.
+    pub avalanche_combination_pool_size: usize,
     /// Expected bit width for decryptions.
     pub bits_decrypt: Option<u32>,
     /// Optional CLI override for speculative r-candidate target exponent.
@@ -68,6 +74,9 @@ pub(crate) struct AnalyticsCliInfo {
     mirror_invert_candidates: bool,
     beam_bit_one_threshold: f64,
     avalanche_probability_spread_exponent: f64,
+    avalanche_combination_samples: u64,
+    avalanche_combination_size: usize,
+    avalanche_combination_pool_size: usize,
     bits_decrypt: Option<u32>,
     r_candidate_target_exponent: Option<String>,
 }
@@ -224,6 +233,79 @@ pub struct RCandidateAccuracyBatch {
     pub beam_score: Option<f64>,
     /// Bit width of the beam search candidate.
     pub beam_bit_width: Option<usize>,
+    /// Index of the highest-scoring avalanche combination sample for the batch.
+    pub avalanche_selected_sample_index: Option<usize>,
+    /// Mean score percentage of the selected avalanche combination sample.
+    pub avalanche_selected_sample_average_score_pct: Option<f64>,
+    /// Total sampled avalanche candidates evaluated across all combination samples.
+    pub avalanche_sampled_candidates_evaluated: usize,
+    /// Detailed avalanche combination sample results for the batch.
+    pub avalanche_combination_samples: Vec<AvalancheCombinationSample>,
+}
+
+/// Source candidate included in an avalanche combination sample.
+#[derive(Debug, Serialize, Clone)]
+pub struct AvalancheCombinationSampleInput {
+    /// Zero-based index of the scored batch candidate entry.
+    pub batch_candidate_index: usize,
+    /// Zero-based index of the message or ciphertext variant inside the batch candidate.
+    pub message_index: usize,
+    /// Candidate modulus value.
+    pub r: String,
+    /// Bit length of the candidate modulus.
+    pub r_bits: u64,
+    /// Decimal target exponent used to retarget the candidate.
+    pub target_exponent: String,
+    /// Ciphertext exponent applied to the source ciphertext.
+    pub x: String,
+    /// Match percentage used to score the source candidate.
+    pub score_match_pct: f64,
+    /// HBC ciphertext in the candidate modulus.
+    pub hbc_ciphertext_r: String,
+    /// Candidate-derived plaintext for this source input.
+    pub candidate_decryption: String,
+}
+
+/// Beam-search candidate produced from an avalanche combination sample.
+#[derive(Debug, Serialize, Clone)]
+pub struct AvalancheCombinationBeamResult {
+    /// One-based beam rank in descending score order.
+    pub rank: usize,
+    /// Beam search score for the candidate.
+    pub score: f64,
+    /// Match percentage against the original message bits.
+    pub match_pct: f64,
+    /// Percentage of predicted `1` bits that match the message.
+    pub ones_match_pct: f64,
+    /// Hex encoding of the candidate bits.
+    pub hex: String,
+    /// Bit width of the candidate.
+    pub bit_width: usize,
+}
+
+/// Serialized avalanche combination sample including beam-search output.
+#[derive(Debug, Serialize, Clone)]
+pub struct AvalancheCombinationSample {
+    /// One-based sample index within the batch.
+    pub sample_index: usize,
+    /// Number of scored candidates available for sampling in the batch.
+    pub pool_size: usize,
+    /// Number of scored candidates selected for this sample.
+    pub combination_size: usize,
+    /// Mean match percentage of the sampled scored candidates.
+    pub average_score_pct: f64,
+    /// Source scored candidates used to build the avalanche sample.
+    pub inputs: Vec<AvalancheCombinationSampleInput>,
+    /// Similarity percentages recorded at each avalanche reduction level.
+    pub level_similarity_pct: Vec<f64>,
+    /// Pair counts recorded at each avalanche reduction level.
+    pub level_pair_counts: Vec<usize>,
+    /// Normalized avalanche bias probabilities before spreading.
+    pub normalized_bias_probabilities: Vec<f64>,
+    /// Beam-search probabilities derived from the normalized avalanche biases.
+    pub beam_search_probabilities: Vec<f64>,
+    /// Final beam-search candidates produced from the avalanche result.
+    pub beam_results: Vec<AvalancheCombinationBeamResult>,
 }
 
 /// Trace payload for r candidates evaluated against a specific message.
@@ -293,6 +375,9 @@ impl SessionAnalytics {
                 mirror_invert_candidates: args.mirror_invert_candidates,
                 beam_bit_one_threshold: args.beam_bit_one_threshold,
                 avalanche_probability_spread_exponent: args.avalanche_probability_spread_exponent,
+                avalanche_combination_samples: args.avalanche_combination_samples,
+                avalanche_combination_size: args.avalanche_combination_size,
+                avalanche_combination_pool_size: args.avalanche_combination_pool_size,
                 bits_decrypt: args.bits_decrypt,
                 r_candidate_target_exponent: args.r_candidate_target_exponent,
             },

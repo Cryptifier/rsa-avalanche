@@ -107,6 +107,15 @@ pub struct EngineConfig {
     pub analysis_batch_candidates: u64,
     #[serde(default = "default_analysis_batch_batches")]
     pub analysis_batch_batches: u64,
+    /// Number of avalanche combination samples to evaluate per batch.
+    #[serde(default = "default_avalanche_combination_samples")]
+    pub avalanche_combination_samples: u64,
+    /// Number of scored candidates included in each avalanche combination sample.
+    #[serde(default = "default_avalanche_combination_size")]
+    pub avalanche_combination_size: usize,
+    /// Number of top scored candidates available for avalanche combination sampling.
+    #[serde(default = "default_avalanche_combination_pool_size")]
+    pub avalanche_combination_pool_size: usize,
     #[serde(default = "default_same_r_batch")]
     pub same_r_batch: bool,
     #[serde(default = "default_ciphertext_modify")]
@@ -269,6 +278,9 @@ impl Default for EngineConfig {
             analysis_batch_messages: default_analysis_batch_messages(),
             analysis_batch_candidates: default_analysis_batch_candidates(),
             analysis_batch_batches: default_analysis_batch_batches(),
+            avalanche_combination_samples: default_avalanche_combination_samples(),
+            avalanche_combination_size: default_avalanche_combination_size(),
+            avalanche_combination_pool_size: default_avalanche_combination_pool_size(),
             same_r_batch: default_same_r_batch(),
             ciphertext_modify: default_ciphertext_modify(),
             oracle_accuracy_threshold: default_oracle_accuracy_threshold(),
@@ -825,6 +837,48 @@ fn default_analysis_batch_candidates() -> u64 {
 /// - Returns a constant default value; no side effects.
 fn default_analysis_batch_batches() -> u64 {
     1
+}
+
+/// Default number of avalanche combination samples to evaluate per batch.
+///
+/// # Parameters
+/// - None.
+///
+/// # Returns
+/// - `u64`: Default sampled-combination count.
+///
+/// # Expected Output
+/// - Returns a constant default value; no side effects.
+fn default_avalanche_combination_samples() -> u64 {
+    100
+}
+
+/// Default size of each avalanche combination sample.
+///
+/// # Parameters
+/// - None.
+///
+/// # Returns
+/// - `usize`: Default number of scored candidates per sampled combination.
+///
+/// # Expected Output
+/// - Returns a constant default value; no side effects.
+fn default_avalanche_combination_size() -> usize {
+    50
+}
+
+/// Default number of scored candidates retained for avalanche combination sampling.
+///
+/// # Parameters
+/// - None.
+///
+/// # Returns
+/// - `usize`: Default scored-candidate pool size.
+///
+/// # Expected Output
+/// - Returns a constant default value; no side effects.
+fn default_avalanche_combination_pool_size() -> usize {
+    100
 }
 
 /// Default flag for using the same r candidate across a batch.

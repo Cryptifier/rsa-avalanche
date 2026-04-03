@@ -37,6 +37,11 @@ cargo run --bin analysis -- --config config/rsa_config.json
 - `--export`: Export oracle entropy timeline charts and enciphered CSV artifacts.
 - `--session-json <PATH>`: Output analytics session JSON. Default `session.json`.
 - `--shift`: Multiply ciphertext by encrypted 2 before base conversion.
+- `--batches <u64>`: Number of r-candidate accuracy batches to run.
+- `--batch-size <u64>`: Number of ciphertext/message variants scored per batch before avalanche sampling.
+- `--avalanche-combination-samples <u64>`: Number of sampled combinations evaluated by avalanche per batch. Default `100`.
+- `--avalanche-combination-size <u64>`: Number of scored items taken in each sampled combination. Default `50`.
+- `--avalanche-combination-pool-size <u64>`: Size of the top-scoring pool used to draw sampled combinations. Default `100`.
 
 # Command Line (demo)
 ```bash
@@ -78,6 +83,13 @@ Notes:
 | `engine.oracle_screen_iterations` | u64 | `500` | Iterations for per-bit oracle screening. |
 | `engine.analysis_tests_window` | usize | `32` | Window size for analysis timelines. |
 | `engine.analysis_tests_stride` | usize | `8` | Window stride for analysis timelines. |
+| `engine.analysis_batch_enable` | bool | `false` | Enable batched r-candidate scoring plus avalanche sampling. |
+| `engine.analysis_batch_messages` | u64 | `1` | Number of ciphertext/message variants scored per batch before avalanche sampling. |
+| `engine.analysis_batch_candidates` | u64 | `0` | Number of r candidates scored in each batch. |
+| `engine.analysis_batch_batches` | u64 | `1` | Number of batch-analysis runs. |
+| `engine.avalanche_combination_samples` | u64 | `100` | Number of sampled combinations evaluated by avalanche per batch. |
+| `engine.avalanche_combination_size` | usize | `50` | Number of scored items taken in each sampled combination. |
+| `engine.avalanche_combination_pool_size` | usize | `100` | Size of the top-scoring pool used to draw sampled combinations. |
 | `engine.process_min_count` | u64 | `25` | Minimum r candidates to process. |
 | `engine.process_count` | u64 | `25` | Target r candidates per batch. |
 | `engine.process_scale` | u32 | `12` | Scaling factor for candidate generation. |
@@ -119,6 +131,8 @@ Notes:
 | `engine.message.is_random` | bool | `true` | Use random message. |
 | `engine.message.bits` | u32 | `128` | Random message bit length. |
 | `engine.message.fixed_message` | string | `HeloWrld1234` | Fixed message when `is_random` is `false`. |
+
+For `config/rsa_config_small_batch.json`, the safe sampled-avalanche defaults are `analysis_batch_batches = 1`, `avalanche_combination_samples = 100`, `avalanche_combination_pool_size = 100`, and `avalanche_combination_size = 50`. That means each batch first scores the candidate outputs, then avalanche evaluates 100 sampled 50-of-100 combinations drawn from the highest-scoring pool.
 
 # Configuration (demo verification inputs)
 These optional keys are used by `demo` when `--ciphertext` is not provided.

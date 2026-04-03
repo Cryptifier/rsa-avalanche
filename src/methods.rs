@@ -35,12 +35,13 @@ const BLUE: RGBColor = (30, 144, 255);
 const BLACK: RGBColor = (0, 0, 0);
 
 use crate::analytics::{
-    RCandidateAccuracyBatch, RCandidateAccuracyEntry, RCandidateFactor, RCandidateTraceBatch,
-    RCandidateTraceEntry, SessionAnalytics, generate_r_candidates_with_analytics,
+    AvalancheCombinationBeamResult, AvalancheCombinationSample,
+    AvalancheCombinationSampleInput, RCandidateAccuracyBatch, RCandidateAccuracyEntry,
+    RCandidateFactor, RCandidateTraceBatch, RCandidateTraceEntry, SessionAnalytics,
+    generate_r_candidates_with_analytics,
 };
 use crate::avalanche::{
-    AvalancheNode, search_avalanche_tree, search_avalanche_tree_with_scores,
-    sort_candidates_by_hamming_distance,
+    AvalancheNode, search_avalanche_tree_with_scores, sort_candidates_by_hamming_distance,
 };
 use crate::combiner::majority_vote_with_distribution;
 use crate::config::{Config, EngineConfig};
@@ -2282,7 +2283,7 @@ const BEAM_PCT_DECIMALS: usize = 8;
 /// - `Result<(), Box<dyn Error>>`: `Ok(())` when search runs or is skipped.
 ///
 /// # Expected Output
-/// - Emits `dbg!` output for the avalanche result; no other stdout/stderr output.
+/// - Prints avalanche bias diagnostics and, when batch sampling is disabled, detailed beam-search output.
 fn run_avalanche_search(
     ctx: &RSAContext,
     engine: &EngineConfig,
@@ -2426,50 +2427,47 @@ fn run_avalanche_search(
     )?;
 
     let message_bits = biguint_to_bits_le(message, bit_width);
-    println!(
-        "Avalanche beam search top {} candidates (lsb0 order):",
-        beam_result.beam.len()
-    );
-    for (idx, candidate) in beam_result.beam.iter().enumerate() {
-        let candidate_bits: Vec<bool> = candidate
-            .vector
-            .iter()
-            .map(|value| stored_beam_value_is_one(*value, beam_bit_one_threshold))
-            .collect();
-        let (_, matching_total) = count_matching_bits_le(&candidate_bits, &message_bits);
-        let match_pct = matching_total as f64 / bit_width as f64 * 100.0;
-        let candidate_ones = candidate_bits.iter().filter(|bit| **bit).count();
-        let matched_ones = candidate_bits
-            .iter()
-            .zip(message_bits.iter())
-            .filter(|(cand, msg)| **cand && **msg)
-            .count();
-        let ones_match_pct = if candidate_ones == 0 {
-            0.0
-        } else {
-            matched_ones as f64 / candidate_ones as f64 * 100.0
-        };
-        let mut candidate_hex = to_hex(&bits_le_to_biguint(&candidate_bits));
-        let hex_len = (bit_width + 3) / 4;
-        if candidate_hex.len() < hex_len {
-            let padding = "0".repeat(hex_len - candidate_hex.len());
-            candidate_hex = format!("{}{}", padding, candidate_hex);
+    if !engine.analysis_batch_enable {
+        println!(
+            "Avalanche beam search top {} candidates (lsb0 order):",
+            beam_result.beam.len()
+        );
+        for (idx, candidate) in beam_result.beam.iter().enumerate() {
+            let candidate_bits: Vec<bool> = candidate
+                .vector
+                .iter()
+                .map(|value| stored_beam_value_is_one(*value, beam_bit_one_threshold))
+                .collect();
+            let (_, matching_total) = count_matching_bits_le(&candidate_bits, &message_bits);
+            let match_pct = matching_total as f64 / bit_width as f64 * 100.0;
+            let candidate_ones = candidate_bits.iter().filter(|bit| **bit).count();
+            let matched_ones = candidate_bits
+                .iter()
+                .zip(message_bits.iter())
+                .filter(|(cand, msg)| **cand && **msg)
+                .count();
+            let ones_match_pct = if candidate_ones == 0 {
+                0.0
+            } else {
+                matched_ones as f64 / candidate_ones as f64 * 100.0
+            };
+            let candidate_hex = format_bits_hex_le(&candidate_bits);
+            println!(
+                "Beam {} score {} match {}% ones-match {}% hex {}",
+                idx + 1,
+                format_beam_float(candidate.score, BEAM_SCORE_DECIMALS),
+                format_beam_float(match_pct, BEAM_PCT_DECIMALS),
+                format_beam_float(ones_match_pct, BEAM_PCT_DECIMALS),
+                candidate_hex
+            );
+            let candidate_value = bits_le_to_biguint(&candidate_bits);
+            println!(
+                "Beam {} bits: total {} biguint {}",
+                idx + 1,
+                candidate_bits.len(),
+                candidate_value.bits()
+            );
         }
-        println!(
-            "Beam {} score {} match {}% ones-match {}% hex {}",
-            idx + 1,
-            format_beam_float(candidate.score, BEAM_SCORE_DECIMALS),
-            format_beam_float(match_pct, BEAM_PCT_DECIMALS),
-            format_beam_float(ones_match_pct, BEAM_PCT_DECIMALS),
-            candidate_hex
-        );
-        let candidate_value = bits_le_to_biguint(&candidate_bits);
-        println!(
-            "Beam {} bits: total {} biguint {}",
-            idx + 1,
-            candidate_bits.len(),
-            candidate_value.bits()
-        );
     }
     if let Some(top) = beam_result.beam.first() {
         let top_bits: Vec<bool> = top
@@ -4604,25 +4602,45 @@ struct AccuracyComputation {
     cx_max_match_pct: Option<f64>,
     cx_max_x: Option<BigUint>,
     cx_evaluated_candidates: usize,
+    scored_samples: Vec<ScoredAvalancheInput>,
 }
 
 #[derive(Clone, Debug)]
 struct BeamMaxCandidate {
-    score: f64,
-    bits: Vec<bool>,
+    average_score_pct: f64,
+    top_beam_score: f64,
+    beam_results: Vec<AvalancheCombinationBeamResult>,
+    best_bits: Vec<bool>,
     message_bits: Vec<bool>,
     batch_number: usize,
+    sample_index: usize,
 }
 
 #[derive(Clone, Debug)]
-struct BeamCandidateBits {
-    score: f64,
-    bits: Vec<bool>,
+struct ScoredAvalancheInput {
+    batch_candidate_index: usize,
+    message_index: usize,
+    r: BigUint,
+    r_bits: u64,
+    target_exponent: String,
+    x: BigUint,
+    score_match_pct: f64,
+    hbc_ciphertext_r: String,
+    candidate_decryption: String,
+    message_bits: Vec<bool>,
 }
 
 #[derive(Clone, Debug)]
-struct AvalancheBeamBatchResult {
-    best: Option<BeamCandidateBits>,
+struct SampledAvalancheExecution {
+    sample: AvalancheCombinationSample,
+    best_bits: Vec<bool>,
+    top_beam_score: f64,
+}
+
+#[derive(Clone, Debug)]
+struct SampledAvalancheBatchResult {
+    selected_sample: Option<SampledAvalancheExecution>,
+    all_samples: Vec<AvalancheCombinationSample>,
     evaluated_candidates: usize,
 }
 
@@ -4634,101 +4652,314 @@ struct CxMatchCandidate {
     batch_number: usize,
 }
 
-/// Runs avalanche tree + beam search and returns the best candidate bits.
+/// Formats little-endian bits as a zero-padded hexadecimal string.
 ///
 /// # Parameters
-/// - `ctx`: RSA context containing key material.
-/// - `engine`: Engine configuration controlling HBC behavior.
-/// - `candidates`: Prepared r candidates to use as oracles.
-/// - `message`: Reference message used for bit width sizing.
-/// - `batch_size`: Number of ciphertext exponent variants to include.
-/// - `shift`: Whether to shift ciphertext by encrypted 2 before conversion.
-/// - `bits_decrypt`: Optional expected bit width override.
+/// - `bits`: Little-endian bit vector to format.
 ///
 /// # Returns
-/// - `Result<AvalancheBeamBatchResult, Box<dyn Error>>`: Best candidate plus evaluated-candidate count.
+/// - `String`: Zero-padded hexadecimal representation.
 ///
 /// # Expected Output
-/// - Returns candidate info; no stdout/stderr output.
-fn beam_max_candidate_from_avalanche(
-    ctx: &RSAContext,
+/// - Returns the formatted hex string; no stdout/stderr output.
+fn format_bits_hex_le(bits: &[bool]) -> String {
+    let mut hex = to_hex(&bits_le_to_biguint(bits));
+    let hex_len = bits.len().div_ceil(4);
+    if hex.len() < hex_len {
+        let padding = "0".repeat(hex_len - hex.len());
+        hex = format!("{}{}", padding, hex);
+    }
+    hex
+}
+
+/// Selects `sample_size` unique indices from `0..pool_size` without replacement.
+///
+/// # Parameters
+/// - `pool_size`: Number of candidate indices available.
+/// - `sample_size`: Number of indices to return.
+/// - `rng`: Random number generator used for the partial shuffle.
+///
+/// # Returns
+/// - `Vec<usize>`: Unique sampled indices in shuffled order.
+///
+/// # Expected Output
+/// - Returns sampled indices; no stdout/stderr output.
+fn sample_unique_indices(
+    pool_size: usize,
+    sample_size: usize,
+    rng: &mut RngChoice,
+) -> Vec<usize> {
+    let mut indices: Vec<usize> = (0..pool_size).collect();
+    for offset in 0..sample_size.min(pool_size) {
+        let remaining = pool_size - offset;
+        let swap_offset = (rng.next_u64() as usize) % remaining;
+        indices.swap(offset, offset + swap_offset);
+    }
+    indices.truncate(sample_size.min(pool_size));
+    indices
+}
+
+/// Builds avalanche nodes from scored candidate decryptions.
+///
+/// # Parameters
+/// - `inputs`: Scored candidate decryptions selected for the sample.
+/// - `engine`: Engine configuration controlling optional Hamming-distance ordering.
+/// - `message_bits`: Reference message bits used for Hamming-distance ordering.
+///
+/// # Returns
+/// - `Result<Vec<AvalancheNode>, Box<dyn Error>>`: Ordered avalanche nodes for the sample.
+///
+/// # Expected Output
+/// - Returns avalanche nodes; no stdout/stderr output.
+fn build_avalanche_nodes_from_scored_inputs(
+    inputs: &[ScoredAvalancheInput],
     engine: &EngineConfig,
-    candidates: &[OracleCandidate],
+    message_bits: &[bool],
+) -> Result<Vec<AvalancheNode>, Box<dyn Error>> {
+    if inputs.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let mut nodes: Vec<AvalancheNode> = inputs
+        .iter()
+        .map(|input| AvalancheNode {
+            biases: vec![0.0; input.message_bits.len()],
+            message_bits: input.message_bits.clone(),
+        })
+        .collect();
+
+    if engine.use_hamming_distance {
+        return sort_candidates_by_hamming_distance(nodes, message_bits)
+            .map_err(|err| -> Box<dyn Error> { Box::new(err) });
+    }
+
+    let mut nodes_with_value: Vec<(BigUint, AvalancheNode)> = nodes
+        .drain(..)
+        .map(|node| (bits_le_to_biguint(&node.message_bits), node))
+        .collect();
+    nodes_with_value.sort_by(|a, b| a.0.cmp(&b.0));
+    Ok(nodes_with_value.into_iter().map(|(_, node)| node).collect())
+}
+
+/// Runs sampled avalanche combinations over the scored batch outputs.
+///
+/// # Parameters
+/// - `engine`: Engine configuration controlling combination sampling and beam scoring.
+/// - `message`: Original plaintext used for beam-match scoring.
+/// - `scored_inputs`: Scored candidate decryptions available for sampling.
+/// - `batch_number`: One-based batch index used for progress logging.
+/// - `rng`: Random number generator for combination sampling.
+///
+/// # Returns
+/// - `Result<SampledAvalancheBatchResult, Box<dyn Error>>`: Sample logs plus the selected best sample.
+///
+/// # Expected Output
+/// - Prints sampled-avalanche progress and returns sampled avalanche results.
+fn run_sampled_avalanche_beam_search(
+    engine: &EngineConfig,
     message: &BigUint,
-    batch_size: usize,
-    shift: bool,
-    bits_decrypt: Option<u32>,
-) -> Result<AvalancheBeamBatchResult, Box<dyn Error>> {
-    let avalanche_nodes = build_avalanche_nodes_unique_d(
-        ctx,
-        engine,
-        candidates,
-        message,
-        batch_size,
-        shift,
-        bits_decrypt,
-    )?;
-    let evaluated_candidates = avalanche_nodes.len();
-    if avalanche_nodes.is_empty() {
-        return Ok(AvalancheBeamBatchResult {
-            best: None,
-            evaluated_candidates,
+    scored_inputs: &[ScoredAvalancheInput],
+    batch_number: usize,
+    rng: &mut RngChoice,
+) -> Result<SampledAvalancheBatchResult, Box<dyn Error>> {
+    if engine.avalanche_combination_samples == 0 {
+        return Err("avalanche_combination_samples must be >= 1".into());
+    }
+    if engine.avalanche_combination_size == 0 {
+        return Err("avalanche_combination_size must be >= 1".into());
+    }
+    if engine.avalanche_combination_pool_size == 0 {
+        return Err("avalanche_combination_pool_size must be >= 1".into());
+    }
+    if scored_inputs.is_empty() {
+        return Ok(SampledAvalancheBatchResult {
+            selected_sample: None,
+            all_samples: Vec::new(),
+            evaluated_candidates: 0,
         });
     }
-    println!("Avalanche tree instances: {}", evaluated_candidates);
-    let avalanche_result = search_avalanche_tree(avalanche_nodes)?;
-    let bit_width = avalanche_result.message_bits.len().max(1);
+
+    let mut ranked_inputs = scored_inputs.to_vec();
+    ranked_inputs.sort_by(|left, right| {
+        right
+            .score_match_pct
+            .total_cmp(&left.score_match_pct)
+            .then_with(|| left.message_index.cmp(&right.message_index))
+    });
+
+    let pool_size = engine
+        .avalanche_combination_pool_size
+        .min(ranked_inputs.len());
+    let combination_size = engine.avalanche_combination_size.min(pool_size);
+    if combination_size == 0 {
+        return Ok(SampledAvalancheBatchResult {
+            selected_sample: None,
+            all_samples: Vec::new(),
+            evaluated_candidates: 0,
+        });
+    }
+
+    let pool = &ranked_inputs[..pool_size];
+    let sample_count = engine.avalanche_combination_samples as usize;
     let beam_bit_one_threshold = engine.beam_bit_one_threshold;
-    let avalanche_probability_spread_exponent = engine.avalanche_probability_spread_exponent;
-    let normalized_biases = normalize_avalanche_biases(&avalanche_result.biases);
-    let beam_probabilities = spread_normalized_avalanche_biases(
-        &normalized_biases,
-        avalanche_probability_spread_exponent,
-    );
+    let spread_exponent = engine.avalanche_probability_spread_exponent;
+    let message_bits = biguint_to_bits_le(message, pool[0].message_bits.len());
+    let mut all_samples = Vec::with_capacity(sample_count);
+    let mut selected_sample: Option<SampledAvalancheExecution> = None;
+    let mut evaluated_candidates = 0usize;
+    let mut next_sample_pct = 10u64;
+
     println!(
-        "Avalanche beam scoring thresholds: bit_one >= {} spread_exponent {}",
-        format_beam_float(beam_bit_one_threshold, BEAM_SCORE_DECIMALS),
-        format_beam_float(avalanche_probability_spread_exponent, BEAM_SCORE_DECIMALS)
+        "Avalanche combination setup for batch {}: scored inputs {} pool {} combination-size {} samples {}",
+        batch_number,
+        scored_inputs.len(),
+        pool_size,
+        combination_size,
+        sample_count
     );
-    let beam_result = beam_search_top_k(
-        vec![Vec::new()],
-        5,
-        bit_width,
-        |candidate| {
-            if candidate.len() >= bit_width {
-                return Vec::new();
-            }
-            let mut zero = candidate.to_vec();
-            let mut one = candidate.to_vec();
-            zero.push(0.0);
-            one.push(1.0);
-            vec![zero, one]
-        },
-        |candidate| {
-            candidate
+
+    for sample_index in 0..sample_count {
+        let sampled_indices = sample_unique_indices(pool_size, combination_size, rng);
+        let selected_inputs: Vec<ScoredAvalancheInput> = sampled_indices
+            .into_iter()
+            .map(|idx| pool[idx].clone())
+            .collect();
+        let average_score_pct =
+            mean_f64(&selected_inputs.iter().map(|entry| entry.score_match_pct).collect::<Vec<_>>());
+        let avalanche_nodes =
+            build_avalanche_nodes_from_scored_inputs(&selected_inputs, engine, &message_bits)?;
+        evaluated_candidates += avalanche_nodes.len();
+        if avalanche_nodes.is_empty() {
+            continue;
+        }
+
+        let avalanche_search = search_avalanche_tree_with_scores(avalanche_nodes)?;
+        let normalized_biases = normalize_avalanche_biases(&avalanche_search.node.biases);
+        let beam_probabilities =
+            spread_normalized_avalanche_biases(&normalized_biases, spread_exponent);
+        let bit_width = avalanche_search.node.message_bits.len().max(1);
+        let beam_result = beam_search_top_k(
+            vec![Vec::new()],
+            5,
+            bit_width,
+            |candidate| {
+                if candidate.len() >= bit_width {
+                    return Vec::new();
+                }
+                let mut zero = candidate.to_vec();
+                let mut one = candidate.to_vec();
+                zero.push(0.0);
+                one.push(1.0);
+                vec![zero, one]
+            },
+            |candidate| {
+                candidate
+                    .iter()
+                    .enumerate()
+                    .map(|(idx, bit)| {
+                        let bias = beam_probabilities.get(idx).copied().unwrap_or(0.0);
+                        if stored_beam_value_is_one(*bit, beam_bit_one_threshold) {
+                            bias
+                        } else {
+                            1.0 - bias
+                        }
+                    })
+                    .sum()
+            },
+        )?;
+
+        let mut best_bits = Vec::new();
+        let beam_results = beam_result
+            .beam
+            .iter()
+            .enumerate()
+            .map(|(rank, candidate)| {
+                let candidate_bits: Vec<bool> = candidate
+                    .vector
+                    .iter()
+                    .map(|value| stored_beam_value_is_one(*value, beam_bit_one_threshold))
+                    .collect();
+                if rank == 0 {
+                    best_bits = candidate_bits.clone();
+                }
+                let (_, matching_total) = count_matching_bits_le(&candidate_bits, &message_bits);
+                let match_pct = matching_total as f64 / bit_width as f64 * 100.0;
+                let candidate_ones = candidate_bits.iter().filter(|bit| **bit).count();
+                let matched_ones = candidate_bits
+                    .iter()
+                    .zip(message_bits.iter())
+                    .filter(|(cand, msg)| **cand && **msg)
+                    .count();
+                let ones_match_pct = if candidate_ones == 0 {
+                    0.0
+                } else {
+                    matched_ones as f64 / candidate_ones as f64 * 100.0
+                };
+                AvalancheCombinationBeamResult {
+                    rank: rank + 1,
+                    score: candidate.score,
+                    match_pct,
+                    ones_match_pct,
+                    hex: format_bits_hex_le(&candidate_bits),
+                    bit_width: candidate_bits.len(),
+                }
+            })
+            .collect::<Vec<_>>();
+        let top_beam_score = beam_results.first().map(|beam| beam.score).unwrap_or(0.0);
+        let sample = AvalancheCombinationSample {
+            sample_index: sample_index + 1,
+            pool_size,
+            combination_size: selected_inputs.len(),
+            average_score_pct,
+            inputs: selected_inputs
                 .iter()
-                .enumerate()
-                .map(|(idx, bit)| {
-                    let bias = beam_probabilities.get(idx).copied().unwrap_or(0.0);
-                    if stored_beam_value_is_one(*bit, beam_bit_one_threshold) {
-                        bias
-                    } else {
-                        1.0 - bias
-                    }
+                .map(|input| AvalancheCombinationSampleInput {
+                    batch_candidate_index: input.batch_candidate_index,
+                    message_index: input.message_index,
+                    r: input.r.to_string(),
+                    r_bits: input.r_bits,
+                    target_exponent: input.target_exponent.clone(),
+                    x: input.x.to_string(),
+                    score_match_pct: input.score_match_pct,
+                    hbc_ciphertext_r: input.hbc_ciphertext_r.clone(),
+                    candidate_decryption: input.candidate_decryption.clone(),
                 })
-                .sum()
-        },
-    )?;
-    let best = beam_result.beam.first().cloned();
-    Ok(AvalancheBeamBatchResult {
-        best: best.map(|candidate| BeamCandidateBits {
-            score: candidate.score,
-            bits: candidate
-                .vector
-                .iter()
-                .map(|value| stored_beam_value_is_one(*value, beam_bit_one_threshold))
                 .collect(),
-        }),
+            level_similarity_pct: avalanche_search.level_similarity_pct,
+            level_pair_counts: avalanche_search.level_pair_counts,
+            normalized_bias_probabilities: normalized_biases,
+            beam_search_probabilities: beam_probabilities,
+            beam_results,
+        };
+
+        let execution = SampledAvalancheExecution {
+            sample: sample.clone(),
+            best_bits,
+            top_beam_score,
+        };
+        let replace = match selected_sample {
+            Some(ref current) => {
+                average_score_pct > current.sample.average_score_pct
+                    || (average_score_pct == current.sample.average_score_pct
+                        && top_beam_score > current.top_beam_score)
+            }
+            None => true,
+        };
+        if replace {
+            selected_sample = Some(execution);
+        }
+        all_samples.push(sample);
+        log_progress_every_ten_percent(
+            (sample_index + 1) as u64,
+            sample_count as u64,
+            &mut next_sample_pct,
+            &format!("Avalanche sample batch {}", batch_number),
+        );
+    }
+
+    Ok(SampledAvalancheBatchResult {
+        selected_sample,
+        all_samples,
         evaluated_candidates,
     })
 }
@@ -4747,7 +4978,7 @@ fn beam_max_candidate_from_avalanche(
 /// - `Result<(), Box<dyn Error>>`: `Ok(())` on success or an error on invalid configuration.
 ///
 /// # Expected Output
-/// - Appends accuracy batches to the session analytics; no stdout/stderr output.
+/// - Prints batch-progress summaries and appends accuracy plus avalanche sample data to the session analytics.
 fn run_r_candidate_accuracy_batches(
     ctx: &RSAContext,
     engine: &EngineConfig,
@@ -4779,6 +5010,15 @@ fn run_r_candidate_accuracy_batches(
     let batch_count = batch_count_raw as usize;
 
     let total_candidates = candidates_per_batch * batch_count;
+    println!(
+        "Starting r-candidate accuracy batches: batches {} candidates-per-batch {} messages-per-batch {} avalanche-samples {} combination-size {} pool-size {}",
+        batch_count,
+        candidates_per_batch,
+        message_count,
+        engine.avalanche_combination_samples,
+        engine.avalanche_combination_size,
+        engine.avalanche_combination_pool_size
+    );
     let settings = build_r_candidate_settings(engine);
     let mut candidates = generate_r_candidates_with_analytics(
         "analysis_batch_accuracy",
@@ -4823,12 +5063,20 @@ fn run_r_candidate_accuracy_batches(
     let mut total_avalanche_evaluated_candidates = 0usize;
     let mut cx_run_max: Option<CxMatchCandidate> = None;
     let mut total_cx_evaluated_candidates = 0usize;
+    let mut next_batch_pct = 10u64;
     for batch_idx in 0..batch_count {
         let batch_number = batch_idx + 1;
         let start = candidate_offset;
         let end = candidate_offset + candidates_per_batch;
         let batch_candidates = &prepared[start..end];
         candidate_offset = end;
+        println!(
+            "Accuracy batch {} of {}: scoring {} r candidates across {} ciphertext variants",
+            batch_number,
+            batch_count,
+            batch_candidates.len(),
+            message_count
+        );
 
         let message = if engine.message.is_random {
             random_message_under_n(engine, &ctx.n, rng)
@@ -4870,15 +5118,19 @@ fn run_r_candidate_accuracy_batches(
             shifted_ciphertexts.push(shifted);
         }
 
+        let avalanche_bit_width = resolve_decrypt_bit_width(&message, bits_decrypt)?;
         let computations: Vec<AccuracyComputation> = batch_candidates
             .par_iter()
-            .map(|candidate| {
+            .enumerate()
+            .map(|(batch_candidate_index, candidate)| {
                 let mut hbc_ciphertexts_r = Vec::with_capacity(message_count);
                 let mut candidate_decryptions = Vec::with_capacity(message_count);
                 let mut total_accuracy = 0.0f64;
                 let mut cx_max_match_pct = None;
                 let mut cx_max_x = None;
                 let mut cx_evaluated_candidates = 0usize;
+                let mut scored_samples = Vec::with_capacity(message_count);
+                let target_exponent = candidate.target_exponent.normalized().to_string();
 
                 for (idx, msg) in messages.iter().enumerate() {
                     let shifted = &shifted_ciphertexts[idx];
@@ -4911,6 +5163,18 @@ fn run_r_candidate_accuracy_batches(
                             cx_max_x = x_values.get(idx).cloned();
                         }
 
+                        scored_samples.push(ScoredAvalancheInput {
+                            batch_candidate_index,
+                            message_index: idx,
+                            r: candidate.r.clone(),
+                            r_bits: candidate.r.bits(),
+                            target_exponent: target_exponent.clone(),
+                            x: x_values.get(idx).cloned().unwrap_or_else(BigUint::one),
+                            score_match_pct: match_pct,
+                            hbc_ciphertext_r: hbc_result.to_string(),
+                            candidate_decryption: dm.to_string(),
+                            message_bits: biguint_to_bits_le(&dm, avalanche_bit_width),
+                        });
                         hbc_ciphertexts_r.push(hbc_result.to_string());
                         candidate_decryptions.push(dm.to_string());
                     } else {
@@ -4924,7 +5188,7 @@ fn run_r_candidate_accuracy_batches(
                     entry: RCandidateAccuracyEntry {
                         r: candidate.r.to_string(),
                         r_bits: candidate.r.bits(),
-                        target_exponent: candidate.target_exponent.normalized().to_string(),
+                        target_exponent,
                         factors: candidate
                             .factors
                             .iter()
@@ -4941,6 +5205,7 @@ fn run_r_candidate_accuracy_batches(
                     cx_max_match_pct,
                     cx_max_x,
                     cx_evaluated_candidates,
+                    scored_samples,
                 })
             })
             .collect::<Result<_, _>>()
@@ -4950,6 +5215,7 @@ fn run_r_candidate_accuracy_batches(
         let mut batch_cx_max_match_pct = None;
         let mut batch_cx_max_x = None;
         let mut batch_cx_evaluated_candidates = 0usize;
+        let mut batch_scored_inputs = Vec::new();
         for computation in computations {
             batch_cx_evaluated_candidates += computation.cx_evaluated_candidates;
             if let (Some(match_pct), Some(x)) = (computation.cx_max_match_pct, computation.cx_max_x) {
@@ -4971,80 +5237,88 @@ fn run_r_candidate_accuracy_batches(
                     });
                 }
             }
+            batch_scored_inputs.extend(computation.scored_samples);
             entries.push(computation.entry);
         }
         total_cx_evaluated_candidates += batch_cx_evaluated_candidates;
 
-        let oracle_candidates: Vec<OracleCandidate> = batch_candidates
-            .iter()
-            .map(|candidate| OracleCandidate {
-                r: candidate.r.clone(),
-                d_new: candidate.d_new.clone(),
-                phi_new: candidate.phi_new.clone(),
-                x: BigUint::one(),
-                target_exponent: candidate.target_exponent.clone(),
-            })
-            .collect();
         let mut beam_match_pct = None;
         let mut beam_ones_match_pct = None;
         let mut beam_score = None;
         let mut beam_bit_width = None;
-        let avalanche_result = beam_max_candidate_from_avalanche(
-            ctx,
-            engine,
-            &oracle_candidates,
-            &message,
-            message_count,
-            shift,
-            bits_decrypt,
-        )?;
-        total_avalanche_evaluated_candidates += avalanche_result.evaluated_candidates;
-        if let Some(candidate) = avalanche_result.best {
-            let message_bits = biguint_to_bits_le(&message, candidate.bits.len());
-            let (_, matching_total) = count_matching_bits_le(&candidate.bits, &message_bits);
-            let match_pct = matching_total as f64 / candidate.bits.len().max(1) as f64 * 100.0;
-            let candidate_ones = candidate.bits.iter().filter(|bit| **bit).count();
-            let matched_ones = candidate
-                .bits
-                .iter()
-                .zip(message_bits.iter())
-                .filter(|(cand, msg)| **cand && **msg)
-                .count();
-            let ones_match_pct = if candidate_ones == 0 {
-                0.0
-            } else {
-                matched_ones as f64 / candidate_ones as f64 * 100.0
-            };
-            beam_match_pct = Some(match_pct);
-            beam_ones_match_pct = Some(ones_match_pct);
-            beam_score = Some(candidate.score);
-            beam_bit_width = Some(candidate.bits.len());
+        let mut batch_selected_sample_index = None;
+        let mut batch_selected_sample_average_score_pct = None;
+        let sampled_avalanche_result =
+            run_sampled_avalanche_beam_search(
+                engine,
+                &message,
+                &batch_scored_inputs,
+                batch_number,
+                rng,
+            )?;
+        total_avalanche_evaluated_candidates += sampled_avalanche_result.evaluated_candidates;
+        if let Some(selected_sample) = sampled_avalanche_result.selected_sample.as_ref() {
+            batch_selected_sample_index = Some(selected_sample.sample.sample_index);
+            batch_selected_sample_average_score_pct = Some(selected_sample.sample.average_score_pct);
+            println!(
+                "Accuracy batch {} selected avalanche sample {} of {} with average source score {}%",
+                batch_number,
+                selected_sample.sample.sample_index,
+                engine.avalanche_combination_samples,
+                format_beam_float(selected_sample.sample.average_score_pct, BEAM_PCT_DECIMALS)
+            );
+            if let Some(top_beam) = selected_sample.sample.beam_results.first() {
+                beam_match_pct = Some(top_beam.match_pct);
+                beam_ones_match_pct = Some(top_beam.ones_match_pct);
+                beam_score = Some(top_beam.score);
+                beam_bit_width = Some(top_beam.bit_width);
+            }
+            let message_bits = biguint_to_bits_le(&message, selected_sample.best_bits.len());
             let replace = match beam_max {
-                Some(ref current) => candidate.score > current.score,
+                Some(ref current) => {
+                    selected_sample.sample.average_score_pct > current.average_score_pct
+                        || (selected_sample.sample.average_score_pct == current.average_score_pct
+                            && selected_sample.top_beam_score > current.top_beam_score)
+                }
                 None => true,
             };
             if replace {
                 beam_max = Some(BeamMaxCandidate {
-                    score: candidate.score,
-                    bits: candidate.bits,
+                    average_score_pct: selected_sample.sample.average_score_pct,
+                    top_beam_score: selected_sample.top_beam_score,
+                    beam_results: selected_sample.sample.beam_results.clone(),
+                    best_bits: selected_sample.best_bits.clone(),
                     message_bits,
                     batch_number,
+                    sample_index: selected_sample.sample.sample_index,
                 });
             }
+        } else {
+            println!(
+                "Accuracy batch {} produced no valid avalanche samples",
+                batch_number
+            );
         }
+        log_progress_every_ten_percent(
+            batch_number as u64,
+            batch_count as u64,
+            &mut next_batch_pct,
+            "Accuracy batch",
+        );
         if batch_number == batch_count {
             if let Some(ref max) = beam_max {
-                let mut hex = to_hex(&bits_le_to_biguint(&max.bits));
-                let hex_len = (max.bits.len() + 3) / 4;
-                if hex.len() < hex_len {
-                    let padding = "0".repeat(hex_len - hex.len());
-                    hex = format!("{}{}", padding, hex);
-                }
-                let (_, matching_total) = count_matching_bits_le(&max.bits, &max.message_bits);
-                let match_pct = matching_total as f64 / max.bits.len().max(1) as f64 * 100.0;
-                let candidate_ones = max.bits.iter().filter(|bit| **bit).count();
+                let top_beam = max
+                    .beam_results
+                    .first()
+                    .cloned()
+                    .ok_or("missing top beam for selected avalanche sample")?;
+                let (_, matching_total) =
+                    count_matching_bits_le(&max.best_bits, &max.message_bits);
+                let match_pct =
+                    matching_total as f64 / max.best_bits.len().max(1) as f64 * 100.0;
+                let candidate_ones = max.best_bits.iter().filter(|bit| **bit).count();
                 let matched_ones = max
-                    .bits
+                    .best_bits
                     .iter()
                     .zip(max.message_bits.iter())
                     .filter(|(cand, msg)| **cand && **msg)
@@ -5055,33 +5329,55 @@ fn run_r_candidate_accuracy_batches(
                     matched_ones as f64 / candidate_ones as f64 * 100.0
                 };
                 println!(
-                    "Avalanche beam run max: score {} batch {} match {}% ones-match {}% hex {}",
-                    format_beam_float(max.score, BEAM_SCORE_DECIMALS),
+                    "Avalanche beam run max: avg-score {}% beam-score {} batch {} sample {} match {}% ones-match {}% hex {}",
+                    format_beam_float(max.average_score_pct, BEAM_PCT_DECIMALS),
+                    format_beam_float(max.top_beam_score, BEAM_SCORE_DECIMALS),
                     max.batch_number,
+                    max.sample_index,
                     format_beam_float(match_pct, BEAM_PCT_DECIMALS),
                     format_beam_float(ones_match_pct, BEAM_PCT_DECIMALS),
-                    hex
+                    top_beam.hex
                 );
                 println!(
-                    "Avalanche beam max after {} batches: score {} batch {} match {}% ones-match {}% hex {}",
+                    "Avalanche beam max after {} batches: avg-score {}% beam-score {} batch {} sample {} match {}% ones-match {}% hex {}",
                     batch_count,
-                    format_beam_float(max.score, BEAM_SCORE_DECIMALS),
+                    format_beam_float(max.average_score_pct, BEAM_PCT_DECIMALS),
+                    format_beam_float(max.top_beam_score, BEAM_SCORE_DECIMALS),
                     max.batch_number,
+                    max.sample_index,
                     format_beam_float(match_pct, BEAM_PCT_DECIMALS),
                     format_beam_float(ones_match_pct, BEAM_PCT_DECIMALS),
-                    hex
+                    top_beam.hex
                 );
-                let max_value = bits_le_to_biguint(&max.bits);
+                println!(
+                    "Avalanche beam search top {} candidates (best sample avg {}%, batch {}, sample {}, lsb0 order):",
+                    max.beam_results.len(),
+                    format_beam_float(max.average_score_pct, BEAM_PCT_DECIMALS),
+                    max.batch_number,
+                    max.sample_index
+                );
+                for beam in &max.beam_results {
+                    println!(
+                        "Beam {} score {} match {}% ones-match {}% hex {}",
+                        beam.rank,
+                        format_beam_float(beam.score, BEAM_SCORE_DECIMALS),
+                        format_beam_float(beam.match_pct, BEAM_PCT_DECIMALS),
+                        format_beam_float(beam.ones_match_pct, BEAM_PCT_DECIMALS),
+                        beam.hex
+                    );
+                }
+                let max_value = bits_le_to_biguint(&max.best_bits);
                 println!(
                     "Avalanche beam max bits: total {} biguint {}",
-                    max.bits.len(),
+                    max.best_bits.len(),
                     max_value.bits()
                 );
-                let msb = max.bits.last().copied().unwrap_or(false);
+                let msb = max.best_bits.last().copied().unwrap_or(false);
                 println!("Avalanche beam max MSB: {}", if msb { 1 } else { 0 });
             } else {
                 println!("Avalanche beam run max: N/A");
                 println!("Avalanche beam max after {} batches: N/A", batch_count);
+                println!("Avalanche beam search results: N/A");
             }
             if let Some(ref max) = cx_run_max {
                 println!(
@@ -5120,23 +5416,27 @@ fn run_r_candidate_accuracy_batches(
                 cx_max_match_pct: batch_cx_max_match_pct,
                 cx_max_x: batch_cx_max_x.map(|x| x.to_string()),
                 cx_evaluated_candidates: batch_cx_evaluated_candidates,
-                avalanche_evaluated_candidates: avalanche_result.evaluated_candidates,
+                avalanche_evaluated_candidates: sampled_avalanche_result.evaluated_candidates,
                 beam_match_pct,
                 beam_ones_match_pct,
                 beam_score,
                 beam_bit_width,
+                avalanche_selected_sample_index: batch_selected_sample_index,
+                avalanche_selected_sample_average_score_pct: batch_selected_sample_average_score_pct,
+                avalanche_sampled_candidates_evaluated: sampled_avalanche_result.evaluated_candidates,
+                avalanche_combination_samples: sampled_avalanche_result.all_samples,
             });
         });
     }
 
     if let Some(ref max) = beam_max {
-        let (_, matching_total) = count_matching_bits_le(&max.bits, &max.message_bits);
-        let max_match_pct = matching_total as f64 / max.bits.len().max(1) as f64 * 100.0;
+        let (_, matching_total) = count_matching_bits_le(&max.best_bits, &max.message_bits);
+        let max_match_pct = matching_total as f64 / max.best_bits.len().max(1) as f64 * 100.0;
         with_analytics(analytics, |a| {
             a.set_feature_stat(
                 "r_candidate_accuracy",
                 "avalanche_max_score",
-                json!(max.score),
+                json!(max.top_beam_score),
             );
             a.set_feature_stat(
                 "r_candidate_accuracy",
@@ -5145,8 +5445,18 @@ fn run_r_candidate_accuracy_batches(
             );
             a.set_feature_stat(
                 "r_candidate_accuracy",
+                "avalanche_max_sample_average_score_pct",
+                json!(max.average_score_pct),
+            );
+            a.set_feature_stat(
+                "r_candidate_accuracy",
                 "avalanche_max_batch_number",
                 json!(max.batch_number),
+            );
+            a.set_feature_stat(
+                "r_candidate_accuracy",
+                "avalanche_max_sample_index",
+                json!(max.sample_index),
             );
             a.set_feature_stat(
                 "r_candidate_accuracy",
@@ -5324,6 +5634,9 @@ mod tests {
             mirror_invert_candidates: false,
             beam_bit_one_threshold: 0.4,
             avalanche_probability_spread_exponent: 0.5,
+            avalanche_combination_samples: 100,
+            avalanche_combination_size: 50,
+            avalanche_combination_pool_size: 100,
             bits_decrypt: None,
             r_candidate_target_exponent: None,
         })));
@@ -5384,6 +5697,9 @@ mod tests {
             mirror_invert_candidates: false,
             beam_bit_one_threshold: 0.4,
             avalanche_probability_spread_exponent: 0.5,
+            avalanche_combination_samples: 100,
+            avalanche_combination_size: 50,
+            avalanche_combination_pool_size: 100,
             bits_decrypt: None,
             r_candidate_target_exponent: None,
         })));
