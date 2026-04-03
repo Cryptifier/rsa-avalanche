@@ -89,6 +89,7 @@ Notes:
 | `engine.entropy_report_threshold` | number | `0.99` | Entropy threshold for sufficiency checks. |
 | `engine.oracle_accuracy_threshold` | number | `51.0` | Oracle accuracy threshold for sufficiency checks. |
 | `engine.beam_bit_one_threshold` | number | `0.4` | Minimum stored beam value interpreted as bit `1`. |
+| `engine.avalanche_probability_spread_exponent` | number | `0.5` | Power exponent applied after avalanche normalization; values below `1.0` spread lower probabilities upward. |
 | `engine.reuse_r_candidates` | bool | `true` | Reuse cached r candidates. |
 | `engine.reuse_r_candidates_path` | string | `data/r_candidates.csv` | Cache file path. |
 | `engine.reuse_r_candidates_append_only` | bool | `false` | Append-only reuse file behavior. |

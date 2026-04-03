@@ -39,6 +39,33 @@ pub fn normalize_avalanche_biases(biases: &[f64]) -> Vec<f64> {
         .collect()
 }
 
+/// Spreads normalized avalanche probabilities with a configurable exponent.
+///
+/// # Parameters
+/// - `normalized_biases`: Bias values already normalized into `[0.0, 1.0]`.
+/// - `spread_exponent`: Power exponent applied to each bias; values below `1.0`
+///   lift lower probabilities and values above `1.0` compress them.
+///
+/// # Returns
+/// - `Vec<f64>`: Spread probabilities clamped to `[0.0, 1.0]`.
+///
+/// # Expected Output
+/// - Returns transformed probabilities; no stdout/stderr output.
+pub fn spread_normalized_avalanche_biases(
+    normalized_biases: &[f64],
+    spread_exponent: f64,
+) -> Vec<f64> {
+    let exponent = if spread_exponent.is_finite() && spread_exponent > 0.0 {
+        spread_exponent
+    } else {
+        1.0
+    };
+    normalized_biases
+        .iter()
+        .map(|bias| bias.clamp(0.0, 1.0).powf(exponent).clamp(0.0, 1.0))
+        .collect()
+}
+
 /// Interprets a stored beam value as a boolean bit using a configurable cutoff.
 ///
 /// # Parameters
@@ -71,7 +98,22 @@ pub fn format_beam_float(value: f64, precision: usize) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::stored_beam_value_is_one;
+    use super::{spread_normalized_avalanche_biases, stored_beam_value_is_one};
+
+    #[test]
+    fn spread_normalized_biases_lifts_lower_values_for_subunit_exponents() {
+        let spread = spread_normalized_avalanche_biases(&[0.0, 0.25, 1.0], 0.5);
+        assert_eq!(spread[0], 0.0);
+        assert!((spread[1] - 0.5).abs() < 1e-12);
+        assert_eq!(spread[2], 1.0);
+    }
+
+    #[test]
+    fn spread_normalized_biases_falls_back_to_identity_for_invalid_exponents() {
+        let spread = spread_normalized_avalanche_biases(&[0.2, 0.8], 0.0);
+        assert!((spread[0] - 0.2).abs() < 1e-12);
+        assert!((spread[1] - 0.8).abs() < 1e-12);
+    }
 
     #[test]
     fn stored_beam_value_uses_configured_threshold() {

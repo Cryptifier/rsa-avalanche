@@ -42,7 +42,10 @@ use crate::avalanche::{AvalancheNode, search_avalanche_tree, search_avalanche_tr
 use crate::combiner::majority_vote_with_distribution;
 use crate::config::{Config, EngineConfig};
 use crate::dsp::{find_ramp_signals_f64, ramp_signal_strength_f64};
-use crate::helpers::{format_beam_float, normalize_avalanche_biases, stored_beam_value_is_one};
+use crate::helpers::{
+    format_beam_float, normalize_avalanche_biases, spread_normalized_avalanche_biases,
+    stored_beam_value_is_one,
+};
 use crate::math::{
     bit_length, choose_exponent, compute_totient, factor_composite_with_timeout,
     is_probable_prime_big, mod_inverse, random_biguint_bits, random_prime_with_bits,
@@ -2393,6 +2396,7 @@ fn run_avalanche_search(
 
     let bit_width = avalanche_result.message_bits.len().max(1);
     let beam_bit_one_threshold = engine.beam_bit_one_threshold;
+    let avalanche_probability_spread_exponent = engine.avalanche_probability_spread_exponent;
     let raw_bias_line = avalanche_result
         .biases
         .iter()
@@ -2401,14 +2405,27 @@ fn run_avalanche_search(
         .join(" ");
     println!("Avalanche beam raw biases (lsb0 order): {}", raw_bias_line);
     let normalized_biases = normalize_avalanche_biases(&avalanche_result.biases);
-    let bias_line = normalized_biases
+    let normalized_bias_line = normalized_biases
+        .iter()
+        .map(|bias| format_beam_float(*bias, BEAM_SCORE_DECIMALS))
+        .collect::<Vec<_>>()
+        .join(" ");
+    println!(
+        "Avalanche beam normalized probabilities (lsb0 order): {}",
+        normalized_bias_line
+    );
+    let beam_probabilities = spread_normalized_avalanche_biases(
+        &normalized_biases,
+        avalanche_probability_spread_exponent,
+    );
+    let beam_probability_line = beam_probabilities
         .iter()
         .map(|bias| format_beam_float(*bias, BEAM_SCORE_DECIMALS))
         .collect::<Vec<_>>()
         .join(" ");
     println!(
         "Avalanche beam search probabilities (lsb0 order): {}",
-        bias_line
+        beam_probability_line
     );
     println!(
         "Avalanche beam bias diagnostics: raw_len {} bit_width {} raw_last {}",
@@ -2419,6 +2436,11 @@ fn run_avalanche_search(
     println!(
         "Avalanche beam MSB count: ones {} zeros {}",
         msb_one_count, msb_zero_count
+    );
+    println!(
+        "Avalanche beam scoring thresholds: bit_one >= {} spread_exponent {}",
+        format_beam_float(beam_bit_one_threshold, BEAM_SCORE_DECIMALS),
+        format_beam_float(avalanche_probability_spread_exponent, BEAM_SCORE_DECIMALS),
     );
     if !avalanche_search.level_similarity_pct.is_empty() {
         let similarity_line = avalanche_search
@@ -2448,7 +2470,7 @@ fn run_avalanche_search(
                 .iter()
                 .enumerate()
                 .map(|(idx, bit)| {
-                    let bias = normalized_biases.get(idx).copied().unwrap_or(0.0);
+                    let bias = beam_probabilities.get(idx).copied().unwrap_or(0.0);
                     if stored_beam_value_is_one(*bit, beam_bit_one_threshold) {
                         bias
                     } else {
@@ -2465,12 +2487,11 @@ fn run_avalanche_search(
         beam_result.beam.len()
     );
     for (idx, candidate) in beam_result.beam.iter().enumerate() {
-        let candidate_bits: Vec<bool> =
-            candidate
-                .vector
-                .iter()
-                .map(|value| stored_beam_value_is_one(*value, beam_bit_one_threshold))
-                .collect();
+        let candidate_bits: Vec<bool> = candidate
+            .vector
+            .iter()
+            .map(|value| stored_beam_value_is_one(*value, beam_bit_one_threshold))
+            .collect();
         let (_, matching_total) = count_matching_bits_le(&candidate_bits, &message_bits);
         let match_pct = matching_total as f64 / bit_width as f64 * 100.0;
         let candidate_ones = candidate_bits.iter().filter(|bit| **bit).count();
@@ -2523,14 +2544,14 @@ fn run_avalanche_search(
             vec![0.5f64.ln(), 0.5f64.ln()],
             vec![0.5f64.ln(), 0.5f64.ln()],
         ];
-        let emission_zero: Vec<f64> = normalized_biases
+        let emission_zero: Vec<f64> = beam_probabilities
             .iter()
             .map(|bias| {
                 let p = bias.clamp(1e-12, 1.0 - 1e-12);
                 (1.0 - p).ln()
             })
             .collect();
-        let emission_one: Vec<f64> = normalized_biases
+        let emission_one: Vec<f64> = beam_probabilities
             .iter()
             .map(|bias| {
                 let p = bias.clamp(1e-12, 1.0 - 1e-12);
@@ -3349,14 +3370,8 @@ fn run_enciphered_export(
                 random_message_under_n(engine, &ctx.n, &mut local_rng)
             };
             let ciphertext = msg.modpow(&ctx.e, &ctx.n);
-            let dm = derive_candidate_message(
-                ctx,
-                engine,
-                &ciphertext,
-                &candidate.r,
-                &d_new,
-                shift,
-            );
+            let dm =
+                derive_candidate_message(ctx, engine, &ciphertext, &candidate.r, &d_new, shift);
 
             let finished = done.fetch_add(1, Ordering::Relaxed) + 1;
             let pct = finished.saturating_mul(100) / iterations_u64;
@@ -4147,14 +4162,7 @@ fn run_fixed_r_trials(
 
             let msg = random_message_under_n(engine, &ctx.n, &mut local_rng);
             let ciphertext = msg.modpow(&ctx.e, &ctx.n);
-            let dm = derive_candidate_message(
-                ctx,
-                engine,
-                &ciphertext,
-                r,
-                &d_new,
-                shift,
-            );
+            let dm = derive_candidate_message(ctx, engine, &ciphertext, r, &d_new, shift);
 
             let (matching_lsb, matching_total) = count_matching_bits(&dm, &msg);
             if let Ok(mut hist) = bit_hist.lock() {
@@ -4536,13 +4544,8 @@ fn record_r_candidate_trace_batch_from_factors(
             continue;
         };
         let hbc_result = prepare_candidate_ciphertext(engine, &shifted, &candidate.r, &ctx.n);
-        let dm = derive_candidate_message_from_result(
-            ctx,
-            engine,
-            &hbc_result,
-            &candidate.r,
-            &d_new,
-        );
+        let dm =
+            derive_candidate_message_from_result(ctx, engine, &hbc_result, &candidate.r, &d_new);
         entries.push(RCandidateTraceEntry {
             r: candidate.r.to_string(),
             r_bits: candidate.r.bits(),
@@ -4706,7 +4709,17 @@ fn beam_max_candidate_from_avalanche(
     let avalanche_result = search_avalanche_tree(avalanche_nodes)?;
     let bit_width = avalanche_result.message_bits.len().max(1);
     let beam_bit_one_threshold = engine.beam_bit_one_threshold;
+    let avalanche_probability_spread_exponent = engine.avalanche_probability_spread_exponent;
     let normalized_biases = normalize_avalanche_biases(&avalanche_result.biases);
+    let beam_probabilities = spread_normalized_avalanche_biases(
+        &normalized_biases,
+        avalanche_probability_spread_exponent,
+    );
+    println!(
+        "Avalanche beam scoring thresholds: bit_one >= {} spread_exponent {}",
+        format_beam_float(beam_bit_one_threshold, BEAM_SCORE_DECIMALS),
+        format_beam_float(avalanche_probability_spread_exponent, BEAM_SCORE_DECIMALS)
+    );
     let beam_result = beam_search_top_k(
         vec![Vec::new()],
         5,
@@ -4726,7 +4739,7 @@ fn beam_max_candidate_from_avalanche(
                 .iter()
                 .enumerate()
                 .map(|(idx, bit)| {
-                    let bias = normalized_biases.get(idx).copied().unwrap_or(0.0);
+                    let bias = beam_probabilities.get(idx).copied().unwrap_or(0.0);
                     if stored_beam_value_is_one(*bit, beam_bit_one_threshold) {
                         bias
                     } else {
@@ -5188,6 +5201,7 @@ mod tests {
             use_hamming_distance: false,
             mirror_invert_candidates: false,
             beam_bit_one_threshold: 0.4,
+            avalanche_probability_spread_exponent: 0.5,
             bits_decrypt: None,
             r_candidate_target_exponent: None,
         })));
@@ -5247,6 +5261,7 @@ mod tests {
             use_hamming_distance: false,
             mirror_invert_candidates: false,
             beam_bit_one_threshold: 0.4,
+            avalanche_probability_spread_exponent: 0.5,
             bits_decrypt: None,
             r_candidate_target_exponent: None,
         })));

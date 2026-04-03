@@ -43,6 +43,8 @@ pub struct AnalyticsCliArgs {
     pub mirror_invert_candidates: bool,
     /// Minimum stored beam value interpreted as bit `1`.
     pub beam_bit_one_threshold: f64,
+    /// Exponent used to spread normalized avalanche beam probabilities.
+    pub avalanche_probability_spread_exponent: f64,
     /// Expected bit width for decryptions.
     pub bits_decrypt: Option<u32>,
     /// Optional CLI override for speculative r-candidate target exponent.
@@ -65,6 +67,7 @@ pub(crate) struct AnalyticsCliInfo {
     use_hamming_distance: bool,
     mirror_invert_candidates: bool,
     beam_bit_one_threshold: f64,
+    avalanche_probability_spread_exponent: f64,
     bits_decrypt: Option<u32>,
     r_candidate_target_exponent: Option<String>,
 }
@@ -281,6 +284,7 @@ impl SessionAnalytics {
                 use_hamming_distance: args.use_hamming_distance,
                 mirror_invert_candidates: args.mirror_invert_candidates,
                 beam_bit_one_threshold: args.beam_bit_one_threshold,
+                avalanche_probability_spread_exponent: args.avalanche_probability_spread_exponent,
                 bits_decrypt: args.bits_decrypt,
                 r_candidate_target_exponent: args.r_candidate_target_exponent,
             },

@@ -1438,6 +1438,7 @@ struct CliInfo {
     use_hamming_distance: bool,
     mirror_invert_candidates: bool,
     beam_bit_one_threshold: f64,
+    avalanche_probability_spread_exponent: f64,
     bits_decrypt: Option<u64>,
 }
 
@@ -2012,6 +2013,9 @@ fn parse_cli(map: Option<&Map<String, Value>>) -> CliInfo {
         use_hamming_distance: value_as_bool(map.get("use_hamming_distance")),
         mirror_invert_candidates: value_as_bool(map.get("mirror_invert_candidates")),
         beam_bit_one_threshold: value_as_f64(map.get("beam_bit_one_threshold")),
+        avalanche_probability_spread_exponent: value_as_f64(
+            map.get("avalanche_probability_spread_exponent"),
+        ),
         bits_decrypt: value_as_opt_u64(map.get("bits_decrypt")),
     }
 }

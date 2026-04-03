@@ -21,12 +21,11 @@ use rsademo::avalanche::{AvalancheNode, search_avalanche_tree};
 use rsademo::config::{Config, EngineConfig, load_config};
 use rsademo::helpers::{
     format_beam_float, hamming_distance_bits, normalize_avalanche_biases,
-    stored_beam_value_is_one,
+    spread_normalized_avalanche_biases, stored_beam_value_is_one,
 };
 use rsademo::math::{compute_totient, mod_inverse, random_biguint_bits, to_hex};
 use rsademo::r_candidates::{
-    RCandidateSettings, generate_r_candidates_batch,
-    retarget_r_candidates_for_speculative_oracles,
+    RCandidateSettings, generate_r_candidates_batch, retarget_r_candidates_for_speculative_oracles,
 };
 use rsademo::rng::{RngChoice, RngMode};
 use rsademo::search::{beam_search_top_k, viterbi_decode};
@@ -713,6 +712,7 @@ fn run_avalanche_beam_search(
     let msb_zero_count = avalanche_nodes.len().saturating_sub(msb_one_count);
     let avalanche_result = search_avalanche_tree(avalanche_nodes)?;
     let beam_bit_one_threshold = engine.beam_bit_one_threshold;
+    let avalanche_probability_spread_exponent = engine.avalanche_probability_spread_exponent;
     let raw_bias_line = avalanche_result
         .biases
         .iter()
@@ -721,14 +721,27 @@ fn run_avalanche_beam_search(
         .join(" ");
     println!("Avalanche beam raw biases (lsb0 order): {}", raw_bias_line);
     let normalized_biases = normalize_avalanche_biases(&avalanche_result.biases);
-    let bias_line = normalized_biases
+    let normalized_bias_line = normalized_biases
+        .iter()
+        .map(|bias| format_beam_float(*bias, BEAM_SCORE_DECIMALS))
+        .collect::<Vec<_>>()
+        .join(" ");
+    println!(
+        "Avalanche beam normalized probabilities (lsb0 order): {}",
+        normalized_bias_line
+    );
+    let beam_probabilities = spread_normalized_avalanche_biases(
+        &normalized_biases,
+        avalanche_probability_spread_exponent,
+    );
+    let beam_probability_line = beam_probabilities
         .iter()
         .map(|bias| format_beam_float(*bias, BEAM_SCORE_DECIMALS))
         .collect::<Vec<_>>()
         .join(" ");
     println!(
         "Avalanche beam search probabilities (lsb0 order): {}",
-        bias_line
+        beam_probability_line
     );
     println!(
         "Avalanche beam bias diagnostics: raw_len {} bit_width {} raw_last {}",
@@ -739,6 +752,11 @@ fn run_avalanche_beam_search(
     println!(
         "Avalanche beam MSB count: ones {} zeros {}",
         msb_one_count, msb_zero_count
+    );
+    println!(
+        "Avalanche beam scoring thresholds: bit_one >= {} spread_exponent {}",
+        format_beam_float(beam_bit_one_threshold, BEAM_SCORE_DECIMALS),
+        format_beam_float(avalanche_probability_spread_exponent, BEAM_SCORE_DECIMALS)
     );
     let beam_result = beam_search_top_k(
         vec![Vec::new()],
@@ -759,7 +777,7 @@ fn run_avalanche_beam_search(
                 .iter()
                 .enumerate()
                 .map(|(idx, bit)| {
-                    let bias = normalized_biases.get(idx).copied().unwrap_or(0.0);
+                    let bias = beam_probabilities.get(idx).copied().unwrap_or(0.0);
                     if stored_beam_value_is_one(*bit, beam_bit_one_threshold) {
                         bias
                     } else {
@@ -775,12 +793,11 @@ fn run_avalanche_beam_search(
         beam_result.beam.len()
     );
     for (idx, candidate) in beam_result.beam.iter().enumerate() {
-        let candidate_bits: Vec<bool> =
-            candidate
-                .vector
-                .iter()
-                .map(|value| stored_beam_value_is_one(*value, beam_bit_one_threshold))
-                .collect();
+        let candidate_bits: Vec<bool> = candidate
+            .vector
+            .iter()
+            .map(|value| stored_beam_value_is_one(*value, beam_bit_one_threshold))
+            .collect();
         let mut candidate_hex = to_hex(&bits_le_to_biguint(&candidate_bits));
         let hex_len = (bit_width + 3) / 4;
         if candidate_hex.len() < hex_len {
@@ -818,14 +835,14 @@ fn run_avalanche_beam_search(
             vec![0.5f64.ln(), 0.5f64.ln()],
             vec![0.5f64.ln(), 0.5f64.ln()],
         ];
-        let emission_zero: Vec<f64> = normalized_biases
+        let emission_zero: Vec<f64> = beam_probabilities
             .iter()
             .map(|bias| {
                 let p = bias.clamp(1e-12, 1.0 - 1e-12);
                 (1.0 - p).ln()
             })
             .collect();
-        let emission_one: Vec<f64> = normalized_biases
+        let emission_one: Vec<f64> = beam_probabilities
             .iter()
             .map(|bias| {
                 let p = bias.clamp(1e-12, 1.0 - 1e-12);

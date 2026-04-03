@@ -27,6 +27,7 @@ Consumers should treat missing fields as empty string, null, or 0 (per field typ
 - `use_hamming_distance`: boolean
 - `mirror_invert_candidates`: boolean
 - `beam_bit_one_threshold`: number
+- `avalanche_probability_spread_exponent`: number
 - `bits_decrypt`: number or null
 
 `session_finish` payload:
