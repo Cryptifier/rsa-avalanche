@@ -44,16 +44,16 @@
     "entropy_report_threshold": 0.99,
     "oracle_accuracy_threshold": 51.0,
     "use_hamming_distance": false,
-    "mirror_invert_candidates": false,
+    "mirror_invert_candidates": true,
     "reuse_r_candidates": true,
     "reuse_r_candidates_path": "data/rgen_grid/rgen_grid_pct_5.csv",
     "reuse_r_candidates_append_only": false,
     "r_candidate_mode": "small_primes",
     "r_candidate_small_primes": [117, 1009, 1103, 1913],
     "r_candidate_small_prime_factors": 3,
-    "r_candidate_target_exponent": 0.87, // 1.4
+    "r_candidate_target_exponent": 0.92, // 1.4
     "beam_bit_one_threshold": 0.5,
-    "avalanche_probability_spread_exponent": 0.8, //0.45
+    "avalanche_probability_spread_exponent": 0.700, //0.45
     "combiner_enable": false,
     "combiner_k_oracles": 100,
     "combiner_match_probability": 0.505,
@@ -66,7 +66,7 @@
     "analysis_batch_candidates": 2000, // Number of r candidates scored in each batch before sampling combinations.
     "analysis_batch_batches": 1, // Number of scored batches to run for the small-batch beam workflow.
     "avalanche_combination_samples": 12000, // N: number of sampled combinations evaluated by avalanche per batch.
-    "avalanche_combination_size": 75, // Number of scored items taken in each sampled combination.
+    "avalanche_combination_size": 15, // Number of scored items taken in each sampled combination.
     "avalanche_combination_pool_size": 1000, // Legacy compatibility field; runtime sampling now always uses the full batch-sized pool.
     "avalanche_combination_majority_vote": true, // Use per-bit majority-vote probabilities from each sampled combination.
     "avalanche_combination_sample_smoothing": false, // Apply Jeffreys smoothing to the sampled majority-vote probabilities before beam search.
