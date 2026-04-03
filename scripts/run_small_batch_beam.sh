@@ -49,11 +49,13 @@ progress_bar() {
   printf "\r${BLUE}[%-${width}s]${RESET} %3d%% (%d/%d)" "${bar}${pad}" "${percent}" "${current}" "${total}"
 }
 
-sum=0
-sumsq=0
-min=""
-max=""
-count=0
+max_score_match_sum=0
+max_score_match_sumsq=0
+max_score_match_min=""
+max_score_match_max=""
+max_score_match_count=0
+avalanche_candidates_sum=0
+avalanche_candidates_count=0
 pass_count=0
 fail_count=0
 total_ns=0
@@ -82,20 +84,27 @@ for i in $(seq 1 "${RUNS}"); do
   total_ns=$((total_ns + duration_ns))
   duration_s=$(awk -v ns="${duration_ns}" 'BEGIN { printf "%.3f", ns / 1000000000 }')
 
-  match_line=$(grep -m1 "Bitwise speculative oracle match" "${run_output}" || true)
-  match_pct=$(echo "${match_line}" | sed -n 's/.*(\([0-9.]*\)%).*/\1/p') 
+  max_score_line=$(grep -m1 "Avalanche beam run max:" "${run_output}" || true)
+  max_score_match_pct=$(echo "${max_score_line}" | sed -n 's/.*match \([0-9.]*\)%.*/\1/p')
+  avalanche_total_line=$(grep -m1 "Avalanche evaluated candidates total:" "${run_output}" || true)
+  avalanche_candidates_total=$(echo "${avalanche_total_line}" | sed -n 's/.*: \([0-9][0-9]*\)$/\1/p')
   verdict=$(grep -m1 "Sufficiency verdict" "${run_output}" | sed -n 's/.*: //p' || true)
 
-  if [[ -n "${match_pct}" ]]; then
-    count=$((count + 1))
-    sum=$(awk -v s="${sum}" -v v="${match_pct}" 'BEGIN { printf "%.6f", s + v }')
-    sumsq=$(awk -v s="${sumsq}" -v v="${match_pct}" 'BEGIN { printf "%.6f", s + v * v }')
-    if [[ -z "${min}" || $(awk -v a="${match_pct}" -v b="${min}" 'BEGIN { print (a < b) ? 1 : 0 }') -eq 1 ]]; then
-      min="${match_pct}"
+  if [[ -n "${max_score_match_pct}" ]]; then
+    max_score_match_count=$((max_score_match_count + 1))
+    max_score_match_sum=$(awk -v s="${max_score_match_sum}" -v v="${max_score_match_pct}" 'BEGIN { printf "%.6f", s + v }')
+    max_score_match_sumsq=$(awk -v s="${max_score_match_sumsq}" -v v="${max_score_match_pct}" 'BEGIN { printf "%.6f", s + v * v }')
+    if [[ -z "${max_score_match_min}" || $(awk -v a="${max_score_match_pct}" -v b="${max_score_match_min}" 'BEGIN { print (a < b) ? 1 : 0 }') -eq 1 ]]; then
+      max_score_match_min="${max_score_match_pct}"
     fi
-    if [[ -z "${max}" || $(awk -v a="${match_pct}" -v b="${max}" 'BEGIN { print (a > b) ? 1 : 0 }') -eq 1 ]]; then
-      max="${match_pct}"
+    if [[ -z "${max_score_match_max}" || $(awk -v a="${max_score_match_pct}" -v b="${max_score_match_max}" 'BEGIN { print (a > b) ? 1 : 0 }') -eq 1 ]]; then
+      max_score_match_max="${max_score_match_pct}"
     fi
+  fi
+
+  if [[ -n "${avalanche_candidates_total}" ]]; then
+    avalanche_candidates_count=$((avalanche_candidates_count + 1))
+    avalanche_candidates_sum=$((avalanche_candidates_sum + avalanche_candidates_total))
   fi
 
   if [[ "${verdict}" == *PASS* ]]; then
@@ -104,9 +113,9 @@ for i in $(seq 1 "${RUNS}"); do
     fail_count=$((fail_count + 1))
   fi
 
-  if [[ -n "${match_pct}" ]]; then
-    if awk -v v="${match_pct}" 'BEGIN { exit (v >= 50.0) ? 0 : 1 }'; then
-      match_color="${GREEN}"    
+  if [[ -n "${max_score_match_pct}" ]]; then
+    if awk -v v="${max_score_match_pct}" 'BEGIN { exit (v >= 50.0) ? 0 : 1 }'; then
+      match_color="${GREEN}"
     else
       match_color="${RED}"
     fi
@@ -120,9 +129,9 @@ for i in $(seq 1 "${RUNS}"); do
   fi
 
   if [[ ${status} -eq 0 ]]; then
-    echo "Run ${i} summary: match ${match_color}${match_pct:-N/A}%${RESET}, verdict ${verdict_color}${verdict:-UNKNOWN}${RESET}, duration ${duration_s}s"
+    echo "Run ${i} summary: max-score match ${match_color}${max_score_match_pct:-N/A}%${RESET}, avalanche candidates ${avalanche_candidates_total:-N/A}, verdict ${verdict_color}${verdict:-UNKNOWN}${RESET}, duration ${duration_s}s"
   else
-    echo "Run ${i} summary: ${RED}FAILED (exit ${status})${RESET}, match ${match_color}${match_pct:-N/A}%${RESET}, verdict ${verdict_color}${verdict:-UNKNOWN}${RESET}, duration ${duration_s}s"
+    echo "Run ${i} summary: ${RED}FAILED (exit ${status})${RESET}, max-score match ${match_color}${max_score_match_pct:-N/A}%${RESET}, avalanche candidates ${avalanche_candidates_total:-N/A}, verdict ${verdict_color}${verdict:-UNKNOWN}${RESET}, duration ${duration_s}s"
   fi
   echo "Session JSON: ${session_path}"
 
@@ -142,22 +151,29 @@ done
 
 printf "\n"
 
-if [[ "${count}" -gt 0 ]]; then
-  mean=$(awk -v s="${sum}" -v n="${count}" 'BEGIN { printf "%.4f", s / n }')
-  variance=$(awk -v s="${sum}" -v ss="${sumsq}" -v n="${count}" 'BEGIN { printf "%.6f", (ss / n) - (s / n) * (s / n) }')
-  stddev=$(awk -v v="${variance}" 'BEGIN { if (v < 0) v = 0; printf "%.4f", sqrt(v) }')
+if [[ "${max_score_match_count}" -gt 0 ]]; then
+  max_score_match_mean=$(awk -v s="${max_score_match_sum}" -v n="${max_score_match_count}" 'BEGIN { printf "%.4f", s / n }')
+  max_score_match_variance=$(awk -v s="${max_score_match_sum}" -v ss="${max_score_match_sumsq}" -v n="${max_score_match_count}" 'BEGIN { printf "%.6f", (ss / n) - (s / n) * (s / n) }')
+  max_score_match_stddev=$(awk -v v="${max_score_match_variance}" 'BEGIN { if (v < 0) v = 0; printf "%.4f", sqrt(v) }')
 else
-  mean="N/A"
-  stddev="N/A"
-  min="N/A"
-  max="N/A"
+  max_score_match_mean="N/A"
+  max_score_match_stddev="N/A"
+  max_score_match_min="N/A"
+  max_score_match_max="N/A"
+fi
+
+if [[ "${avalanche_candidates_count}" -gt 0 ]]; then
+  avalanche_candidates_avg=$(awk -v s="${avalanche_candidates_sum}" -v n="${avalanche_candidates_count}" 'BEGIN { printf "%.4f", s / n }')
+else
+  avalanche_candidates_avg="N/A"
 fi
 
 avg_time_s=$(awk -v ns="${total_ns}" -v n="${RUNS}" 'BEGIN { printf "%.3f", ns / (n * 1000000000) }')
 
 echo ""
 echo "===== SUMMARY ====="
-echo "Match % stats: mean ${mean}, std dev ${stddev}, min ${min}, max ${max}, n ${count}"
+echo "Max-score match % stats: mean ${max_score_match_mean}, std dev ${max_score_match_stddev}, min ${max_score_match_min}, max ${max_score_match_max}, n ${max_score_match_count}"
+echo "Avalanche evaluated candidates: total ${avalanche_candidates_sum}, average ${avalanche_candidates_avg}, n ${avalanche_candidates_count}"
 echo "Verdicts: PASS ${pass_count}, FAIL ${fail_count}"
 echo "Average duration per run: ${avg_time_s}s"
 if [[ -n "${session_path:-}" ]]; then

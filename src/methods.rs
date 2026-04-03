@@ -4612,6 +4612,12 @@ struct BeamCandidateBits {
     bits: Vec<bool>,
 }
 
+#[derive(Clone, Debug)]
+struct AvalancheBeamBatchResult {
+    best: Option<BeamCandidateBits>,
+    evaluated_candidates: usize,
+}
+
 /// Runs avalanche tree + beam search and returns the best candidate bits.
 ///
 /// # Parameters
@@ -4624,7 +4630,7 @@ struct BeamCandidateBits {
 /// - `bits_decrypt`: Optional expected bit width override.
 ///
 /// # Returns
-/// - `Result<Option<BeamCandidateBits>, Box<dyn Error>>`: Best candidate or `None` if unavailable.
+/// - `Result<AvalancheBeamBatchResult, Box<dyn Error>>`: Best candidate plus evaluated-candidate count.
 ///
 /// # Expected Output
 /// - Returns candidate info; no stdout/stderr output.
@@ -4636,7 +4642,7 @@ fn beam_max_candidate_from_avalanche(
     batch_size: usize,
     shift: bool,
     bits_decrypt: Option<u32>,
-) -> Result<Option<BeamCandidateBits>, Box<dyn Error>> {
+) -> Result<AvalancheBeamBatchResult, Box<dyn Error>> {
     let avalanche_nodes = build_avalanche_nodes_unique_d(
         ctx,
         engine,
@@ -4646,10 +4652,14 @@ fn beam_max_candidate_from_avalanche(
         shift,
         bits_decrypt,
     )?;
+    let evaluated_candidates = avalanche_nodes.len();
     if avalanche_nodes.is_empty() {
-        return Ok(None);
+        return Ok(AvalancheBeamBatchResult {
+            best: None,
+            evaluated_candidates,
+        });
     }
-    println!("Avalanche tree instances: {}", avalanche_nodes.len());
+    println!("Avalanche tree instances: {}", evaluated_candidates);
     let avalanche_result = search_avalanche_tree(avalanche_nodes)?;
     let bit_width = avalanche_result.message_bits.len().max(1);
     let beam_bit_one_threshold = engine.beam_bit_one_threshold;
@@ -4694,14 +4704,17 @@ fn beam_max_candidate_from_avalanche(
         },
     )?;
     let best = beam_result.beam.first().cloned();
-    Ok(best.map(|candidate| BeamCandidateBits {
-        score: candidate.score,
-        bits: candidate
-            .vector
-            .iter()
-            .map(|value| stored_beam_value_is_one(*value, beam_bit_one_threshold))
-            .collect(),
-    }))
+    Ok(AvalancheBeamBatchResult {
+        best: best.map(|candidate| BeamCandidateBits {
+            score: candidate.score,
+            bits: candidate
+                .vector
+                .iter()
+                .map(|value| stored_beam_value_is_one(*value, beam_bit_one_threshold))
+                .collect(),
+        }),
+        evaluated_candidates,
+    })
 }
 
 /// Runs r-candidate accuracy batches with one random message per batch.
@@ -4791,6 +4804,7 @@ fn run_r_candidate_accuracy_batches(
 
     let mut candidate_offset = 0usize;
     let mut beam_max: Option<BeamMaxCandidate> = None;
+    let mut total_avalanche_evaluated_candidates = 0usize;
     for batch_idx in 0..batch_count {
         let batch_number = batch_idx + 1;
         let start = candidate_offset;
@@ -4913,7 +4927,7 @@ fn run_r_candidate_accuracy_batches(
         let mut beam_ones_match_pct = None;
         let mut beam_score = None;
         let mut beam_bit_width = None;
-        if let Some(candidate) = beam_max_candidate_from_avalanche(
+        let avalanche_result = beam_max_candidate_from_avalanche(
             ctx,
             engine,
             &oracle_candidates,
@@ -4921,7 +4935,9 @@ fn run_r_candidate_accuracy_batches(
             message_count,
             shift,
             bits_decrypt,
-        )? {
+        )?;
+        total_avalanche_evaluated_candidates += avalanche_result.evaluated_candidates;
+        if let Some(candidate) = avalanche_result.best {
             let message_bits = biguint_to_bits_le(&message, candidate.bits.len());
             let (_, matching_total) = count_matching_bits_le(&candidate.bits, &message_bits);
             let match_pct = matching_total as f64 / candidate.bits.len().max(1) as f64 * 100.0;
@@ -4977,6 +4993,14 @@ fn run_r_candidate_accuracy_batches(
                     matched_ones as f64 / candidate_ones as f64 * 100.0
                 };
                 println!(
+                    "Avalanche beam run max: score {} batch {} match {}% ones-match {}% hex {}",
+                    format_beam_float(max.score, BEAM_SCORE_DECIMALS),
+                    max.batch_number,
+                    format_beam_float(match_pct, BEAM_PCT_DECIMALS),
+                    format_beam_float(ones_match_pct, BEAM_PCT_DECIMALS),
+                    hex
+                );
+                println!(
                     "Avalanche beam max after {} batches: score {} batch {} match {}% ones-match {}% hex {}",
                     batch_count,
                     format_beam_float(max.score, BEAM_SCORE_DECIMALS),
@@ -4994,8 +5018,13 @@ fn run_r_candidate_accuracy_batches(
                 let msb = max.bits.last().copied().unwrap_or(false);
                 println!("Avalanche beam max MSB: {}", if msb { 1 } else { 0 });
             } else {
+                println!("Avalanche beam run max: N/A");
                 println!("Avalanche beam max after {} batches: N/A", batch_count);
             }
+            println!(
+                "Avalanche evaluated candidates total: {}",
+                total_avalanche_evaluated_candidates
+            );
         }
 
         with_analytics(analytics, |a| {
@@ -5011,11 +5040,47 @@ fn run_r_candidate_accuracy_batches(
                     .map(|c| c.to_string())
                     .collect(),
                 candidates: entries,
+                avalanche_evaluated_candidates: avalanche_result.evaluated_candidates,
                 beam_match_pct,
                 beam_ones_match_pct,
                 beam_score,
                 beam_bit_width,
             });
+        });
+    }
+
+    if let Some(ref max) = beam_max {
+        let (_, matching_total) = count_matching_bits_le(&max.bits, &max.message_bits);
+        let max_match_pct = matching_total as f64 / max.bits.len().max(1) as f64 * 100.0;
+        with_analytics(analytics, |a| {
+            a.set_feature_stat(
+                "r_candidate_accuracy",
+                "avalanche_max_score",
+                json!(max.score),
+            );
+            a.set_feature_stat(
+                "r_candidate_accuracy",
+                "avalanche_max_match_pct",
+                json!(max_match_pct),
+            );
+            a.set_feature_stat(
+                "r_candidate_accuracy",
+                "avalanche_max_batch_number",
+                json!(max.batch_number),
+            );
+            a.set_feature_stat(
+                "r_candidate_accuracy",
+                "avalanche_total_evaluated_candidates",
+                json!(total_avalanche_evaluated_candidates),
+            );
+        });
+    } else {
+        with_analytics(analytics, |a| {
+            a.set_feature_stat(
+                "r_candidate_accuracy",
+                "avalanche_total_evaluated_candidates",
+                json!(total_avalanche_evaluated_candidates),
+            );
         });
     }
 

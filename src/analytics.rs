@@ -208,6 +208,8 @@ pub struct RCandidateAccuracyBatch {
     pub tonelli_shanks_ciphertexts: Vec<String>,
     /// Per-candidate accuracy entries.
     pub candidates: Vec<RCandidateAccuracyEntry>,
+    /// Total avalanche candidates evaluated for the batch.
+    pub avalanche_evaluated_candidates: usize,
     /// Beam search match percentage for the batch (per-bit accuracy).
     pub beam_match_pct: Option<f64>,
     /// Beam search ones-match percentage for the batch.
