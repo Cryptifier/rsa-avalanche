@@ -69,6 +69,10 @@ struct Args {
     #[arg(long, value_name = "PCT", num_args = 0..=1, default_missing_value = "30")]
     r_bits_percent: Option<f64>,
 
+    /// In factoring mode, sample candidate bounds from a random N^a window where a is in [0.8, 0.9]
+    #[arg(long)]
+    random_power_window: bool,
+
     /// Number of r candidates to generate (overrides config counts)
     #[arg(long)]
     count: Option<u64>,
@@ -357,6 +361,8 @@ fn build_r_candidate_settings(
             .r_bits
             .or(target_bit_length_override)
             .or(engine.r_candidate_bit_length),
+        random_power_window: args.random_power_window || engine.r_candidate_random_power_window,
+        target_exponent_minimum: engine.r_candidate_target_exponent_minimum.clone(),
         target_exponent: engine.r_candidate_target_exponent.clone(),
         retarget_partition_count: engine.r_candidate_retarget_partition_count,
         retarget_minimum_exponent: engine.r_candidate_retarget_minimum_exponent.clone(),
@@ -584,6 +590,13 @@ fn build_header_lines(
     if settings.mode == RCandidateMode::Factoring {
         lines.push(format!("# min_factor={}", settings.process_min_factor));
         lines.push(format!("# scale={}", settings.process_scale));
+        lines.push(format!(
+            "# random_power_window={}",
+            settings.random_power_window
+        ));
+        if settings.random_power_window {
+            lines.push("# random_power_window_exponent_range=0.8..=0.9".to_string());
+        }
     }
 
     if settings.mode == RCandidateMode::SmallPrimes {
@@ -594,6 +607,10 @@ fn build_header_lines(
             .collect::<Vec<_>>()
             .join(",");
         lines.push(format!("# small_primes={}", primes));
+        lines.push(format!(
+            "# target_exponent_minimum={}",
+            settings.target_exponent_minimum.normalized()
+        ));
         lines.push(format!(
             "# target_exponent={}",
             settings.target_exponent.normalized()
@@ -726,6 +743,7 @@ mod tests {
             override_r: None,
             r_bits: None,
             r_bits_percent: None,
+            random_power_window: false,
         }
     }
 
@@ -749,6 +767,7 @@ mod tests {
         engine.r_candidate_small_prime_factors = 3;
         engine.r_candidate_max_factors = 9;
         engine.r_candidate_bit_length = Some(64);
+        engine.r_candidate_random_power_window = true;
 
         let mut args = base_args();
         args.count = Some(10);
@@ -772,6 +791,11 @@ mod tests {
         assert_eq!(settings.small_prime_factors_per_candidate, 4);
         assert_eq!(settings.max_factors_per_candidate, 12);
         assert_eq!(settings.target_bit_length, Some(80));
+        assert!(settings.random_power_window);
+        assert_eq!(
+            settings.target_exponent_minimum,
+            engine.r_candidate_target_exponent_minimum
+        );
         assert_eq!(settings.target_exponent, engine.r_candidate_target_exponent);
     }
 
@@ -791,6 +815,9 @@ mod tests {
             small_prime_factors_per_candidate: 3,
             max_factors_per_candidate: 6,
             target_bit_length: Some(64),
+            random_power_window: true,
+            target_exponent_minimum: bigdecimal::BigDecimal::parse_bytes(b"0.8", 10)
+                .expect("valid exponent"),
             target_exponent: bigdecimal::BigDecimal::parse_bytes(b"2.005", 10)
                 .expect("valid exponent"),
             retarget_partition_count: 3,
@@ -802,12 +829,46 @@ mod tests {
         let joined = lines.join("\n");
         assert!(joined.contains("mode=small_primes"));
         assert!(joined.contains("small_primes=3,5,7"));
+        assert!(joined.contains("target_exponent_minimum=0.8"));
         assert!(joined.contains("target_exponent=2.005"));
         assert!(joined.contains("retarget_partition_count=3"));
         assert!(joined.contains("retarget_minimum_exponent=0.45"));
         assert!(joined.contains("small_prime_factors=3"));
         assert!(joined.contains("max_factors=6"));
         assert!(joined.contains("target_bits=64"));
+    }
+
+    #[test]
+    fn test_build_header_lines_factoring_power_window_metadata() {
+        let settings = RCandidateSettings {
+            mode: RCandidateMode::Factoring,
+            override_best_r: None,
+            process_min_factor: BigUint::from(3u8),
+            process_count: 2,
+            process_min_count: 1,
+            process_scale: 8,
+            reuse_r_candidates_path: "data/r_candidates.csv".to_string(),
+            reuse_r_candidates: false,
+            reuse_r_candidates_append_only: false,
+            small_primes: Vec::new(),
+            small_prime_factors_per_candidate: 3,
+            max_factors_per_candidate: 6,
+            target_bit_length: None,
+            random_power_window: true,
+            target_exponent_minimum: bigdecimal::BigDecimal::parse_bytes(b"0.8", 10)
+                .expect("valid exponent"),
+            target_exponent: bigdecimal::BigDecimal::parse_bytes(b"2.005", 10)
+                .expect("valid exponent"),
+            retarget_partition_count: 3,
+            retarget_minimum_exponent: bigdecimal::BigDecimal::parse_bytes(b"0.45", 10)
+                .expect("valid minimum exponent"),
+        };
+
+        let lines = build_header_lines(Some(&BigUint::from(10_000u64)), &settings, 2);
+        let joined = lines.join("\n");
+        assert!(joined.contains("mode=factoring"));
+        assert!(joined.contains("random_power_window=true"));
+        assert!(joined.contains("random_power_window_exponent_range=0.8..=0.9"));
     }
 
     #[test]

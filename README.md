@@ -14,6 +14,7 @@ Proof of concept by Nicholas LaRoche <nlaroche@cryptifier.dev>.
 ```bash
 cargo build --bin analysis
 cargo build --bin demo
+cargo build --bin kgen
 cargo run --bin analysis | tee output.txt
 ```
 
@@ -55,6 +56,26 @@ cargo run --bin demo -- --decrypt --ciphertext 0x1234
 - `--ciphertext <VALUE>`: Ciphertext override (decimal or hex). Falls back to `verify.ciphertext_hex` or `verify.ciphertext` in the config.
 - `--shift`: Multiply ciphertext by encrypted 2 before base conversion.
 - Demo runs require `rsa_keypair.generate = false` with `rsa_keypair.p` and `rsa_keypair.q` supplied.
+
+# Command Line (kgen)
+```bash
+cargo run --bin kgen
+cargo run --bin kgen -- --size-mode modulus --modulus-bits 144 --output config/keys/private_key.yaml
+```
+
+- `--size-mode <prime|modulus>`: Choose whether generation is driven by prime size or modulus size. Default `prime`.
+- `--prime-bits <u32>`: Prime bit length used in `prime` mode. Default `56` (range `16..=8192`).
+- `--modulus-bits <u32>`: Exact modulus bit length targeted in `modulus` mode. Default `144` (range `32..=16384`).
+- `-e, --public-exponent <u64>`: Starting public exponent candidate. Default `65537`; the first odd coprime exponent at or above it is used.
+- `-o, --output <PATH>`: YAML output path. Default `config/keys/private_key.yaml`.
+- `--force`: Overwrite an existing output file.
+- `--seed <u64>`: Optional deterministic RNG seed for reproducible key generation.
+- `--crypto-rng`: Use cryptographic RNGs instead of the standard seeded generator.
+
+# Private Key YAML
+- `kgen` writes RSA private keys as YAML under `config/keys`.
+- A non-secret example schema lives at `config/keys/private_key.example.yaml`.
+- The tracked repository ignores the default generated key path `config/keys/private_key.yaml`.
 
 # Configuration (config/rsa_config.json)
 Notes:
@@ -113,7 +134,9 @@ Notes:
 | `engine.r_candidate_small_prime_factors` | usize | `3` | Number of small prime factors. |
 | `engine.r_candidate_max_factors` | usize | `6` | Maximum total factors per r candidate. |
 | `engine.r_candidate_bit_length` | u64 | `null` | Optional target bit length for r candidates. |
-| `engine.r_candidate_target_exponent` | number | `2.005` | Total exponent budget used when retargeting speculative r candidates. |
+| `engine.r_candidate_random_power_window` | bool | `false` | In factoring mode, sample candidate bounds from a random `N^a` window with `a` chosen in `[0.8, 0.9]` before uniqueness filtering. |
+| `engine.r_candidate_target_exponent_minimum` | number | `0.8` | Lower bound for the sampled total exponent used when retargeting speculative r candidates. |
+| `engine.r_candidate_target_exponent` | number | `2.005` | Upper bound for the sampled total exponent used when retargeting speculative r candidates. |
 | `engine.r_candidate_retarget_partition_count` | usize | `3` | Number of exponent partitions required for speculative retargeting. |
 | `engine.r_candidate_retarget_minimum_exponent` | number | `0.45` | Minimum exponent assigned to each retargeted partition when feasible. |
 | `engine.combiner_enable` | bool | `true` | Enable speculative combiner. |

@@ -1,11 +1,12 @@
 use crate::math::{
-    coalesce_factors, factor_composite_with_timeout, is_probable_prime_big,
+    coalesce_factors, factor_composite_with_timeout, floor_biguint_pow_bigdecimal,
+    is_probable_prime_big,
     next_prime_from_biguint_pow_bigdecimal, pollard_rho, random_bigdecimal_partition_with_min,
     random_biguint_below, random_biguint_bits,
 };
 use bigdecimal::BigDecimal;
 use num_bigint::BigUint;
-use num_traits::{One, Zero};
+use num_traits::{One, ToPrimitive, Zero};
 use rand::RngCore;
 use rand::seq::SliceRandom;
 use rayon::prelude::*;
@@ -14,7 +15,7 @@ use std::collections::HashSet;
 use std::fs::{self, OpenOptions};
 use std::io::{BufRead, BufReader, Write};
 use std::sync::{
-    Arc,
+    Arc, Mutex,
     atomic::{AtomicUsize, Ordering},
 };
 use std::time::{Duration, Instant};
@@ -81,6 +82,8 @@ pub struct RCandidateSettings {
     pub small_prime_factors_per_candidate: usize,
     pub max_factors_per_candidate: usize,
     pub target_bit_length: Option<u64>,
+    pub random_power_window: bool,
+    pub target_exponent_minimum: BigDecimal,
     pub target_exponent: BigDecimal,
     pub retarget_partition_count: usize,
     pub retarget_minimum_exponent: BigDecimal,
@@ -341,6 +344,10 @@ pub fn generate_r_candidates_from_small_primes(
 
 const MAX_LARGE_PRIME_ATTEMPTS: usize = 128;
 const POLLARD_RHO_PRIMALITY_TIMEOUT_MS: u64 = 25;
+const RANDOM_POWER_WINDOW_MIN_UNITS: u64 = 800;
+const RANDOM_POWER_WINDOW_MAX_UNITS: u64 = 900;
+const RANDOM_POWER_WINDOW_SCALE_UNITS: u64 = 1000;
+const RETARGET_EXPONENT_SCALE_UNITS: u64 = 1000;
 
 /// Builds a single r candidate from distinct small primes and generated larger primes.
 ///
@@ -490,6 +497,89 @@ fn sample_large_prime_with_pollard(
     None
 }
 
+/// Samples a random exponent in the factoring-mode `N^a` window.
+///
+/// # Parameters
+/// - `rng`: Random number generator used for exponent sampling.
+///
+/// # Returns
+/// - `BigDecimal`: Random exponent `a` with `0.8 <= a <= 0.9`.
+///
+/// # Expected Output
+/// - Returns a normalized decimal exponent; no stdout/stderr output.
+fn sample_random_power_window_exponent(rng: &mut RngChoice) -> BigDecimal {
+    let span = RANDOM_POWER_WINDOW_MAX_UNITS - RANDOM_POWER_WINDOW_MIN_UNITS;
+    let units = RANDOM_POWER_WINDOW_MIN_UNITS + (rng.next_u64() % (span + 1));
+    (BigDecimal::from(units) / BigDecimal::from(RANDOM_POWER_WINDOW_SCALE_UNITS)).normalized()
+}
+
+/// Computes the factoring-mode upper bound used to sample a candidate `r`.
+///
+/// # Parameters
+/// - `n`: RSA modulus used as the size reference.
+/// - `scale`: Legacy additive scale used by the default sampler.
+/// - `attempt_index`: Zero-based generation attempt index.
+/// - `settings`: Candidate generation configuration.
+/// - `rng`: Random number generator used for exponent sampling.
+///
+/// # Returns
+/// - `BigUint`: Positive upper bound used for candidate sampling.
+///
+/// # Expected Output
+/// - Returns a positive upper bound; no stdout/stderr output.
+fn factoring_candidate_upper_bound(
+    n: &BigUint,
+    scale: &BigUint,
+    attempt_index: usize,
+    settings: &RCandidateSettings,
+    rng: &mut RngChoice,
+) -> BigUint {
+    if settings.random_power_window {
+        let exponent = sample_random_power_window_exponent(rng);
+        let upper = floor_biguint_pow_bigdecimal(n, &exponent);
+        if upper.is_zero() {
+            BigUint::one()
+        } else {
+            upper
+        }
+    } else {
+        n + scale + BigUint::from((attempt_index as u64) + 1)
+    }
+}
+
+/// Samples a retarget total exponent between the configured lower and upper limits.
+///
+/// # Parameters
+/// - `minimum_target_exponent`: Configured lower bound for the sampled total exponent.
+/// - `maximum_target_exponent`: Configured upper bound for the sampled total exponent.
+/// - `rng`: Random number generator used for exponent sampling.
+///
+/// # Returns
+/// - `BigDecimal`: Sampled total exponent for retargeting.
+///
+/// # Expected Output
+/// - Returns the normalized upper bound when the configured range is invalid; no stdout/stderr output.
+fn sample_retarget_total_exponent(
+    minimum_target_exponent: &BigDecimal,
+    maximum_target_exponent: &BigDecimal,
+    rng: &mut RngChoice,
+) -> BigDecimal {
+    let Some(lower_f64) = minimum_target_exponent.to_f64() else {
+        return maximum_target_exponent.normalized();
+    };
+    let Some(upper_f64) = maximum_target_exponent.to_f64() else {
+        return maximum_target_exponent.normalized();
+    };
+    let lower_units = (lower_f64 * RETARGET_EXPONENT_SCALE_UNITS as f64).floor() as u64;
+    let upper_units = (upper_f64 * RETARGET_EXPONENT_SCALE_UNITS as f64).floor() as u64;
+    if upper_units <= lower_units {
+        return maximum_target_exponent.normalized();
+    }
+
+    let units = lower_units + (rng.next_u64() % (upper_units - lower_units + 1));
+    (BigDecimal::from(units) / BigDecimal::from(RETARGET_EXPONENT_SCALE_UNITS)).normalized()
+}
+
 /// Builds `r` candidates by sampling composites and factoring them.
 ///
 /// # Parameters
@@ -535,6 +625,7 @@ pub fn generate_r_candidates_via_factoring(
 
     let mut collected: Vec<RCandidate> = Vec::new();
     let mut seen: HashSet<String> = HashSet::new();
+    let reserved = Arc::new(Mutex::new(HashSet::<String>::new()));
 
     let load_reuse = settings.reuse_r_candidates && !settings.reuse_r_candidates_append_only;
     let append_reuse = settings.reuse_r_candidates || settings.reuse_r_candidates_append_only;
@@ -545,7 +636,11 @@ pub fn generate_r_candidates_via_factoring(
         let mut loaded = load_reuse_candidates(reuse_path);
         loaded.shuffle(rng);
         for candidate in loaded {
-            if seen.insert(candidate.r.to_string()) {
+            let key = candidate.r.to_string();
+            if seen.insert(key.clone()) {
+                if let Ok(mut guard) = reserved.lock() {
+                    guard.insert(key);
+                }
                 collected.push(candidate);
                 if collected.len() >= target_count {
                     println!(
@@ -570,6 +665,11 @@ pub fn generate_r_candidates_via_factoring(
             settings.reuse_r_candidates_path
         );
     }
+    if settings.random_power_window {
+        println!(
+            "Factoring-mode r candidates will sample from a random N^a window with a in [0.8, 0.9]"
+        );
+    }
 
     let found = Arc::new(AtomicUsize::new(collected.len()));
 
@@ -590,8 +690,17 @@ pub fn generate_r_candidates_via_factoring(
             }
 
             let mut local_rng = RngChoice::from_seed(rng.mode(), seed);
-            let upper = n + &scale + BigUint::from((idx as u64) + 1);
+            let upper =
+                factoring_candidate_upper_bound(n, &scale, idx, settings, &mut local_rng);
             let candidate = random_biguint_below(&upper, &mut local_rng) + BigUint::one();
+            let candidate_key = candidate.to_string();
+            let Ok(mut reserved_guard) = reserved.lock() else {
+                return None;
+            };
+            if !reserved_guard.insert(candidate_key) {
+                return None;
+            }
+            drop(reserved_guard);
             if is_probable_prime_big(&candidate) {
                 println!("Skipping prime r candidate: {}", candidate);
                 return None;
@@ -761,7 +870,8 @@ fn append_reuse_candidates(path: &str, entries: &[RCandidate]) {
 /// # Parameters
 /// - `n`: Original RSA modulus used as the base for `N^a`, `N^b`, and `N^c`.
 /// - `candidates`: Mutable candidate list to rewrite in place.
-/// - `target_exponent`: Total exponent budget to partition across the three factors.
+/// - `minimum_target_exponent`: Configured lower bound for the sampled total exponent budget.
+/// - `target_exponent`: Configured upper bound for the sampled total exponent budget.
 /// - `partition_count`: Maximum number of exponent partitions to generate per candidate.
 /// - `minimum_component_exponent`: Minimum exponent allowed for each retargeted partition.
 /// - `rng`: Random number generator used for the exponent partitioning.
@@ -774,6 +884,7 @@ fn append_reuse_candidates(path: &str, entries: &[RCandidate]) {
 pub fn retarget_r_candidates_for_speculative_oracles(
     n: &BigUint,
     candidates: &mut [RCandidate],
+    minimum_target_exponent: &BigDecimal,
     target_exponent: &BigDecimal,
     partition_count: usize,
     minimum_component_exponent: &BigDecimal,
@@ -784,13 +895,15 @@ pub fn retarget_r_candidates_for_speculative_oracles(
     }
 
     for candidate in candidates {
+        let sampled_target_exponent =
+            sample_retarget_total_exponent(minimum_target_exponent, target_exponent, rng);
         let parts = random_bigdecimal_partition_with_min(
-            target_exponent,
+            &sampled_target_exponent,
             partition_count,
             minimum_component_exponent,
             rng,
         );
-        if parts.len() != partition_count {
+        if parts.is_empty() {
             continue;
         }
 
@@ -806,7 +919,7 @@ pub fn retarget_r_candidates_for_speculative_oracles(
 
         candidate.r = r;
         candidate.factors = factors;
-        candidate.target_exponent = target_exponent.clone();
+        candidate.target_exponent = sampled_target_exponent;
     }
 }
 
@@ -969,6 +1082,9 @@ mod tests {
             small_prime_factors_per_candidate: 3,
             max_factors_per_candidate: 5,
             target_bit_length: Some(16),
+            random_power_window: false,
+            target_exponent_minimum: BigDecimal::parse_bytes(b"0.8", 10)
+                .expect("valid exponent"),
             target_exponent: BigDecimal::parse_bytes(b"2.005", 10).expect("valid exponent"),
             retarget_partition_count: 3,
             retarget_minimum_exponent: BigDecimal::parse_bytes(b"0.45", 10)
@@ -1009,6 +1125,9 @@ mod tests {
             small_prime_factors_per_candidate: 3,
             max_factors_per_candidate: 4,
             target_bit_length: Some(12),
+            random_power_window: false,
+            target_exponent_minimum: BigDecimal::parse_bytes(b"0.8", 10)
+                .expect("valid exponent"),
             target_exponent: BigDecimal::parse_bytes(b"2.005", 10).expect("valid exponent"),
             retarget_partition_count: 3,
             retarget_minimum_exponent: BigDecimal::parse_bytes(b"0.45", 10)
@@ -1035,6 +1154,9 @@ mod tests {
             small_prime_factors_per_candidate: 3,
             max_factors_per_candidate: 4,
             target_bit_length: Some(14),
+            random_power_window: false,
+            target_exponent_minimum: BigDecimal::parse_bytes(b"0.8", 10)
+                .expect("valid exponent"),
             target_exponent: BigDecimal::parse_bytes(b"2.005", 10).expect("valid exponent"),
             retarget_partition_count: 3,
             retarget_minimum_exponent: BigDecimal::parse_bytes(b"0.45", 10)
@@ -1061,6 +1183,9 @@ mod tests {
             small_prime_factors_per_candidate: 3,
             max_factors_per_candidate: 6,
             target_bit_length: None,
+            random_power_window: false,
+            target_exponent_minimum: BigDecimal::parse_bytes(b"0.8", 10)
+                .expect("valid exponent"),
             target_exponent: BigDecimal::parse_bytes(b"2.005", 10).expect("valid exponent"),
             retarget_partition_count: 3,
             retarget_minimum_exponent: BigDecimal::parse_bytes(b"0.45", 10)
@@ -1088,6 +1213,9 @@ mod tests {
             small_prime_factors_per_candidate: 3,
             max_factors_per_candidate: 6,
             target_bit_length: None,
+            random_power_window: false,
+            target_exponent_minimum: BigDecimal::parse_bytes(b"0.8", 10)
+                .expect("valid exponent"),
             target_exponent: BigDecimal::parse_bytes(b"2.005", 10).expect("valid exponent"),
             retarget_partition_count: 3,
             retarget_minimum_exponent: BigDecimal::parse_bytes(b"0.45", 10)
@@ -1117,6 +1245,9 @@ mod tests {
             small_prime_factors_per_candidate: 3,
             max_factors_per_candidate: 6,
             target_bit_length: None,
+            random_power_window: false,
+            target_exponent_minimum: BigDecimal::parse_bytes(b"0.8", 10)
+                .expect("valid exponent"),
             target_exponent: BigDecimal::parse_bytes(b"2.005", 10).expect("valid exponent"),
             retarget_partition_count: 3,
             retarget_minimum_exponent: BigDecimal::parse_bytes(b"0.45", 10)
@@ -1165,28 +1296,98 @@ mod tests {
     }
 
     #[test]
+    fn test_sample_random_power_window_exponent_stays_in_range() {
+        let mut rng = RngChoice::from_seed(RngMode::Standard, 49);
+        let minimum = BigDecimal::parse_bytes(b"0.8", 10).expect("valid minimum");
+        let maximum = BigDecimal::parse_bytes(b"0.9", 10).expect("valid maximum");
+
+        for _ in 0..64 {
+            let exponent = sample_random_power_window_exponent(&mut rng);
+            assert!(exponent >= minimum);
+            assert!(exponent <= maximum);
+        }
+    }
+
+    #[test]
+    fn test_factoring_candidate_upper_bound_uses_power_window_when_enabled() {
+        let settings = RCandidateSettings {
+            mode: RCandidateMode::Factoring,
+            override_best_r: None,
+            process_min_factor: BigUint::from(3u8),
+            process_count: 1,
+            process_min_count: 1,
+            process_scale: 8,
+            reuse_r_candidates_path: "".to_string(),
+            reuse_r_candidates: false,
+            reuse_r_candidates_append_only: false,
+            small_primes: Vec::new(),
+            small_prime_factors_per_candidate: 3,
+            max_factors_per_candidate: 6,
+            target_bit_length: None,
+            random_power_window: true,
+            target_exponent_minimum: BigDecimal::parse_bytes(b"0.8", 10)
+                .expect("valid exponent"),
+            target_exponent: BigDecimal::parse_bytes(b"2.005", 10).expect("valid exponent"),
+            retarget_partition_count: 3,
+            retarget_minimum_exponent: BigDecimal::parse_bytes(b"0.45", 10)
+                .expect("valid minimum exponent"),
+        };
+        let n = BigUint::from(1_000_000u64);
+        let minimum = floor_biguint_pow_bigdecimal(
+            &n,
+            &BigDecimal::parse_bytes(b"0.8", 10).expect("valid minimum"),
+        );
+        let maximum = floor_biguint_pow_bigdecimal(
+            &n,
+            &BigDecimal::parse_bytes(b"0.9", 10).expect("valid maximum"),
+        );
+        let mut rng = RngChoice::from_seed(RngMode::Standard, 50);
+
+        let upper =
+            factoring_candidate_upper_bound(&n, &BigUint::from(256u16), 0, &settings, &mut rng);
+
+        assert!(upper >= minimum);
+        assert!(upper <= maximum);
+    }
+
+    #[test]
+    fn test_sample_retarget_total_exponent_stays_in_range() {
+        let mut rng = RngChoice::from_seed(RngMode::Standard, 51);
+        let upper = BigDecimal::parse_bytes(b"0.9", 10).expect("valid upper");
+        let lower = BigDecimal::parse_bytes(b"0.8", 10).expect("valid lower");
+
+        for _ in 0..64 {
+            let sampled = sample_retarget_total_exponent(&lower, &upper, &mut rng);
+            assert!(sampled >= lower);
+            assert!(sampled <= upper);
+        }
+    }
+
+    #[test]
     fn test_retarget_r_candidates_for_speculative_oracles() {
         let mut candidates = vec![RCandidate::new(BigUint::from(21u8), vec![])];
         let mut rng = RngChoice::from_seed(RngMode::Standard, 48);
         retarget_r_candidates_for_speculative_oracles(
             &BigUint::from(1000u16),
             &mut candidates,
-            &BigDecimal::parse_bytes(b"2.005", 10).expect("valid exponent"),
+            &BigDecimal::parse_bytes(b"0.8", 10).expect("valid lower exponent"),
+            &BigDecimal::parse_bytes(b"0.9", 10).expect("valid exponent"),
             3,
             &BigDecimal::parse_bytes(b"0.45", 10).expect("valid minimum exponent"),
             &mut rng,
         );
 
-        assert_eq!(
-            candidates[0].target_exponent,
-            BigDecimal::parse_bytes(b"2.005", 10).expect("valid exponent")
-        );
+        let lower = BigDecimal::parse_bytes(b"0.8", 10).expect("valid lower");
+        let upper = BigDecimal::parse_bytes(b"0.9", 10).expect("valid upper");
+        assert!(candidates[0].target_exponent >= lower);
+        assert!(candidates[0].target_exponent <= upper);
         let product = candidates[0]
             .factors
             .iter()
             .fold(BigUint::one(), |acc, (p, e)| acc * p.pow(*e as u32));
         assert_eq!(product, candidates[0].r);
         assert!(!candidates[0].factors.is_empty());
+        assert!(candidates[0].factors.len() <= 3);
         assert!(
             candidates[0]
                 .factors

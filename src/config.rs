@@ -174,7 +174,16 @@ pub struct EngineConfig {
     pub r_candidate_max_factors: usize,
     #[serde(default)]
     pub r_candidate_bit_length: Option<u64>,
-    /// Decimal exponent used when retargeting speculative r candidates.
+    /// Whether factoring-mode r candidates sample bounds from a random `N^a` window with `a ∈ [0.8, 0.9]`.
+    #[serde(default = "default_r_candidate_random_power_window")]
+    pub r_candidate_random_power_window: bool,
+    /// Lower bound for the sampled total exponent used when retargeting speculative r candidates.
+    #[serde(
+        default = "default_r_candidate_target_exponent_minimum",
+        deserialize_with = "deserialize_bigdecimal"
+    )]
+    pub r_candidate_target_exponent_minimum: BigDecimal,
+    /// Upper bound for the sampled total exponent used when retargeting speculative r candidates.
     #[serde(
         default = "default_r_candidate_target_exponent",
         deserialize_with = "deserialize_bigdecimal"
@@ -330,6 +339,8 @@ impl Default for EngineConfig {
             r_candidate_small_prime_factors: default_r_candidate_small_prime_factors(),
             r_candidate_max_factors: default_r_candidate_max_factors(),
             r_candidate_bit_length: None,
+            r_candidate_random_power_window: default_r_candidate_random_power_window(),
+            r_candidate_target_exponent_minimum: default_r_candidate_target_exponent_minimum(),
             r_candidate_target_exponent: default_r_candidate_target_exponent(),
             r_candidate_retarget_partition_count: default_r_candidate_retarget_partition_count(),
             r_candidate_retarget_minimum_exponent:
@@ -1192,18 +1203,47 @@ fn default_r_candidate_max_factors() -> usize {
     6
 }
 
-/// Default speculative target exponent used for retargeted r candidates.
+/// Default flag for factoring-mode random `N^a` r-candidate sampling.
 ///
 /// # Parameters
 /// - None.
 ///
 /// # Returns
-/// - `BigDecimal`: Default target exponent.
+/// - `bool`: Default power-window sampling flag.
+///
+/// # Expected Output
+/// - Returns a constant default value; no side effects.
+fn default_r_candidate_random_power_window() -> bool {
+    false
+}
+
+/// Default upper bound for sampled retarget exponents.
+///
+/// # Parameters
+/// - None.
+///
+/// # Returns
+/// - `BigDecimal`: Default retarget exponent upper bound.
 ///
 /// # Expected Output
 /// - Returns a constant default value; no side effects.
 fn default_r_candidate_target_exponent() -> BigDecimal {
     BigDecimal::parse_bytes(b"2.005", 10).expect("valid default r candidate target exponent")
+}
+
+/// Default lower bound for sampled retarget exponents.
+///
+/// # Parameters
+/// - None.
+///
+/// # Returns
+/// - `BigDecimal`: Default retarget exponent lower bound.
+///
+/// # Expected Output
+/// - Returns a constant default value; no side effects.
+fn default_r_candidate_target_exponent_minimum() -> BigDecimal {
+    BigDecimal::parse_bytes(b"0.8", 10)
+        .expect("valid default r candidate target exponent minimum")
 }
 
 /// Default partition count used for speculative r-candidate retargeting.

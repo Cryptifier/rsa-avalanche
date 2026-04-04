@@ -117,9 +117,13 @@ struct Args {
     #[arg(long = "mirror-invert-candidates")]
     mirror_invert_candidates: bool,
 
-    /// Total decimal exponent used when retargeting speculative r candidates
+    /// Upper bound for the sampled total exponent used when retargeting speculative r candidates
     #[arg(long = "r-candidate-target-exponent")]
     r_candidate_target_exponent: Option<BigDecimal>,
+
+    /// Lower bound for the sampled total exponent used when retargeting speculative r candidates
+    #[arg(long = "r-candidate-target-exponent-minimum")]
+    r_candidate_target_exponent_minimum: Option<BigDecimal>,
 }
 
 /// Entry point for the RSA round-trip demo CLI.
@@ -180,6 +184,9 @@ fn main() -> Result<(), Box<dyn Error>> {
     if let Some(target_exponent) = &args.r_candidate_target_exponent {
         config.engine.r_candidate_target_exponent = target_exponent.clone();
     }
+    if let Some(target_exponent_minimum) = &args.r_candidate_target_exponent_minimum {
+        config.engine.r_candidate_target_exponent_minimum = target_exponent_minimum.clone();
+    }
     let analytics = Arc::new(Mutex::new(SessionAnalytics::new(AnalyticsCliArgs {
         bits: args.bits,
         message_override: args.message.clone(),
@@ -212,6 +219,10 @@ fn main() -> Result<(), Box<dyn Error>> {
         bits_decrypt: args.bits_decrypt,
         r_candidate_target_exponent: args
             .r_candidate_target_exponent
+            .as_ref()
+            .map(|value| value.normalized().to_string()),
+        r_candidate_target_exponent_minimum: args
+            .r_candidate_target_exponent_minimum
             .as_ref()
             .map(|value| value.normalized().to_string()),
     })));

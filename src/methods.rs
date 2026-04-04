@@ -3826,6 +3826,8 @@ fn build_r_candidate_settings(engine: &EngineConfig) -> RCandidateSettings {
         small_prime_factors_per_candidate: engine.r_candidate_small_prime_factors,
         max_factors_per_candidate: engine.r_candidate_max_factors,
         target_bit_length: engine.r_candidate_bit_length,
+        random_power_window: engine.r_candidate_random_power_window,
+        target_exponent_minimum: engine.r_candidate_target_exponent_minimum.clone(),
         target_exponent: engine.r_candidate_target_exponent.clone(),
         retarget_partition_count: engine.r_candidate_retarget_partition_count,
         retarget_minimum_exponent: engine.r_candidate_retarget_minimum_exponent.clone(),
@@ -6116,6 +6118,7 @@ mod tests {
             avalanche_combination_majority_vote_print: true,
             bits_decrypt: None,
             r_candidate_target_exponent: None,
+            r_candidate_target_exponent_minimum: None,
         })));
         let result = run_message_trial(
             &ctx,
@@ -6183,6 +6186,7 @@ mod tests {
             avalanche_combination_majority_vote_print: true,
             bits_decrypt: None,
             r_candidate_target_exponent: None,
+            r_candidate_target_exponent_minimum: None,
         })));
         let result = run_message_trial(
             &ctx,

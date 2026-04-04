@@ -63,6 +63,8 @@ pub struct AnalyticsCliArgs {
     pub bits_decrypt: Option<u32>,
     /// Optional CLI override for speculative r-candidate target exponent.
     pub r_candidate_target_exponent: Option<String>,
+    /// Optional CLI override for speculative r-candidate target exponent minimum.
+    pub r_candidate_target_exponent_minimum: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -91,6 +93,7 @@ pub(crate) struct AnalyticsCliInfo {
     avalanche_combination_majority_vote_print: bool,
     bits_decrypt: Option<u32>,
     r_candidate_target_exponent: Option<String>,
+    r_candidate_target_exponent_minimum: Option<String>,
 }
 
 /// Timing entry for a named step.
@@ -414,6 +417,7 @@ impl SessionAnalytics {
                     .avalanche_combination_majority_vote_print,
                 bits_decrypt: args.bits_decrypt,
                 r_candidate_target_exponent: args.r_candidate_target_exponent,
+                r_candidate_target_exponent_minimum: args.r_candidate_target_exponent_minimum,
             },
             steps: Vec::new(),
             step_summaries: Vec::new(),
@@ -647,6 +651,7 @@ pub fn generate_r_candidates_with_analytics(
     retarget_r_candidates_for_speculative_oracles(
         n,
         &mut candidates,
+        &settings.target_exponent_minimum,
         &settings.target_exponent,
         settings.retarget_partition_count,
         &settings.retarget_minimum_exponent,
