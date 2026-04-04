@@ -5054,10 +5054,11 @@ fn run_sampled_avalanche_beam_search(
     let mut next_sample_pct = 10u64;
 
     println!(
-        "Avalanche combination setup for batch {}: scored inputs {} r-candidate-pool {} mixed-r-candidates {} samples {} majority-vote {} sample-smoothing {} majority-print {}",
+        "Avalanche combination setup for batch {}: scored inputs {} r-candidate-pool {} configured-mixed-r-candidates {} effective-mixed-r-candidates {} samples {} majority-vote {} sample-smoothing {} majority-print {}",
         batch_number,
         scored_inputs.len(),
         r_candidate_pool_size,
+        engine.avalanche_combination_mixed_r_candidates,
         mixed_r_candidate_count,
         sample_count,
         if majority_vote_enabled { "on" } else { "off" },
@@ -5072,6 +5073,15 @@ fn run_sampled_avalanche_beam_search(
             "off"
         }
     );
+    if mixed_r_candidate_count < engine.avalanche_combination_mixed_r_candidates {
+        println!(
+            "Avalanche combination batch {} capped mixed r-candidates from {} to {} because only {} distinct r candidates were available in the batch",
+            batch_number,
+            engine.avalanche_combination_mixed_r_candidates,
+            mixed_r_candidate_count,
+            r_candidate_pool_size
+        );
+    }
 
     for sample_index in 0..sample_count {
         let selected_inputs = select_scored_inputs_for_mixed_r_candidates(
@@ -5291,13 +5301,14 @@ fn run_r_candidate_accuracy_batches(
 
     let total_candidates = candidates_per_batch * batch_count;
     println!(
-        "Starting r-candidate accuracy batches: batches {} candidates-per-batch {} messages-per-batch {} avalanche-samples {} configured-combination-size {} mixed-r-candidates {} pool-source full-batch majority-vote {} sample-smoothing {} majority-print {}",
+        "Starting r-candidate accuracy batches: batches {} candidates-per-batch {} messages-per-batch {} avalanche-samples {} configured-combination-size {} configured-mixed-r-candidates {} same-r-batch {} pool-source full-batch majority-vote {} sample-smoothing {} majority-print {}",
         batch_count,
         candidates_per_batch,
         message_count,
         engine.avalanche_combination_samples,
         engine.avalanche_combination_size,
         engine.avalanche_combination_mixed_r_candidates,
+        if engine.same_r_batch { "on" } else { "off" },
         if engine.avalanche_combination_majority_vote {
             "on"
         } else {

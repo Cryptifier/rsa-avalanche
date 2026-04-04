@@ -197,7 +197,7 @@ run_current_config() {
       "${avalanche_combination_majority_vote_print}"
 
     set +e
-    cargo run --bin analysis -- --same-r-batch --true --bits 56 --bits-decrypt 128 --seed "${seed}" -c "${CONFIG}" --tests --crypto-rng --session-json "${session_path}" \
+    cargo run --bin analysis -- --true --bits 56 --bits-decrypt 128 --seed "${seed}" -c "${CONFIG}" --tests --crypto-rng --session-json "${session_path}" \
       "${TEST_ARGS[@]}" "${EXTRA_ARGS[@]}" \
       2>&1 | tee -a "${ANALYSIS_LOG}" | tee "${run_output}" > /dev/null
     status=$?
