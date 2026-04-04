@@ -110,9 +110,12 @@ pub struct EngineConfig {
     /// Number of avalanche combination samples to evaluate per batch.
     #[serde(default = "default_avalanche_combination_samples")]
     pub avalanche_combination_samples: u64,
-    /// Number of scored candidates included in each avalanche combination sample.
+    /// Legacy sampled-width setting retained for compatibility with older configs.
     #[serde(default = "default_avalanche_combination_size")]
     pub avalanche_combination_size: usize,
+    /// Number of distinct r candidates mixed into each sampled avalanche input set.
+    #[serde(default = "default_avalanche_combination_mixed_r_candidates")]
+    pub avalanche_combination_mixed_r_candidates: usize,
     /// Legacy pool-size setting retained for compatibility; sampled pools now use the full batch.
     #[serde(default = "default_avalanche_combination_pool_size")]
     pub avalanche_combination_pool_size: usize,
@@ -298,6 +301,8 @@ impl Default for EngineConfig {
             analysis_batch_batches: default_analysis_batch_batches(),
             avalanche_combination_samples: default_avalanche_combination_samples(),
             avalanche_combination_size: default_avalanche_combination_size(),
+            avalanche_combination_mixed_r_candidates:
+                default_avalanche_combination_mixed_r_candidates(),
             avalanche_combination_pool_size: default_avalanche_combination_pool_size(),
             avalanche_combination_majority_vote: default_avalanche_combination_majority_vote(),
             avalanche_combination_sample_smoothing: default_avalanche_combination_sample_smoothing(
@@ -879,18 +884,32 @@ fn default_avalanche_combination_samples() -> u64 {
     100
 }
 
-/// Default size of each avalanche combination sample.
+/// Default legacy size of each avalanche combination sample.
 ///
 /// # Parameters
 /// - None.
 ///
 /// # Returns
-/// - `usize`: Default number of scored candidates per sampled combination.
+/// - `usize`: Default compatibility value for older sampled-combination configs.
 ///
 /// # Expected Output
 /// - Returns a constant default value; no side effects.
 fn default_avalanche_combination_size() -> usize {
     50
+}
+
+/// Default number of distinct r candidates mixed into each avalanche sample.
+///
+/// # Parameters
+/// - None.
+///
+/// # Returns
+/// - `usize`: Default number of r candidates contributing their `c^x` inputs.
+///
+/// # Expected Output
+/// - Returns a constant default value; no side effects.
+fn default_avalanche_combination_mixed_r_candidates() -> usize {
+    1
 }
 
 /// Default number of scored candidates retained for avalanche combination sampling.

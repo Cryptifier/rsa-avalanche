@@ -47,8 +47,10 @@ pub struct AnalyticsCliArgs {
     pub avalanche_probability_spread_exponent: f64,
     /// Number of avalanche combination samples evaluated per batch.
     pub avalanche_combination_samples: u64,
-    /// Number of scored candidates included in each avalanche combination sample.
+    /// Legacy sampled-width setting retained for compatibility with older configs.
     pub avalanche_combination_size: usize,
+    /// Number of distinct r candidates mixed into each avalanche combination sample.
+    pub avalanche_combination_mixed_r_candidates: usize,
     /// Number of top scored candidates retained for avalanche combination sampling.
     pub avalanche_combination_pool_size: usize,
     /// Whether sampled avalanche uses per-bit majority-vote probabilities from the combination outputs.
@@ -82,6 +84,7 @@ pub(crate) struct AnalyticsCliInfo {
     avalanche_probability_spread_exponent: f64,
     avalanche_combination_samples: u64,
     avalanche_combination_size: usize,
+    avalanche_combination_mixed_r_candidates: usize,
     avalanche_combination_pool_size: usize,
     avalanche_combination_majority_vote: bool,
     avalanche_combination_sample_smoothing: bool,
@@ -299,8 +302,12 @@ pub struct AvalancheCombinationSample {
     pub sample_index: usize,
     /// Number of scored candidates available for sampling in the batch.
     pub pool_size: usize,
+    /// Number of distinct r candidates available for sampling in the batch.
+    pub r_candidate_pool_size: usize,
     /// Number of scored candidates selected for this sample.
     pub combination_size: usize,
+    /// Number of distinct r candidates selected for this sample.
+    pub mixed_r_candidate_count: usize,
     /// Mean match percentage of the sampled scored candidates.
     pub average_score_pct: f64,
     /// Whether this sample used per-bit majority-vote probabilities.
@@ -398,6 +405,8 @@ impl SessionAnalytics {
                 avalanche_probability_spread_exponent: args.avalanche_probability_spread_exponent,
                 avalanche_combination_samples: args.avalanche_combination_samples,
                 avalanche_combination_size: args.avalanche_combination_size,
+                avalanche_combination_mixed_r_candidates: args
+                    .avalanche_combination_mixed_r_candidates,
                 avalanche_combination_pool_size: args.avalanche_combination_pool_size,
                 avalanche_combination_majority_vote: args.avalanche_combination_majority_vote,
                 avalanche_combination_sample_smoothing: args.avalanche_combination_sample_smoothing,

@@ -198,6 +198,9 @@ fn main() -> Result<(), Box<dyn Error>> {
         avalanche_probability_spread_exponent: config.engine.avalanche_probability_spread_exponent,
         avalanche_combination_samples: config.engine.avalanche_combination_samples,
         avalanche_combination_size: config.engine.avalanche_combination_size,
+        avalanche_combination_mixed_r_candidates: config
+            .engine
+            .avalanche_combination_mixed_r_candidates,
         avalanche_combination_pool_size: config.engine.avalanche_combination_pool_size,
         avalanche_combination_majority_vote: config.engine.avalanche_combination_majority_vote,
         avalanche_combination_sample_smoothing: config

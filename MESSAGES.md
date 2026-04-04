@@ -28,6 +28,13 @@ Consumers should treat missing fields as empty string, null, or 0 (per field typ
 - `mirror_invert_candidates`: boolean
 - `beam_bit_one_threshold`: number
 - `avalanche_probability_spread_exponent`: number
+- `avalanche_combination_samples`: number
+- `avalanche_combination_size`: number
+- `avalanche_combination_mixed_r_candidates`: number
+- `avalanche_combination_pool_size`: number
+- `avalanche_combination_majority_vote`: boolean
+- `avalanche_combination_sample_smoothing`: boolean
+- `avalanche_combination_majority_vote_print`: boolean
 - `bits_decrypt`: number or null
 
 `session_finish` payload:

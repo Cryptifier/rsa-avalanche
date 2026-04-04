@@ -3,7 +3,7 @@
 /// Copyright (c) 2025 Nicholas LaRoche <nlaroche@cryptifier.dev>
 use bigdecimal::BigDecimal;
 use std::{
-    collections::HashSet,
+    collections::{BTreeMap, HashSet},
     error::Error,
     fs::{self, OpenOptions},
     io::Write,
@@ -4802,6 +4802,12 @@ struct ScoredAvalancheInput {
 }
 
 #[derive(Clone, Debug)]
+struct ScoredAvalancheInputGroup {
+    batch_candidate_index: usize,
+    inputs: Vec<ScoredAvalancheInput>,
+}
+
+#[derive(Clone, Debug)]
 struct SampledAvalancheExecution {
     sample: AvalancheCombinationSample,
     best_bits: Vec<bool>,
@@ -4864,6 +4870,79 @@ fn sample_unique_indices(pool_size: usize, sample_size: usize, rng: &mut RngChoi
     }
     indices.truncate(sample_size.min(pool_size));
     indices
+}
+
+/// Groups scored avalanche inputs by their originating r candidate.
+///
+/// # Parameters
+/// - `inputs`: Scored candidate decryptions produced for the batch.
+///
+/// # Returns
+/// - `Vec<ScoredAvalancheInputGroup>`: Distinct r-candidate groups preserving every `c^x` input.
+///
+/// # Expected Output
+/// - Returns grouped inputs ordered by batch-candidate index; no stdout/stderr output.
+fn group_scored_inputs_by_r_candidate(
+    inputs: &[ScoredAvalancheInput],
+) -> Vec<ScoredAvalancheInputGroup> {
+    let mut grouped = BTreeMap::<usize, Vec<ScoredAvalancheInput>>::new();
+    for input in inputs {
+        grouped
+            .entry(input.batch_candidate_index)
+            .or_default()
+            .push(input.clone());
+    }
+
+    grouped
+        .into_iter()
+        .map(|(batch_candidate_index, mut grouped_inputs)| {
+            grouped_inputs.sort_by(|left, right| {
+                left.message_index
+                    .cmp(&right.message_index)
+                    .then_with(|| left.x.cmp(&right.x))
+                    .then_with(|| right.score_match_pct.total_cmp(&left.score_match_pct))
+            });
+            ScoredAvalancheInputGroup {
+                batch_candidate_index,
+                inputs: grouped_inputs,
+            }
+        })
+        .collect()
+}
+
+/// Selects a random set of r-candidate groups and flattens all of their `c^x` inputs.
+///
+/// # Parameters
+/// - `grouped_inputs`: Grouped scored inputs keyed by r candidate.
+/// - `mixed_r_candidate_count`: Number of distinct r candidates to include.
+/// - `rng`: Random number generator used for group sampling.
+///
+/// # Returns
+/// - `Vec<ScoredAvalancheInput>`: Flattened inputs for the selected r groups.
+///
+/// # Expected Output
+/// - Returns every `c^x` input belonging to the sampled r groups; no stdout/stderr output.
+fn select_scored_inputs_for_mixed_r_candidates(
+    grouped_inputs: &[ScoredAvalancheInputGroup],
+    mixed_r_candidate_count: usize,
+    rng: &mut RngChoice,
+) -> Vec<ScoredAvalancheInput> {
+    let sampled_group_indices =
+        sample_unique_indices(grouped_inputs.len(), mixed_r_candidate_count, rng);
+    let mut selected_inputs = Vec::new();
+    for group_idx in sampled_group_indices {
+        if let Some(group) = grouped_inputs.get(group_idx) {
+            debug_assert_eq!(
+                group.inputs
+                    .first()
+                    .map(|input| input.batch_candidate_index)
+                    .unwrap_or(group.batch_candidate_index),
+                group.batch_candidate_index
+            );
+            selected_inputs.extend(group.inputs.iter().cloned());
+        }
+    }
+    selected_inputs
 }
 
 /// Builds avalanche nodes from scored candidate decryptions.
@@ -4937,8 +5016,8 @@ fn run_sampled_avalanche_beam_search(
     if engine.avalanche_combination_samples == 0 {
         return Err("avalanche_combination_samples must be >= 1".into());
     }
-    if engine.avalanche_combination_size == 0 {
-        return Err("avalanche_combination_size must be >= 1".into());
+    if engine.avalanche_combination_mixed_r_candidates == 0 {
+        return Err("avalanche_combination_mixed_r_candidates must be >= 1".into());
     }
     if scored_inputs.is_empty() {
         return Ok(SampledAvalancheBatchResult {
@@ -4948,43 +5027,38 @@ fn run_sampled_avalanche_beam_search(
         });
     }
 
-    let mut ranked_inputs = scored_inputs.to_vec();
-    ranked_inputs.sort_by(|left, right| {
-        right
-            .score_match_pct
-            .total_cmp(&left.score_match_pct)
-            .then_with(|| left.message_index.cmp(&right.message_index))
-    });
-
-    let pool_size = ranked_inputs.len();
-    let combination_size = engine.avalanche_combination_size.min(pool_size);
-    if combination_size == 0 {
+    let grouped_inputs = group_scored_inputs_by_r_candidate(scored_inputs);
+    let pool_size = scored_inputs.len();
+    let r_candidate_pool_size = grouped_inputs.len();
+    if r_candidate_pool_size == 0 {
         return Ok(SampledAvalancheBatchResult {
             selected_sample: None,
             all_samples: Vec::new(),
             evaluated_candidates: 0,
         });
     }
+    let mixed_r_candidate_count = engine
+        .avalanche_combination_mixed_r_candidates
+        .min(r_candidate_pool_size);
 
-    let pool = &ranked_inputs[..pool_size];
     let sample_count = engine.avalanche_combination_samples as usize;
     let beam_bit_one_threshold = engine.beam_bit_one_threshold;
     let spread_exponent = engine.avalanche_probability_spread_exponent;
     let majority_vote_enabled = engine.avalanche_combination_majority_vote;
     let sample_smoothing_enabled = engine.avalanche_combination_sample_smoothing;
     let majority_vote_print_enabled = engine.avalanche_combination_majority_vote_print;
-    let message_bits = biguint_to_bits_le(message, pool[0].message_bits.len());
+    let message_bits = biguint_to_bits_le(message, scored_inputs[0].message_bits.len());
     let mut all_samples = Vec::with_capacity(sample_count);
     let mut selected_sample: Option<SampledAvalancheExecution> = None;
     let mut evaluated_candidates = 0usize;
     let mut next_sample_pct = 10u64;
 
     println!(
-        "Avalanche combination setup for batch {}: scored inputs {} pool {} combination-size {} samples {} majority-vote {} sample-smoothing {} majority-print {}",
+        "Avalanche combination setup for batch {}: scored inputs {} r-candidate-pool {} mixed-r-candidates {} samples {} majority-vote {} sample-smoothing {} majority-print {}",
         batch_number,
         scored_inputs.len(),
-        pool_size,
-        combination_size,
+        r_candidate_pool_size,
+        mixed_r_candidate_count,
         sample_count,
         if majority_vote_enabled { "on" } else { "off" },
         if sample_smoothing_enabled {
@@ -5000,11 +5074,16 @@ fn run_sampled_avalanche_beam_search(
     );
 
     for sample_index in 0..sample_count {
-        let sampled_indices = sample_unique_indices(pool_size, combination_size, rng);
-        let selected_inputs: Vec<ScoredAvalancheInput> = sampled_indices
-            .into_iter()
-            .map(|idx| pool[idx].clone())
-            .collect();
+        let selected_inputs = select_scored_inputs_for_mixed_r_candidates(
+            &grouped_inputs,
+            mixed_r_candidate_count,
+            rng,
+        );
+        let selected_group_count = selected_inputs
+            .iter()
+            .map(|input| input.batch_candidate_index)
+            .collect::<HashSet<_>>()
+            .len();
         let average_score_pct = mean_f64(
             &selected_inputs
                 .iter()
@@ -5102,7 +5181,9 @@ fn run_sampled_avalanche_beam_search(
         let sample = AvalancheCombinationSample {
             sample_index: sample_index + 1,
             pool_size,
+            r_candidate_pool_size,
             combination_size: selected_inputs.len(),
+            mixed_r_candidate_count: selected_group_count,
             average_score_pct,
             majority_vote_enabled,
             sample_smoothing_enabled,
@@ -5210,12 +5291,13 @@ fn run_r_candidate_accuracy_batches(
 
     let total_candidates = candidates_per_batch * batch_count;
     println!(
-        "Starting r-candidate accuracy batches: batches {} candidates-per-batch {} messages-per-batch {} avalanche-samples {} combination-size {} pool-source full-batch majority-vote {} sample-smoothing {} majority-print {}",
+        "Starting r-candidate accuracy batches: batches {} candidates-per-batch {} messages-per-batch {} avalanche-samples {} configured-combination-size {} mixed-r-candidates {} pool-source full-batch majority-vote {} sample-smoothing {} majority-print {}",
         batch_count,
         candidates_per_batch,
         message_count,
         engine.avalanche_combination_samples,
         engine.avalanche_combination_size,
+        engine.avalanche_combination_mixed_r_candidates,
         if engine.avalanche_combination_majority_vote {
             "on"
         } else {
@@ -5891,6 +5973,83 @@ mod tests {
     }
 
     #[test]
+    fn test_select_scored_inputs_for_mixed_r_candidates_keeps_complete_r_groups() {
+        let inputs = vec![
+            ScoredAvalancheInput {
+                batch_candidate_index: 0,
+                message_index: 0,
+                r: BigUint::from(3u8),
+                r_bits: 2,
+                target_exponent: "1".to_string(),
+                x: BigUint::from(1u8),
+                score_match_pct: 75.0,
+                hbc_ciphertext_r: "1".to_string(),
+                candidate_decryption: "1".to_string(),
+                message_bits: vec![true, false],
+            },
+            ScoredAvalancheInput {
+                batch_candidate_index: 0,
+                message_index: 1,
+                r: BigUint::from(3u8),
+                r_bits: 2,
+                target_exponent: "1".to_string(),
+                x: BigUint::from(3u8),
+                score_match_pct: 70.0,
+                hbc_ciphertext_r: "3".to_string(),
+                candidate_decryption: "3".to_string(),
+                message_bits: vec![false, true],
+            },
+            ScoredAvalancheInput {
+                batch_candidate_index: 1,
+                message_index: 0,
+                r: BigUint::from(5u8),
+                r_bits: 3,
+                target_exponent: "1".to_string(),
+                x: BigUint::from(1u8),
+                score_match_pct: 65.0,
+                hbc_ciphertext_r: "5".to_string(),
+                candidate_decryption: "5".to_string(),
+                message_bits: vec![true, true],
+            },
+            ScoredAvalancheInput {
+                batch_candidate_index: 1,
+                message_index: 1,
+                r: BigUint::from(5u8),
+                r_bits: 3,
+                target_exponent: "1".to_string(),
+                x: BigUint::from(3u8),
+                score_match_pct: 60.0,
+                hbc_ciphertext_r: "15".to_string(),
+                candidate_decryption: "15".to_string(),
+                message_bits: vec![false, false],
+            },
+        ];
+
+        let grouped_inputs = group_scored_inputs_by_r_candidate(&inputs);
+        assert_eq!(grouped_inputs.len(), 2);
+
+        let mut rng = RngChoice::from_seed(RngMode::Standard, 7);
+        let selected_single =
+            select_scored_inputs_for_mixed_r_candidates(&grouped_inputs, 1, &mut rng);
+        let selected_single_candidates = selected_single
+            .iter()
+            .map(|input| input.batch_candidate_index)
+            .collect::<HashSet<_>>();
+        assert_eq!(selected_single.len(), 2);
+        assert_eq!(selected_single_candidates.len(), 1);
+
+        let mut rng = RngChoice::from_seed(RngMode::Standard, 7);
+        let selected_double =
+            select_scored_inputs_for_mixed_r_candidates(&grouped_inputs, 2, &mut rng);
+        let selected_double_candidates = selected_double
+            .iter()
+            .map(|input| input.batch_candidate_index)
+            .collect::<HashSet<_>>();
+        assert_eq!(selected_double.len(), 4);
+        assert_eq!(selected_double_candidates.len(), 2);
+    }
+
+    #[test]
     fn test_r_candidates_small_primes_success() {
         let p = BigUint::from(61u8);
         let q = BigUint::from(53u8);
@@ -5939,6 +6098,7 @@ mod tests {
             avalanche_probability_spread_exponent: 0.5,
             avalanche_combination_samples: 100,
             avalanche_combination_size: 50,
+            avalanche_combination_mixed_r_candidates: 1,
             avalanche_combination_pool_size: 100,
             avalanche_combination_majority_vote: true,
             avalanche_combination_sample_smoothing: false,
@@ -6005,6 +6165,7 @@ mod tests {
             avalanche_probability_spread_exponent: 0.5,
             avalanche_combination_samples: 100,
             avalanche_combination_size: 50,
+            avalanche_combination_mixed_r_candidates: 1,
             avalanche_combination_pool_size: 100,
             avalanche_combination_majority_vote: true,
             avalanche_combination_sample_smoothing: false,
