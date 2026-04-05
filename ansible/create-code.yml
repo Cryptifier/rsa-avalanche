@@ -396,7 +396,7 @@
 
     - name: Create /mnt/code/user and hand ownership to login user
       ansible.builtin.file:
-        path: "{{ code_mount_point }}/user"
+        path: "{{ code_mount_point }}/user/"
         state: directory
         owner: "{{ ansible_user_id }}"
         group: "{{ ansible_user_gid }}"
@@ -405,7 +405,7 @@
 
     - name: Ensure /mnt/code is owned by the instance user
       ansible.builtin.file:
-        path: "{{ code_mount_point }}/user"
+        path: "{{ code_mount_point }}/user/"
         state: directory
         owner: "{{ ansible_user_id }}"
         group: "{{ ansible_user_gid }}"
