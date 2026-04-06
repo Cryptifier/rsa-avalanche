@@ -69,7 +69,7 @@
     "analysis_batch_messages": 1000, // Number of ciphertext variants scored per batch before avalanche sampling.
     "analysis_batch_candidates": 500, // Number of r candidates scored in each batch before sampling combinations.
     "analysis_batch_batches": 1, // Number of scored batches to run for the small-batch beam workflow.
-    "avalanche_combination_mixed_r_candidates": 1,
+    "avalanche_combination_mixed_r_candidates": 4,
     "avalanche_combination_samples": 12000, // N: number of sampled combinations evaluated by avalanche per batch.
     "avalanche_combination_size": 15, // Number of scored items taken in each sampled combination.
     "avalanche_combination_pool_size": 100000, // Legacy compatibility field; runtime sampling now always uses the full batch-sized pool.
