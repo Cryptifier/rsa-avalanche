@@ -4935,7 +4935,8 @@ fn select_scored_inputs_for_mixed_r_candidates(
     for group_idx in sampled_group_indices {
         if let Some(group) = grouped_inputs.get(group_idx) {
             debug_assert_eq!(
-                group.inputs
+                group
+                    .inputs
                     .first()
                     .map(|input| input.batch_candidate_index)
                     .unwrap_or(group.batch_candidate_index),

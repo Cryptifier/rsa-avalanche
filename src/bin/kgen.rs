@@ -384,7 +384,10 @@ fn write_private_key_file(
         .into());
     }
 
-    if let Some(parent) = output_path.parent().filter(|parent| !parent.as_os_str().is_empty()) {
+    if let Some(parent) = output_path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+    {
         fs::create_dir_all(parent)?;
     }
 
@@ -495,7 +498,10 @@ mod tests {
         assert_eq!(document.algorithm, "RSA");
         assert_eq!(document.public_exponent, "17");
         assert_eq!(document.primes.p, "61");
-        assert_eq!(document.bit_lengths.requested_prime_bits, DEFAULT_PRIME_BITS);
+        assert_eq!(
+            document.bit_lengths.requested_prime_bits,
+            DEFAULT_PRIME_BITS
+        );
         assert_eq!(
             document.bit_lengths.requested_modulus_bits,
             DEFAULT_MODULUS_BITS

@@ -1,8 +1,7 @@
 use crate::math::{
     coalesce_factors, factor_composite_with_timeout, floor_biguint_pow_bigdecimal,
-    is_probable_prime_big,
-    next_prime_from_biguint_pow_bigdecimal, pollard_rho, random_bigdecimal_partition_with_min,
-    random_biguint_below, random_biguint_bits,
+    is_probable_prime_big, next_prime_from_biguint_pow_bigdecimal, pollard_rho,
+    random_bigdecimal_partition_with_min, random_biguint_below, random_biguint_bits,
 };
 use bigdecimal::BigDecimal;
 use num_bigint::BigUint;
@@ -690,8 +689,7 @@ pub fn generate_r_candidates_via_factoring(
             }
 
             let mut local_rng = RngChoice::from_seed(rng.mode(), seed);
-            let upper =
-                factoring_candidate_upper_bound(n, &scale, idx, settings, &mut local_rng);
+            let upper = factoring_candidate_upper_bound(n, &scale, idx, settings, &mut local_rng);
             let candidate = random_biguint_below(&upper, &mut local_rng) + BigUint::one();
             let candidate_key = candidate.to_string();
             let Ok(mut reserved_guard) = reserved.lock() else {
@@ -1083,8 +1081,7 @@ mod tests {
             max_factors_per_candidate: 5,
             target_bit_length: Some(16),
             random_power_window: false,
-            target_exponent_minimum: BigDecimal::parse_bytes(b"0.8", 10)
-                .expect("valid exponent"),
+            target_exponent_minimum: BigDecimal::parse_bytes(b"0.8", 10).expect("valid exponent"),
             target_exponent: BigDecimal::parse_bytes(b"2.005", 10).expect("valid exponent"),
             retarget_partition_count: 3,
             retarget_minimum_exponent: BigDecimal::parse_bytes(b"0.45", 10)
@@ -1126,8 +1123,7 @@ mod tests {
             max_factors_per_candidate: 4,
             target_bit_length: Some(12),
             random_power_window: false,
-            target_exponent_minimum: BigDecimal::parse_bytes(b"0.8", 10)
-                .expect("valid exponent"),
+            target_exponent_minimum: BigDecimal::parse_bytes(b"0.8", 10).expect("valid exponent"),
             target_exponent: BigDecimal::parse_bytes(b"2.005", 10).expect("valid exponent"),
             retarget_partition_count: 3,
             retarget_minimum_exponent: BigDecimal::parse_bytes(b"0.45", 10)
@@ -1155,8 +1151,7 @@ mod tests {
             max_factors_per_candidate: 4,
             target_bit_length: Some(14),
             random_power_window: false,
-            target_exponent_minimum: BigDecimal::parse_bytes(b"0.8", 10)
-                .expect("valid exponent"),
+            target_exponent_minimum: BigDecimal::parse_bytes(b"0.8", 10).expect("valid exponent"),
             target_exponent: BigDecimal::parse_bytes(b"2.005", 10).expect("valid exponent"),
             retarget_partition_count: 3,
             retarget_minimum_exponent: BigDecimal::parse_bytes(b"0.45", 10)
@@ -1184,8 +1179,7 @@ mod tests {
             max_factors_per_candidate: 6,
             target_bit_length: None,
             random_power_window: false,
-            target_exponent_minimum: BigDecimal::parse_bytes(b"0.8", 10)
-                .expect("valid exponent"),
+            target_exponent_minimum: BigDecimal::parse_bytes(b"0.8", 10).expect("valid exponent"),
             target_exponent: BigDecimal::parse_bytes(b"2.005", 10).expect("valid exponent"),
             retarget_partition_count: 3,
             retarget_minimum_exponent: BigDecimal::parse_bytes(b"0.45", 10)
@@ -1214,8 +1208,7 @@ mod tests {
             max_factors_per_candidate: 6,
             target_bit_length: None,
             random_power_window: false,
-            target_exponent_minimum: BigDecimal::parse_bytes(b"0.8", 10)
-                .expect("valid exponent"),
+            target_exponent_minimum: BigDecimal::parse_bytes(b"0.8", 10).expect("valid exponent"),
             target_exponent: BigDecimal::parse_bytes(b"2.005", 10).expect("valid exponent"),
             retarget_partition_count: 3,
             retarget_minimum_exponent: BigDecimal::parse_bytes(b"0.45", 10)
@@ -1246,8 +1239,7 @@ mod tests {
             max_factors_per_candidate: 6,
             target_bit_length: None,
             random_power_window: false,
-            target_exponent_minimum: BigDecimal::parse_bytes(b"0.8", 10)
-                .expect("valid exponent"),
+            target_exponent_minimum: BigDecimal::parse_bytes(b"0.8", 10).expect("valid exponent"),
             target_exponent: BigDecimal::parse_bytes(b"2.005", 10).expect("valid exponent"),
             retarget_partition_count: 3,
             retarget_minimum_exponent: BigDecimal::parse_bytes(b"0.45", 10)
@@ -1325,8 +1317,7 @@ mod tests {
             max_factors_per_candidate: 6,
             target_bit_length: None,
             random_power_window: true,
-            target_exponent_minimum: BigDecimal::parse_bytes(b"0.8", 10)
-                .expect("valid exponent"),
+            target_exponent_minimum: BigDecimal::parse_bytes(b"0.8", 10).expect("valid exponent"),
             target_exponent: BigDecimal::parse_bytes(b"2.005", 10).expect("valid exponent"),
             retarget_partition_count: 3,
             retarget_minimum_exponent: BigDecimal::parse_bytes(b"0.45", 10)

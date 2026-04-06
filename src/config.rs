@@ -343,8 +343,7 @@ impl Default for EngineConfig {
             r_candidate_target_exponent_minimum: default_r_candidate_target_exponent_minimum(),
             r_candidate_target_exponent: default_r_candidate_target_exponent(),
             r_candidate_retarget_partition_count: default_r_candidate_retarget_partition_count(),
-            r_candidate_retarget_minimum_exponent:
-                default_r_candidate_retarget_minimum_exponent(),
+            r_candidate_retarget_minimum_exponent: default_r_candidate_retarget_minimum_exponent(),
             combiner_enable: default_combiner_enable(),
             combiner_k_oracles: default_combiner_k_oracles(),
             combiner_match_probability: default_combiner_match_probability(),
@@ -1242,8 +1241,7 @@ fn default_r_candidate_target_exponent() -> BigDecimal {
 /// # Expected Output
 /// - Returns a constant default value; no side effects.
 fn default_r_candidate_target_exponent_minimum() -> BigDecimal {
-    BigDecimal::parse_bytes(b"0.8", 10)
-        .expect("valid default r candidate target exponent minimum")
+    BigDecimal::parse_bytes(b"0.8", 10).expect("valid default r candidate target exponent minimum")
 }
 
 /// Default partition count used for speculative r-candidate retargeting.
