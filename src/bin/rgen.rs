@@ -1,7 +1,6 @@
 /// Eclipse Public License 2.0
 /// SPDX-License-Identifier: EPL-2.0
 /// Copyright (c) 2025 Nicholas LaRoche <nlaroche@cryptifier.dev>
-
 use std::{
     collections::HashSet,
     error::Error,
@@ -11,10 +10,12 @@ use std::{
 
 use clap::{Parser, ValueEnum};
 use num_bigint::BigUint;
-use rsademo::config::{load_config, Config, EngineConfig};
+use rsademo::config::{Config, EngineConfig, load_config};
 use rsademo::math::random_prime_with_bits;
+use rsademo::r_candidates::{
+    RCandidate, RCandidateMode, RCandidateSettings, generate_r_candidates,
+};
 use rsademo::rng::{RngChoice, RngMode};
-use rsademo::r_candidates::{generate_r_candidates, RCandidateMode, RCandidateSettings};
 
 #[derive(Parser, Debug)]
 #[command(
@@ -67,6 +68,10 @@ struct Args {
     /// Percent smaller than modulus bit length for r candidates (default 30 when flag is present)
     #[arg(long, value_name = "PCT", num_args = 0..=1, default_missing_value = "30")]
     r_bits_percent: Option<f64>,
+
+    /// In factoring mode, sample candidate bounds from a random N^a window where a is in [0.8, 0.9]
+    #[arg(long)]
+    random_power_window: bool,
 
     /// Number of r candidates to generate (overrides config counts)
     #[arg(long)]
@@ -174,13 +179,12 @@ fn run_rgen(args: Args, config: Config) -> Result<(), Box<dyn Error>> {
 
     if settings.mode == RCandidateMode::Factoring && modulus.is_none() {
         return Err(
-            "factoring mode requires --n, --p/--q, --bits, or config/rsa_config.json with p and q".into(),
+            "factoring mode requires --n, --p/--q, --bits, or config/rsa_config.json with p and q"
+                .into(),
         );
     }
 
-    let n_for_generation = modulus
-        .clone()
-        .unwrap_or_else(|| BigUint::from(1u8));
+    let n_for_generation = modulus.clone().unwrap_or_else(|| BigUint::from(1u8));
     let candidates = generate_r_candidates(&n_for_generation, &settings, &mut rng);
 
     if candidates.is_empty() {
@@ -275,10 +279,7 @@ fn resolve_modulus(
         return Ok(Some(p * q));
     }
 
-    if let (Some(p), Some(q)) = (
-        config.rsa_keypair.p.clone(),
-        config.rsa_keypair.q.clone(),
-    ) {
+    if let (Some(p), Some(q)) = (config.rsa_keypair.p.clone(), config.rsa_keypair.q.clone()) {
         return Ok(Some(p * q));
     }
 
@@ -355,13 +356,16 @@ fn build_r_candidate_settings(
         small_prime_factors_per_candidate: args
             .small_prime_factors
             .unwrap_or(engine.r_candidate_small_prime_factors),
-        max_factors_per_candidate: args
-            .max_factors
-            .unwrap_or(engine.r_candidate_max_factors),
+        max_factors_per_candidate: args.max_factors.unwrap_or(engine.r_candidate_max_factors),
         target_bit_length: args
             .r_bits
             .or(target_bit_length_override)
             .or(engine.r_candidate_bit_length),
+        random_power_window: args.random_power_window || engine.r_candidate_random_power_window,
+        target_exponent_minimum: engine.r_candidate_target_exponent_minimum.clone(),
+        target_exponent: engine.r_candidate_target_exponent.clone(),
+        retarget_partition_count: engine.r_candidate_retarget_partition_count,
+        retarget_minimum_exponent: engine.r_candidate_retarget_minimum_exponent.clone(),
     })
 }
 
@@ -388,9 +392,8 @@ fn resolve_target_bit_length_override(
         return Err("--r-bits-percent must be greater than 0 and less than 100".into());
     }
 
-    let modulus = modulus.ok_or(
-        "--r-bits-percent requires a modulus from config, --n, --p/--q, or --bits",
-    )?;
+    let modulus = modulus
+        .ok_or("--r-bits-percent requires a modulus from config, --n, --p/--q, or --bits")?;
     let bits = modulus.bits();
     if bits == 0 {
         return Err("modulus bit length must be non-zero".into());
@@ -419,12 +422,14 @@ fn resolve_target_bit_length_override(
 /// - Writes to disk at `path`; may create or append the file.
 fn write_candidates_csv(
     path: &str,
-    entries: &[(BigUint, Vec<(BigUint, u64)>)],
+    entries: &[RCandidate],
     append: bool,
     header_lines: &[String],
 ) -> Result<usize, Box<dyn Error>> {
     let needs_header = if append {
-        fs::metadata(path).map(|meta| meta.len() == 0).unwrap_or(true)
+        fs::metadata(path)
+            .map(|meta| meta.len() == 0)
+            .unwrap_or(true)
     } else {
         true
     };
@@ -445,9 +450,9 @@ fn write_candidates_csv(
         }
     }
 
-    for (r, factors) in entries {
-        let factors_str = format_factors_csv(factors);
-        writeln!(file, "{r},{factors_str}")?;
+    for candidate in entries {
+        let factors_str = format_factors_csv(&candidate.factors);
+        writeln!(file, "{},{factors_str}", candidate.r)?;
     }
 
     Ok(entries.len())
@@ -461,16 +466,16 @@ fn write_candidates_csv(
 /// - `append`: Whether to load existing entries for deduplication.
 ///
 /// # Returns
-/// - `Result<(Vec<(BigUint, Vec<(BigUint, u64)>)>, usize, usize), Box<dyn Error>>`:
+/// - `Result<(Vec<RCandidate>, usize, usize), Box<dyn Error>>`:
 ///   Filtered candidates, count of skipped duplicates, and count of existing entries.
 ///
 /// # Expected Output
 /// - Reads the existing CSV when `append` is true; no other side effects.
 fn dedup_candidates(
     path: &str,
-    entries: Vec<(BigUint, Vec<(BigUint, u64)>)>,
+    entries: Vec<RCandidate>,
     append: bool,
-) -> Result<(Vec<(BigUint, Vec<(BigUint, u64)>)>, usize, usize), Box<dyn Error>> {
+) -> Result<(Vec<RCandidate>, usize, usize), Box<dyn Error>> {
     let mut seen = if append {
         load_existing_candidate_keys(path)?
     } else {
@@ -480,10 +485,10 @@ fn dedup_candidates(
 
     let mut skipped = 0usize;
     let mut filtered = Vec::with_capacity(entries.len());
-    for (r, factors) in entries.into_iter() {
-        let key = r.to_string();
+    for candidate in entries.into_iter() {
+        let key = candidate.r.to_string();
         if seen.insert(key) {
-            filtered.push((r, factors));
+            filtered.push(candidate);
         } else {
             skipped += 1;
         }
@@ -585,6 +590,13 @@ fn build_header_lines(
     if settings.mode == RCandidateMode::Factoring {
         lines.push(format!("# min_factor={}", settings.process_min_factor));
         lines.push(format!("# scale={}", settings.process_scale));
+        lines.push(format!(
+            "# random_power_window={}",
+            settings.random_power_window
+        ));
+        if settings.random_power_window {
+            lines.push("# random_power_window_exponent_range=0.8..=0.9".to_string());
+        }
     }
 
     if settings.mode == RCandidateMode::SmallPrimes {
@@ -595,6 +607,22 @@ fn build_header_lines(
             .collect::<Vec<_>>()
             .join(",");
         lines.push(format!("# small_primes={}", primes));
+        lines.push(format!(
+            "# target_exponent_minimum={}",
+            settings.target_exponent_minimum.normalized()
+        ));
+        lines.push(format!(
+            "# target_exponent={}",
+            settings.target_exponent.normalized()
+        ));
+        lines.push(format!(
+            "# retarget_partition_count={}",
+            settings.retarget_partition_count
+        ));
+        lines.push(format!(
+            "# retarget_minimum_exponent={}",
+            settings.retarget_minimum_exponent.normalized()
+        ));
         lines.push(format!(
             "# small_prime_factors={}",
             settings.small_prime_factors_per_candidate
@@ -715,6 +743,7 @@ mod tests {
             override_r: None,
             r_bits: None,
             r_bits_percent: None,
+            random_power_window: false,
         }
     }
 
@@ -738,6 +767,7 @@ mod tests {
         engine.r_candidate_small_prime_factors = 3;
         engine.r_candidate_max_factors = 9;
         engine.r_candidate_bit_length = Some(64);
+        engine.r_candidate_random_power_window = true;
 
         let mut args = base_args();
         args.count = Some(10);
@@ -761,6 +791,12 @@ mod tests {
         assert_eq!(settings.small_prime_factors_per_candidate, 4);
         assert_eq!(settings.max_factors_per_candidate, 12);
         assert_eq!(settings.target_bit_length, Some(80));
+        assert!(settings.random_power_window);
+        assert_eq!(
+            settings.target_exponent_minimum,
+            engine.r_candidate_target_exponent_minimum
+        );
+        assert_eq!(settings.target_exponent, engine.r_candidate_target_exponent);
     }
 
     #[test]
@@ -779,15 +815,60 @@ mod tests {
             small_prime_factors_per_candidate: 3,
             max_factors_per_candidate: 6,
             target_bit_length: Some(64),
+            random_power_window: true,
+            target_exponent_minimum: bigdecimal::BigDecimal::parse_bytes(b"0.8", 10)
+                .expect("valid exponent"),
+            target_exponent: bigdecimal::BigDecimal::parse_bytes(b"2.005", 10)
+                .expect("valid exponent"),
+            retarget_partition_count: 3,
+            retarget_minimum_exponent: bigdecimal::BigDecimal::parse_bytes(b"0.45", 10)
+                .expect("valid minimum exponent"),
         };
 
         let lines = build_header_lines(None, &settings, 2);
         let joined = lines.join("\n");
         assert!(joined.contains("mode=small_primes"));
         assert!(joined.contains("small_primes=3,5,7"));
+        assert!(joined.contains("target_exponent_minimum=0.8"));
+        assert!(joined.contains("target_exponent=2.005"));
+        assert!(joined.contains("retarget_partition_count=3"));
+        assert!(joined.contains("retarget_minimum_exponent=0.45"));
         assert!(joined.contains("small_prime_factors=3"));
         assert!(joined.contains("max_factors=6"));
         assert!(joined.contains("target_bits=64"));
+    }
+
+    #[test]
+    fn test_build_header_lines_factoring_power_window_metadata() {
+        let settings = RCandidateSettings {
+            mode: RCandidateMode::Factoring,
+            override_best_r: None,
+            process_min_factor: BigUint::from(3u8),
+            process_count: 2,
+            process_min_count: 1,
+            process_scale: 8,
+            reuse_r_candidates_path: "data/r_candidates.csv".to_string(),
+            reuse_r_candidates: false,
+            reuse_r_candidates_append_only: false,
+            small_primes: Vec::new(),
+            small_prime_factors_per_candidate: 3,
+            max_factors_per_candidate: 6,
+            target_bit_length: None,
+            random_power_window: true,
+            target_exponent_minimum: bigdecimal::BigDecimal::parse_bytes(b"0.8", 10)
+                .expect("valid exponent"),
+            target_exponent: bigdecimal::BigDecimal::parse_bytes(b"2.005", 10)
+                .expect("valid exponent"),
+            retarget_partition_count: 3,
+            retarget_minimum_exponent: bigdecimal::BigDecimal::parse_bytes(b"0.45", 10)
+                .expect("valid minimum exponent"),
+        };
+
+        let lines = build_header_lines(Some(&BigUint::from(10_000u64)), &settings, 2);
+        let joined = lines.join("\n");
+        assert!(joined.contains("mode=factoring"));
+        assert!(joined.contains("random_power_window=true"));
+        assert!(joined.contains("random_power_window_exponent_range=0.8..=0.9"));
     }
 
     #[test]
@@ -808,7 +889,7 @@ mod tests {
         fs::write(&path, existing).expect("write failed");
 
         let entries = vec![
-            (
+            RCandidate::new(
                 BigUint::from(105u64),
                 vec![
                     (BigUint::from(3u8), 1),
@@ -816,7 +897,7 @@ mod tests {
                     (BigUint::from(7u8), 1),
                 ],
             ),
-            (
+            RCandidate::new(
                 BigUint::from(1155u64),
                 vec![
                     (BigUint::from(3u8), 1),
@@ -832,7 +913,7 @@ mod tests {
         assert_eq!(existing_count, 1);
         assert_eq!(skipped, 1);
         assert_eq!(filtered.len(), 1);
-        assert_eq!(filtered[0].0, BigUint::from(1155u64));
+        assert_eq!(filtered[0].r, BigUint::from(1155u64));
 
         let _ = fs::remove_file(&path);
     }

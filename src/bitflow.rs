@@ -1,6 +1,6 @@
+use rand::SeedableRng;
 use rand::rngs::StdRng;
 use rand::seq::SliceRandom;
-use rand::SeedableRng;
 
 use crate::windows::WindowPartitionSet;
 
@@ -425,7 +425,7 @@ fn mod_pow(base: u64, exponent: u64, modulus: u64) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::avalanche::{search_avalanche_tree, AvalancheNode};
+    use crate::avalanche::{AvalancheNode, search_avalanche_tree};
 
     fn bits_from_str(bits: &str) -> Vec<bool> {
         bits.chars().map(|c| c == '1').collect()

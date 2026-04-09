@@ -3,30 +3,35 @@ use std::collections::HashMap;
 #[cfg(not(target_arch = "wasm32"))]
 use std::fs::File;
 #[cfg(not(target_arch = "wasm32"))]
-use std::io::{Read, Seek, SeekFrom};
+use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
+#[cfg(not(target_arch = "wasm32"))]
+use std::sync::mpsc::{self, Receiver, TryRecvError};
 #[cfg(not(target_arch = "wasm32"))]
 use std::time::{Duration, Instant};
 #[cfg(target_arch = "wasm32")]
 use web_time::{Duration, Instant};
 
+use clap::Parser;
 use eframe::egui;
 use egui_extras::{Column, TableBuilder};
 use egui_plot::{Plot, PlotPoints, Points};
+#[cfg(not(target_arch = "wasm32"))]
+use rsademo::zmq_status::{QueryResponsePayload, build_client_from_endpoint_with_timeouts};
 use serde::Deserialize;
 use serde_json::{Map, Value};
 
 #[cfg(target_arch = "wasm32")]
 use js_sys::encode_uri_component;
 #[cfg(target_arch = "wasm32")]
-use wasm_bindgen::prelude::*;
-#[cfg(target_arch = "wasm32")]
 use wasm_bindgen::JsCast;
 #[cfg(target_arch = "wasm32")]
-use wasm_bindgen_futures::{spawn_local, JsFuture};
+use wasm_bindgen::prelude::*;
 #[cfg(target_arch = "wasm32")]
-use web_sys::{window, Response};
+use wasm_bindgen_futures::{JsFuture, spawn_local};
+#[cfg(target_arch = "wasm32")]
+use web_sys::{Response, window};
 
 /// Entry point for the egui-based session viewer.
 #[cfg(not(target_arch = "wasm32"))]
@@ -66,43 +71,44 @@ pub async fn start(canvas_id: &str) -> Result<(), JsValue> {
         .map_err(|err| JsValue::from_str(&format!("{err:?}")))
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone, Parser)]
+#[command(
+    name = "viewer",
+    about = "Launch the egui session viewer",
+    author,
+    version
+)]
 struct ViewerArgs {
+    /// Session log or JSON file to load
+    #[arg(value_name = "SESSION", default_value = "session.log")]
     session_path: PathBuf,
+
+    /// Directory containing session log files
+    #[arg(long, default_value = "logs")]
     log_dir: PathBuf,
+
+    #[cfg(not(target_arch = "wasm32"))]
+    /// Host name or IP address for the ZMQ server
+    #[arg(long = "host", visible_alias = "zmq-host", default_value = "127.0.0.1")]
+    zmq_host: String,
+
+    #[cfg(not(target_arch = "wasm32"))]
+    /// TCP port for the ZMQ server
+    #[arg(long = "port", visible_alias = "zmq-port", default_value_t = 5555)]
+    zmq_port: u16,
+
+    #[cfg(not(target_arch = "wasm32"))]
+    /// ZMQ send and receive timeout in milliseconds
+    #[arg(long, default_value_t = 250)]
+    zmq_timeout_ms: i32,
+
+    #[cfg(not(target_arch = "wasm32"))]
+    /// Client snapshot refresh interval in milliseconds
+    #[arg(long, default_value_t = 2_000)]
+    clients_refresh_ms: u64,
 }
 
 impl ViewerArgs {
-    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
-    fn parse() -> Self {
-        let mut session_path = PathBuf::from("session.log");
-        let mut log_dir = PathBuf::from("logs");
-        let mut args = std::env::args().skip(1);
-        while let Some(arg) = args.next() {
-            match arg.as_str() {
-                "--log-dir" => {
-                    if let Some(value) = args.next() {
-                        log_dir = PathBuf::from(value);
-                    }
-                }
-                "--session" => {
-                    if let Some(value) = args.next() {
-                        session_path = PathBuf::from(value);
-                    }
-                }
-                _ => {
-                    if !arg.starts_with("--") {
-                        session_path = PathBuf::from(arg);
-                    }
-                }
-            }
-        }
-        Self {
-            session_path,
-            log_dir,
-        }
-    }
-
     #[cfg(target_arch = "wasm32")]
     fn web_default() -> Self {
         Self {
@@ -114,6 +120,7 @@ impl ViewerArgs {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Tab {
+    Clients,
     Summary,
     Candidates,
     BitSimilarity,
@@ -166,6 +173,13 @@ struct PendingUpdates {
     status: Option<String>,
 }
 
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Debug)]
+struct SessionLoadResult {
+    path: String,
+    result: Result<(Session, bool), String>,
+}
+
 #[derive(Debug)]
 struct ViewerApp {
     session: Session,
@@ -176,6 +190,22 @@ struct ViewerApp {
     log_entries: Vec<LogEntry>,
     selected_log: Option<String>,
     status: String,
+    #[cfg(not(target_arch = "wasm32"))]
+    zmq_endpoint: String,
+    #[cfg(not(target_arch = "wasm32"))]
+    zmq_timeout_ms: i32,
+    #[cfg(not(target_arch = "wasm32"))]
+    clients_refresh_interval: Duration,
+    #[cfg(not(target_arch = "wasm32"))]
+    last_clients_refresh: Instant,
+    #[cfg(not(target_arch = "wasm32"))]
+    clients_status: String,
+    #[cfg(not(target_arch = "wasm32"))]
+    client_snapshots: Vec<QueryResponsePayload>,
+    #[cfg(not(target_arch = "wasm32"))]
+    session_load_rx: Option<Receiver<SessionLoadResult>>,
+    #[cfg(not(target_arch = "wasm32"))]
+    session_load_in_flight: bool,
     #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
     last_poll: Instant,
     #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
@@ -216,6 +246,24 @@ impl ViewerApp {
             log_entries: Vec::new(),
             selected_log: None,
             status: String::new(),
+            #[cfg(not(target_arch = "wasm32"))]
+            zmq_endpoint: format!("tcp://{}:{}", args.zmq_host, args.zmq_port),
+            #[cfg(not(target_arch = "wasm32"))]
+            zmq_timeout_ms: args.zmq_timeout_ms,
+            #[cfg(not(target_arch = "wasm32"))]
+            clients_refresh_interval: Duration::from_millis(args.clients_refresh_ms),
+            #[cfg(not(target_arch = "wasm32"))]
+            last_clients_refresh: Instant::now()
+                .checked_sub(Duration::from_millis(args.clients_refresh_ms))
+                .unwrap_or_else(Instant::now),
+            #[cfg(not(target_arch = "wasm32"))]
+            clients_status: "Waiting for client snapshots.".to_string(),
+            #[cfg(not(target_arch = "wasm32"))]
+            client_snapshots: Vec::new(),
+            #[cfg(not(target_arch = "wasm32"))]
+            session_load_rx: None,
+            #[cfg(not(target_arch = "wasm32"))]
+            session_load_in_flight: false,
             last_poll: Instant::now(),
             last_scan: Instant::now(),
             last_log_fetch: Instant::now(),
@@ -223,7 +271,7 @@ impl ViewerApp {
             ndjson_mode: false,
             offset: 0,
             buffer: String::new(),
-            tab: Tab::Summary,
+            tab: Tab::Clients,
             bit_true_bit_idx: 0,
             bitflow_selected: None,
             bit_similarity_sort: BitSimilaritySort::Original,
@@ -236,6 +284,8 @@ impl ViewerApp {
             session_request_in_flight,
         };
         app.refresh_logs(true);
+        #[cfg(not(target_arch = "wasm32"))]
+        app.refresh_clients();
         app
     }
 
@@ -263,28 +313,55 @@ impl ViewerApp {
     }
 
     fn load_session(&mut self, path: &str) -> Result<(), String> {
+        self.prepare_for_session_load(path);
         #[cfg(target_arch = "wasm32")]
         {
-            self.selected_log = Some(path.to_string());
             self.request_session(path);
             return Ok(());
         }
         #[cfg(not(target_arch = "wasm32"))]
         {
-            let path_obj = Path::new(path);
-            let (session, ndjson) = load_session_from_path(path_obj)?;
-            self.session = session;
-            self.ndjson_mode = ndjson;
-            self.offset = file_size(path_obj).unwrap_or(0);
-            self.buffer.clear();
-            self.selected_log = Some(path.to_string());
-            self.status = format!("Loaded {}", path_obj.display());
+            let path_string = path.to_string();
+            self.session_load_in_flight = true;
+            let (sender, receiver) = mpsc::channel();
+            self.session_load_rx = Some(receiver);
+            std::thread::spawn(move || {
+                let result = load_session_from_path(Path::new(&path_string));
+                let _ = sender.send(SessionLoadResult {
+                    path: path_string,
+                    result,
+                });
+            });
             Ok(())
         }
     }
 
+    /// Prepares viewer state for loading a different session log.
+    ///
+    /// # Parameters
+    /// - `path`: Path of the session log being loaded.
+    ///
+    /// # Returns
+    /// - `()`: This function returns nothing.
+    ///
+    /// # Expected Output
+    /// - Clears the currently displayed session data and updates loading state; no stdout/stderr output.
+    fn prepare_for_session_load(&mut self, path: &str) {
+        self.selected_log = Some(path.to_string());
+        self.session = Session::default();
+        self.ndjson_mode = false;
+        self.offset = 0;
+        self.buffer.clear();
+        self.bit_similarity_start = 0;
+        self.bit_similarity_rows = 0;
+        self.bitflow_selected = None;
+        self.status = format!("Loading {}", Path::new(path).display());
+    }
+
     fn poll_updates(&mut self) {
         self.apply_pending();
+        #[cfg(not(target_arch = "wasm32"))]
+        self.apply_session_load_result();
         let now = Instant::now();
         #[cfg(target_arch = "wasm32")]
         {
@@ -302,24 +379,80 @@ impl ViewerApp {
         }
         #[cfg(not(target_arch = "wasm32"))]
         {
-        if now.duration_since(self.last_scan) > Duration::from_secs(2) {
-            self.refresh_logs(false);
-            self.last_scan = now;
+            if now.duration_since(self.last_scan) > Duration::from_secs(2) {
+                self.refresh_logs(false);
+                self.last_scan = now;
+            }
+            if now.duration_since(self.last_clients_refresh) >= self.clients_refresh_interval {
+                self.refresh_clients();
+            }
+            if now.duration_since(self.last_poll) < Duration::from_millis(400) {
+                return;
+            }
+            self.last_poll = now;
+            if self.session_load_in_flight {
+                return;
+            }
+            if !self.ndjson_mode {
+                return;
+            }
+            let Some(path) = self.selected_log.clone() else {
+                return;
+            };
+            let updated = self.ingest_tail(&path);
+            if updated {
+                self.status = format!("Updated {}", path);
+            }
         }
-        if now.duration_since(self.last_poll) < Duration::from_millis(400) {
-            return;
-        }
-        self.last_poll = now;
-        if !self.ndjson_mode {
-            return;
-        }
-        let Some(path) = self.selected_log.clone() else {
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn apply_session_load_result(&mut self) {
+        let Some(receiver) = self.session_load_rx.take() else {
             return;
         };
-        let updated = self.ingest_tail(&path);
-        if updated {
-            self.status = format!("Updated {}", path);
+        match receiver.try_recv() {
+            Ok(message) => {
+                self.session_load_in_flight = false;
+                match message.result {
+                    Ok((session, ndjson)) => {
+                        let path_obj = Path::new(&message.path);
+                        self.session = session;
+                        self.ndjson_mode = ndjson;
+                        self.offset = file_size(path_obj).unwrap_or(0);
+                        self.buffer.clear();
+                        self.status = format!("Loaded {}", path_obj.display());
+                    }
+                    Err(err) => {
+                        self.status = format!("Failed to load session: {err}");
+                    }
+                }
+            }
+            Err(TryRecvError::Empty) => {
+                self.session_load_rx = Some(receiver);
+            }
+            Err(TryRecvError::Disconnected) => {
+                self.session_load_in_flight = false;
+                self.status = "Failed to load session: background loader disconnected".to_string();
+            }
         }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn refresh_clients(&mut self) {
+        self.last_clients_refresh = Instant::now();
+        match query_router_clients_with_timeout(&self.zmq_endpoint, self.zmq_timeout_ms) {
+            Ok(snapshots) => {
+                self.clients_status = if snapshots.is_empty() {
+                    "Connected to ZMQ server. No client snapshots available yet.".to_string()
+                } else {
+                    format!("Loaded {} client snapshot(s).", snapshots.len())
+                };
+                self.client_snapshots = snapshots;
+            }
+            Err(err) => {
+                self.clients_status = format!("Failed to refresh clients: {err}");
+            }
         }
     }
 
@@ -444,8 +577,7 @@ impl ViewerApp {
                         });
                         pending.log_entries = Some(entries.clone());
                         if select_default && current.is_none() {
-                            pending.select_log =
-                                entries.first().map(|entry| entry.name.clone());
+                            pending.select_log = entries.first().map(|entry| entry.name.clone());
                         } else if let Some(current) = current {
                             if !entries.iter().any(|entry| entry.name == current) {
                                 pending.select_log =
@@ -509,7 +641,10 @@ impl ViewerApp {
                 }
                 rows.push(("Bits", self.session.cli.bits.to_string()));
                 rows.push(("Config", self.session.cli.config_path.clone()));
-                rows.push(("Seed", opt_to_string(self.session.cli.seed.map(|v| v as u128))));
+                rows.push((
+                    "Seed",
+                    opt_to_string(self.session.cli.seed.map(|v| v as u128)),
+                ));
                 rows.push(("Crypto RNG", self.session.cli.crypto_rng.to_string()));
                 rows.push(("Tests", self.session.cli.tests.to_string()));
                 rows.push(("Export", self.session.cli.export.to_string()));
@@ -576,7 +711,9 @@ impl ViewerApp {
                                         ui.label(feature.enabled.to_string());
                                     });
                                     row.col(|ui| {
-                                        ui.label(opt_to_string(feature.duration_ms.map(|v| v as u128)));
+                                        ui.label(opt_to_string(
+                                            feature.duration_ms.map(|v| v as u128),
+                                        ));
                                     });
                                     row.col(|ui| {
                                         ui.label(feature.notes.join("; "));
@@ -586,6 +723,87 @@ impl ViewerApp {
                         });
                 });
             });
+    }
+
+    fn draw_clients(&mut self, ui: &mut egui::Ui) {
+        ui.heading("Clients");
+        #[cfg(target_arch = "wasm32")]
+        {
+            ui.label("Client snapshots are only available in the native viewer.");
+            return;
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            ui.horizontal(|ui| {
+                if ui.button("Refresh").clicked() {
+                    self.refresh_clients();
+                }
+                ui.monospace(&self.zmq_endpoint);
+            });
+            ui.label(&self.clients_status);
+            if self.client_snapshots.is_empty() {
+                ui.label("No client snapshots available yet. Start one or more pollers and wait for the server query interval.");
+                return;
+            }
+
+            let total_cpu_cores = self
+                .client_snapshots
+                .iter()
+                .map(|snapshot| snapshot.cpu_cores)
+                .sum::<usize>();
+            let total_available_memory_bytes = self
+                .client_snapshots
+                .iter()
+                .map(|snapshot| snapshot.available_memory_bytes)
+                .sum::<u64>();
+
+            ui.label(format!(
+                "Clients: {} | Total CPU cores: {} | Total available memory: {}",
+                self.client_snapshots.len(),
+                total_cpu_cores,
+                format_bytes(total_available_memory_bytes)
+            ));
+            ui.add_space(8.0);
+
+            TableBuilder::new(ui)
+                .striped(true)
+                .column(Column::initial(220.0).resizable(true))
+                .column(Column::initial(90.0).resizable(true))
+                .column(Column::initial(140.0).resizable(true))
+                .column(Column::remainder())
+                .header(22.0, |mut header| {
+                    header.col(|ui| {
+                        ui.label("Client ID");
+                    });
+                    header.col(|ui| {
+                        ui.label("CPU Cores");
+                    });
+                    header.col(|ui| {
+                        ui.label("Available Memory");
+                    });
+                    header.col(|ui| {
+                        ui.label("Bytes");
+                    });
+                })
+                .body(|mut body| {
+                    for snapshot in &self.client_snapshots {
+                        body.row(22.0, |mut row| {
+                            row.col(|ui| {
+                                ui.monospace(&snapshot.client_id);
+                            });
+                            row.col(|ui| {
+                                ui.label(snapshot.cpu_cores.to_string());
+                            });
+                            row.col(|ui| {
+                                ui.label(format_bytes(snapshot.available_memory_bytes));
+                            });
+                            row.col(|ui| {
+                                ui.label(snapshot.available_memory_bytes.to_string());
+                            });
+                        });
+                    }
+                });
+        }
     }
 
     fn draw_candidates(&self, ui: &mut egui::Ui) {
@@ -605,7 +823,7 @@ impl ViewerApp {
             }
             ui.set_style(style);
             ui.push_id("candidates_table", |ui| {
-            TableBuilder::new(ui)
+                TableBuilder::new(ui)
                     .striped(true)
                     .column(Column::initial(200.0).resizable(true))
                     .column(Column::initial(110.0).resizable(true))
@@ -691,7 +909,10 @@ impl ViewerApp {
                 }
             }
             rows.push(BeamRow {
-                batch: batch.context.clone().unwrap_or_else(|| format!("batch_{}", idx + 1)),
+                batch: batch
+                    .context
+                    .clone()
+                    .unwrap_or_else(|| format!("batch_{}", idx + 1)),
                 beam_match: batch.beam_match_pct,
                 beam_ones: batch.beam_ones_match_pct,
                 beam_score: batch.beam_score,
@@ -744,30 +965,70 @@ impl ViewerApp {
                 .columns(Column::auto(), 10)
                 .striped(true)
                 .header(20.0, |mut header| {
-                    header.col(|ui| { ui.label("Batch"); });
-                    header.col(|ui| { ui.label("Beam Match %"); });
-                    header.col(|ui| { ui.label("Beam Ones %"); });
-                    header.col(|ui| { ui.label("Beam Score"); });
-                    header.col(|ui| { ui.label("Beam Bits"); });
-                    header.col(|ui| { ui.label("R Mean %"); });
-                    header.col(|ui| { ui.label("R Max %"); });
-                    header.col(|ui| { ui.label("R Min %"); });
-                    header.col(|ui| { ui.label("R Stddev"); });
-                    header.col(|ui| { ui.label("Candidates"); });
+                    header.col(|ui| {
+                        ui.label("Batch");
+                    });
+                    header.col(|ui| {
+                        ui.label("Beam Match %");
+                    });
+                    header.col(|ui| {
+                        ui.label("Beam Ones %");
+                    });
+                    header.col(|ui| {
+                        ui.label("Beam Score");
+                    });
+                    header.col(|ui| {
+                        ui.label("Beam Bits");
+                    });
+                    header.col(|ui| {
+                        ui.label("R Mean %");
+                    });
+                    header.col(|ui| {
+                        ui.label("R Max %");
+                    });
+                    header.col(|ui| {
+                        ui.label("R Min %");
+                    });
+                    header.col(|ui| {
+                        ui.label("R Stddev");
+                    });
+                    header.col(|ui| {
+                        ui.label("Candidates");
+                    });
                 })
                 .body(|mut body| {
                     for row in rows {
                         body.row(20.0, |mut row_ui| {
-                            row_ui.col(|ui| { ui.label(row.batch); });
-                            row_ui.col(|ui| { ui.label(format_opt_f64(row.beam_match)); });
-                            row_ui.col(|ui| { ui.label(format_opt_f64(row.beam_ones)); });
-                            row_ui.col(|ui| { ui.label(format_opt_f64(row.beam_score)); });
-                            row_ui.col(|ui| { ui.label(opt_to_string(row.beam_bits.map(|v| v as u128))); });
-                            row_ui.col(|ui| { ui.label(format_opt_f64(row.r_mean)); });
-                            row_ui.col(|ui| { ui.label(format_opt_f64(row.r_max)); });
-                            row_ui.col(|ui| { ui.label(format_opt_f64(row.r_min)); });
-                            row_ui.col(|ui| { ui.label(format_opt_f64(row.r_stddev)); });
-                            row_ui.col(|ui| { ui.label(row.candidate_count.to_string()); });
+                            row_ui.col(|ui| {
+                                ui.label(row.batch);
+                            });
+                            row_ui.col(|ui| {
+                                ui.label(format_opt_f64(row.beam_match));
+                            });
+                            row_ui.col(|ui| {
+                                ui.label(format_opt_f64(row.beam_ones));
+                            });
+                            row_ui.col(|ui| {
+                                ui.label(format_opt_f64(row.beam_score));
+                            });
+                            row_ui.col(|ui| {
+                                ui.label(opt_to_string(row.beam_bits.map(|v| v as u128)));
+                            });
+                            row_ui.col(|ui| {
+                                ui.label(format_opt_f64(row.r_mean));
+                            });
+                            row_ui.col(|ui| {
+                                ui.label(format_opt_f64(row.r_max));
+                            });
+                            row_ui.col(|ui| {
+                                ui.label(format_opt_f64(row.r_min));
+                            });
+                            row_ui.col(|ui| {
+                                ui.label(format_opt_f64(row.r_stddev));
+                            });
+                            row_ui.col(|ui| {
+                                ui.label(row.candidate_count.to_string());
+                            });
                         });
                     }
                 });
@@ -776,6 +1037,11 @@ impl ViewerApp {
 
     fn draw_bit_similarity(&mut self, ui: &mut egui::Ui) {
         ui.heading("Bit Similarity");
+        #[cfg(not(target_arch = "wasm32"))]
+        if self.session_load_in_flight {
+            ui.label(&self.status);
+            return;
+        }
         let Some(feature) = self.session.feature("information_sufficiency") else {
             ui.label("Bit similarity data not found.");
             return;
@@ -800,11 +1066,7 @@ impl ViewerApp {
                 .selected_text(self.bit_similarity_sort.label())
                 .show_ui(ui, |ui| {
                     for option in BitSimilaritySort::all() {
-                        ui.selectable_value(
-                            &mut self.bit_similarity_sort,
-                            option,
-                            option.label(),
-                        );
+                        ui.selectable_value(&mut self.bit_similarity_sort, option, option.label());
                     }
                 });
             ui.checkbox(&mut self.bit_similarity_show_all, "Show all rows");
@@ -842,8 +1104,7 @@ impl ViewerApp {
             ui.label("Rows:");
             ui.add_enabled(
                 !self.bit_similarity_show_all,
-                egui::DragValue::new(&mut self.bit_similarity_rows)
-                    .clamp_range(1..=total),
+                egui::DragValue::new(&mut self.bit_similarity_rows).clamp_range(1..=total),
             );
             ui.add_space(12.0);
             ui.label(format!(
@@ -875,13 +1136,12 @@ impl ViewerApp {
             .max()
             .unwrap_or(0);
         let original_bits = hex_to_bits_le(&data.original_hex, data.bit_width);
-        let match_counts = if data.match_counts.len() == data.bit_width
-            && !self.bit_similarity_hide_shifted
-        {
-            data.match_counts.clone()
-        } else {
-            build_match_counts(&data.entries, &original_bits, data.bit_width)
-        };
+        let match_counts =
+            if data.match_counts.len() == data.bit_width && !self.bit_similarity_hide_shifted {
+                data.match_counts.clone()
+            } else {
+                build_match_counts(&data.entries, &original_bits, data.bit_width)
+            };
 
         ui.add_space(8.0);
         let palette = bit_similarity_palette(ui);
@@ -935,7 +1195,10 @@ impl ViewerApp {
         ui.add_space(8.0);
         ui.horizontal(|ui| {
             ui.label("Selected bit:");
-            ui.add(egui::Slider::new(&mut self.bit_true_bit_idx, 0..=bit_width - 1));
+            ui.add(egui::Slider::new(
+                &mut self.bit_true_bit_idx,
+                0..=bit_width - 1,
+            ));
         });
         let mut points = Vec::new();
         for (idx, frame) in frames.iter().enumerate() {
@@ -972,12 +1235,20 @@ impl ViewerApp {
         let biases = map
             .get("biases")
             .and_then(|v| v.as_array())
-            .map(|list| list.iter().map(|v| value_as_f64(Some(v))).collect::<Vec<_>>())
+            .map(|list| {
+                list.iter()
+                    .map(|v| value_as_f64(Some(v)))
+                    .collect::<Vec<_>>()
+            })
             .unwrap_or_default();
         let message_bits = map
             .get("message_bits")
             .and_then(|v| v.as_array())
-            .map(|list| list.iter().map(|v| value_as_u64(Some(v)) as u8).collect::<Vec<_>>())
+            .map(|list| {
+                list.iter()
+                    .map(|v| value_as_u64(Some(v)) as u8)
+                    .collect::<Vec<_>>()
+            })
             .unwrap_or_default();
         ui.label(format!("Bit width: {}", bit_width));
         ui.label(format!("Unique messages: {}", unique_messages));
@@ -1044,22 +1315,44 @@ impl ViewerApp {
                 .columns(Column::auto(), 7)
                 .striped(true)
                 .header(20.0, |mut header| {
-                    header.col(|ui| { ui.label("Run"); });
-                    header.col(|ui| { ui.label("Iter"); });
-                    header.col(|ui| { ui.label("Trial"); });
-                    header.col(|ui| { ui.label("Partition"); });
-                    header.col(|ui| { ui.label("Inverted"); });
-                    header.col(|ui| { ui.label("Ones %"); });
-                    header.col(|ui| { ui.label("Bits"); });
+                    header.col(|ui| {
+                        ui.label("Run");
+                    });
+                    header.col(|ui| {
+                        ui.label("Iter");
+                    });
+                    header.col(|ui| {
+                        ui.label("Trial");
+                    });
+                    header.col(|ui| {
+                        ui.label("Partition");
+                    });
+                    header.col(|ui| {
+                        ui.label("Inverted");
+                    });
+                    header.col(|ui| {
+                        ui.label("Ones %");
+                    });
+                    header.col(|ui| {
+                        ui.label("Bits");
+                    });
                 })
                 .body(|mut body| {
                     for candidate in filtered_candidates {
                         let ones_pct = bits_ones_pct(&candidate.bits);
                         body.row(20.0, |mut row| {
-                            row.col(|ui| { ui.label(candidate.run_id); });
-                            row.col(|ui| { ui.label(candidate.iteration.to_string()); });
-                            row.col(|ui| { ui.label(candidate.trial.to_string()); });
-                            row.col(|ui| { ui.label(candidate.partition_size.to_string()); });
+                            row.col(|ui| {
+                                ui.label(candidate.run_id);
+                            });
+                            row.col(|ui| {
+                                ui.label(candidate.iteration.to_string());
+                            });
+                            row.col(|ui| {
+                                ui.label(candidate.trial.to_string());
+                            });
+                            row.col(|ui| {
+                                ui.label(candidate.partition_size.to_string());
+                            });
                             row.col(|ui| {
                                 ui.label(
                                     candidate
@@ -1073,7 +1366,9 @@ impl ViewerApp {
                             row.col(|ui| {
                                 ui.label(format!("{ones_pct:.1}"));
                             });
-                            row.col(|ui| { ui.label(bits_preview(&candidate.bits, 96)); });
+                            row.col(|ui| {
+                                ui.label(bits_preview(&candidate.bits, 96));
+                            });
                         });
                     }
                 });
@@ -1103,6 +1398,7 @@ impl eframe::App for ViewerApp {
             });
             ui.separator();
             ui.horizontal(|ui| {
+                tab_button(ui, "Clients", Tab::Clients, &mut self.tab);
                 tab_button(ui, "Summary", Tab::Summary, &mut self.tab);
                 tab_button(ui, "Candidates", Tab::Candidates, &mut self.tab);
                 tab_button(ui, "Bit Similarity", Tab::BitSimilarity, &mut self.tab);
@@ -1121,27 +1417,28 @@ impl eframe::App for ViewerApp {
                 egui::ScrollArea::vertical()
                     .id_source("log_list_scroll")
                     .show(ui, |ui| {
-                    for entry in &self.log_entries {
-                        let label = log_label(entry);
-                        let selected = self
-                            .selected_log
-                            .as_ref()
-                            .map(|name| name == &entry.name)
-                            .unwrap_or(false);
-                        let response = ui.selectable_label(selected, label);
-                        let clicked = response.clicked();
-                        let _response = response.on_hover_text(format!("{} bytes", entry.size));
-                        if clicked {
-                            selected_log = Some(entry.name.clone());
+                        for entry in &self.log_entries {
+                            let label = log_label(entry);
+                            let selected = self
+                                .selected_log
+                                .as_ref()
+                                .map(|name| name == &entry.name)
+                                .unwrap_or(false);
+                            let response = ui.selectable_label(selected, label);
+                            let clicked = response.clicked();
+                            let _response = response.on_hover_text(format!("{} bytes", entry.size));
+                            if clicked {
+                                selected_log = Some(entry.name.clone());
+                            }
                         }
-                    }
-                });
+                    });
             });
         if let Some(name) = selected_log {
             let _ = self.load_session(&name);
         }
 
         egui::CentralPanel::default().show(ctx, |ui| match self.tab {
+            Tab::Clients => self.draw_clients(ui),
             Tab::Summary => self.draw_summary(ui),
             Tab::Candidates => self.draw_candidates(ui),
             Tab::BitSimilarity => self.draw_bit_similarity(ui),
@@ -1150,6 +1447,32 @@ impl eframe::App for ViewerApp {
             Tab::BeamVsR => self.draw_beam_vs_r(ui),
             Tab::Bitflow => self.draw_bitflow(ui),
         });
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn query_router_clients_with_timeout(
+    endpoint: &str,
+    timeout_ms: i32,
+) -> Result<Vec<QueryResponsePayload>, String> {
+    let client =
+        build_client_from_endpoint_with_timeouts(endpoint, Some(timeout_ms), Some(timeout_ms))?;
+    client.query_clients()
+}
+
+fn format_bytes(bytes: u64) -> String {
+    const KIB: f64 = 1024.0;
+    const MIB: f64 = KIB * 1024.0;
+    const GIB: f64 = MIB * 1024.0;
+    let bytes_f64 = bytes as f64;
+    if bytes_f64 >= GIB {
+        format!("{:.2} GiB", bytes_f64 / GIB)
+    } else if bytes_f64 >= MIB {
+        format!("{:.2} MiB", bytes_f64 / MIB)
+    } else if bytes_f64 >= KIB {
+        format!("{:.2} KiB", bytes_f64 / KIB)
+    } else {
+        format!("{bytes} B")
     }
 }
 
@@ -1198,6 +1521,8 @@ struct CliInfo {
     ciphertext_modify: bool,
     use_hamming_distance: bool,
     mirror_invert_candidates: bool,
+    beam_bit_one_threshold: f64,
+    avalanche_probability_spread_exponent: f64,
     bits_decrypt: Option<u64>,
 }
 
@@ -1520,9 +1845,20 @@ async fn fetch_text(url: &str) -> Result<String, JsValue> {
 
 #[cfg(not(target_arch = "wasm32"))]
 fn load_session_from_path(path: &Path) -> Result<(Session, bool), String> {
-    let mut file = File::open(path).map_err(|err| err.to_string())?;
+    let file = File::open(path).map_err(|err| err.to_string())?;
+    let mut reader = BufReader::new(file);
+    if reader_looks_like_event_stream(&mut reader).map_err(|err| err.to_string())? {
+        reader
+            .seek(SeekFrom::Start(0))
+            .map_err(|err| err.to_string())?;
+        return load_ndjson_session_from_reader(&mut reader);
+    }
+    reader
+        .seek(SeekFrom::Start(0))
+        .map_err(|err| err.to_string())?;
     let mut raw = String::new();
-    file.read_to_string(&mut raw)
+    reader
+        .read_to_string(&mut raw)
         .map_err(|err| err.to_string())?;
     parse_session_from_str(&raw)
 }
@@ -1530,6 +1866,9 @@ fn load_session_from_path(path: &Path) -> Result<(Session, bool), String> {
 fn parse_session_from_str(raw: &str) -> Result<(Session, bool), String> {
     if raw.trim().is_empty() {
         return Ok((Session::default(), false));
+    }
+    if string_looks_like_event_stream(raw) {
+        return Ok((build_session_from_event_lines(raw.lines()), true));
     }
     if let Ok(value) = serde_json::from_str::<Value>(raw) {
         if let Some(obj) = value.as_object() {
@@ -1552,21 +1891,7 @@ fn parse_session_from_str(raw: &str) -> Result<(Session, bool), String> {
             return Ok((normalize_session(&Map::new()), false));
         }
     }
-    let mut events = Vec::new();
-    for line in raw.lines() {
-        let trimmed = line.trim();
-        if trimmed.is_empty() {
-            continue;
-        }
-        if let Ok(value) = serde_json::from_str::<Value>(trimmed) {
-            if let Some(obj) = value.as_object() {
-                if obj.contains_key("event") {
-                    events.push(obj.clone());
-                }
-            }
-        }
-    }
-    Ok((build_session_from_events(&events), true))
+    Ok((build_session_from_event_lines(raw.lines()), true))
 }
 
 fn build_session_from_events(events: &[Map<String, Value>]) -> Session {
@@ -1576,6 +1901,128 @@ fn build_session_from_events(events: &[Map<String, Value>]) -> Session {
     }
     normalize_session_values(&mut session);
     session
+}
+
+/// Builds a session from an iterator of NDJSON event lines.
+///
+/// # Parameters
+/// - `lines`: Iterator of raw text lines that may contain serialized event envelopes.
+///
+/// # Returns
+/// - `Session`: Session reconstructed from every complete event line.
+///
+/// # Expected Output
+/// - Consumes the provided lines and returns normalized session data; no side effects.
+fn build_session_from_event_lines<'a, I>(lines: I) -> Session
+where
+    I: IntoIterator<Item = &'a str>,
+{
+    let mut session = Session::default();
+    for line in lines {
+        if let Some(event) = parse_event_line(line) {
+            apply_event_to_session(&mut session, &event);
+        }
+    }
+    normalize_session_values(&mut session);
+    session
+}
+
+/// Parses a single NDJSON event line.
+///
+/// # Parameters
+/// - `line`: Raw line that may contain a serialized event envelope.
+///
+/// # Returns
+/// - `Option<Map<String, Value>>`: Parsed event object when the line is a complete event envelope.
+///
+/// # Expected Output
+/// - Returns parsed JSON data for complete event lines; no side effects.
+fn parse_event_line(line: &str) -> Option<Map<String, Value>> {
+    let trimmed = line.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let value = serde_json::from_str::<Value>(trimmed).ok()?;
+    let obj = value.as_object()?;
+    if obj.contains_key("event") && obj.contains_key("payload") {
+        Some(obj.clone())
+    } else {
+        None
+    }
+}
+
+/// Detects whether the first complete non-empty line in a buffer is an NDJSON event.
+///
+/// # Parameters
+/// - `raw`: Buffer that may contain a session JSON document or NDJSON event stream.
+///
+/// # Returns
+/// - `bool`: `true` when the first complete non-empty line is an event envelope.
+///
+/// # Expected Output
+/// - Inspects the provided string and returns a format hint; no side effects.
+fn string_looks_like_event_stream(raw: &str) -> bool {
+    for line in raw.lines() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        return parse_event_line(line).is_some();
+    }
+    false
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+/// Detects whether a file reader begins with an NDJSON event stream.
+///
+/// # Parameters
+/// - `reader`: Seekable buffered reader positioned anywhere within the file.
+///
+/// # Returns
+/// - `Result<bool, std::io::Error>`: `true` when the first non-empty line is an event envelope.
+///
+/// # Expected Output
+/// - Reads ahead from `reader` and leaves repositioning to the caller; no stdout/stderr output.
+fn reader_looks_like_event_stream<R: BufRead>(reader: &mut R) -> Result<bool, std::io::Error> {
+    let mut line = String::new();
+    loop {
+        line.clear();
+        let read = reader.read_line(&mut line)?;
+        if read == 0 {
+            return Ok(false);
+        }
+        if line.trim().is_empty() {
+            continue;
+        }
+        return Ok(parse_event_line(&line).is_some());
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+/// Loads an NDJSON session from a buffered reader without reading the entire file into one string.
+///
+/// # Parameters
+/// - `reader`: Buffered reader positioned at the start of an NDJSON session log.
+///
+/// # Returns
+/// - `Result<(Session, bool), String>`: Parsed session and `true` for NDJSON mode.
+///
+/// # Expected Output
+/// - Reads the stream line by line and reconstructs session state; no stdout/stderr output.
+fn load_ndjson_session_from_reader<R: BufRead>(reader: &mut R) -> Result<(Session, bool), String> {
+    let mut session = Session::default();
+    let mut line = String::new();
+    loop {
+        line.clear();
+        let read = reader.read_line(&mut line).map_err(|err| err.to_string())?;
+        if read == 0 {
+            break;
+        }
+        if let Some(event) = parse_event_line(&line) {
+            apply_event_to_session(&mut session, &event);
+        }
+    }
+    normalize_session_values(&mut session);
+    Ok((session, true))
 }
 
 fn apply_event_to_session(session: &mut Session, event: &Map<String, Value>) {
@@ -1694,7 +2141,9 @@ fn normalize_session(map: &Map<String, Value>) -> Session {
     if let Some(batches) = map.get("r_candidate_batches").and_then(|v| v.as_array()) {
         for batch in batches {
             if let Some(batch) = batch.as_object() {
-                session.r_candidate_batches.push(parse_r_candidate_batch(batch));
+                session
+                    .r_candidate_batches
+                    .push(parse_r_candidate_batch(batch));
             }
         }
     }
@@ -1710,10 +2159,7 @@ fn normalize_session(map: &Map<String, Value>) -> Session {
             }
         }
     }
-    if let Some(batches) = map
-        .get("r_candidate_traces")
-        .and_then(|v| v.as_array())
-    {
+    if let Some(batches) = map.get("r_candidate_traces").and_then(|v| v.as_array()) {
         for batch in batches {
             if let Some(batch) = batch.as_object() {
                 session
@@ -1772,6 +2218,10 @@ fn parse_cli(map: Option<&Map<String, Value>>) -> CliInfo {
         ciphertext_modify: value_as_bool(map.get("ciphertext_modify")),
         use_hamming_distance: value_as_bool(map.get("use_hamming_distance")),
         mirror_invert_candidates: value_as_bool(map.get("mirror_invert_candidates")),
+        beam_bit_one_threshold: value_as_f64(map.get("beam_bit_one_threshold")),
+        avalanche_probability_spread_exponent: value_as_f64(
+            map.get("avalanche_probability_spread_exponent"),
+        ),
         bits_decrypt: value_as_opt_u64(map.get("bits_decrypt")),
     }
 }
@@ -1979,7 +2429,13 @@ fn value_as_u64(value: Option<&Value>) -> u64 {
     match value {
         Some(Value::Number(num)) => num.as_u64().unwrap_or(0),
         Some(Value::String(val)) => val.parse::<u64>().unwrap_or(0),
-        Some(Value::Bool(val)) => if *val { 1 } else { 0 },
+        Some(Value::Bool(val)) => {
+            if *val {
+                1
+            } else {
+                0
+            }
+        }
         _ => 0,
     }
 }
@@ -1992,7 +2448,13 @@ fn value_as_u128(value: Option<&Value>) -> u128 {
     match value {
         Some(Value::Number(num)) => num.as_u64().unwrap_or(0) as u128,
         Some(Value::String(val)) => val.parse::<u128>().unwrap_or(0),
-        Some(Value::Bool(val)) => if *val { 1 } else { 0 },
+        Some(Value::Bool(val)) => {
+            if *val {
+                1
+            } else {
+                0
+            }
+        }
         _ => 0,
     }
 }
@@ -2017,7 +2479,13 @@ fn value_as_f64(value: Option<&Value>) -> f64 {
     match value {
         Some(Value::Number(num)) => num.as_f64().unwrap_or(0.0),
         Some(Value::String(val)) => val.parse::<f64>().unwrap_or(0.0),
-        Some(Value::Bool(val)) => if *val { 1.0 } else { 0.0 },
+        Some(Value::Bool(val)) => {
+            if *val {
+                1.0
+            } else {
+                0.0
+            }
+        }
         _ => 0.0,
     }
 }
@@ -2225,7 +2693,7 @@ fn build_bit_similarity_rows(
     hide_shifted: bool,
     sort_mode: BitSimilaritySort,
 ) -> Vec<BitSimilarityRow> {
-    let filtered = if hide_shifted {
+    let mut filtered = if hide_shifted {
         entries
             .iter()
             .cloned()
@@ -2234,26 +2702,23 @@ fn build_bit_similarity_rows(
     } else {
         entries.to_vec()
     };
-    let mut by_index: HashMap<usize, Vec<BitSimilarityEntry>> = HashMap::new();
-    for entry in filtered {
-        by_index.entry(entry.index).or_default().push(entry);
-    }
+    filtered.sort_by_key(|entry| entry.orig_index);
     let mut rows = Vec::new();
-    for (idx, mut entries) in by_index {
-        entries.sort_by_key(|entry| entry.shift);
-        let base_entry = entries
-            .iter()
-            .find(|entry| entry.shift == 0)
-            .unwrap_or_else(|| &entries[0]);
-        rows.push(BitSimilarityRow {
-            index: idx,
-            r: base_entry.r.clone(),
-            e: base_entry.e.clone(),
-            x: base_entry.x.clone(),
-            base_match_pct: base_entry.base_match_pct,
-            base_matching_bits: base_entry.base_matching_bits,
-            entries,
-        });
+    let mut current_entries = Vec::new();
+    for entry in filtered {
+        let starts_new_row = current_entries
+            .last()
+            .map(|prev| !can_group_bit_similarity_entries(prev, &entry))
+            .unwrap_or(false);
+        if starts_new_row {
+            rows.push(build_bit_similarity_row(std::mem::take(
+                &mut current_entries,
+            )));
+        }
+        current_entries.push(entry);
+    }
+    if !current_entries.is_empty() {
+        rows.push(build_bit_similarity_row(current_entries));
     }
 
     match sort_mode {
@@ -2278,6 +2743,54 @@ fn build_bit_similarity_rows(
     rows
 }
 
+/// Returns whether two bit-similarity entries belong to the same rendered row.
+///
+/// # Parameters
+/// - `prev`: Previous entry in original log order.
+/// - `next`: Candidate next entry in original log order.
+///
+/// # Returns
+/// - `bool`: `true` when `next` continues the same candidate's shift sequence.
+///
+/// # Expected Output
+/// - Compares entry metadata and returns a grouping decision; no side effects.
+fn can_group_bit_similarity_entries(prev: &BitSimilarityEntry, next: &BitSimilarityEntry) -> bool {
+    prev.index == next.index
+        && prev.r == next.r
+        && prev.e == next.e
+        && prev.x == next.x
+        && prev.base_matching_bits == next.base_matching_bits
+        && (prev.base_match_pct - next.base_match_pct).abs() < f64::EPSILON
+        && next.shift > prev.shift
+}
+
+/// Builds one rendered bit-similarity row from a grouped entry sequence.
+///
+/// # Parameters
+/// - `entries`: Shift-ordered entries for a single candidate.
+///
+/// # Returns
+/// - `BitSimilarityRow`: Row metadata plus the grouped entries.
+///
+/// # Expected Output
+/// - Returns one row value; no side effects.
+fn build_bit_similarity_row(mut entries: Vec<BitSimilarityEntry>) -> BitSimilarityRow {
+    entries.sort_by_key(|entry| entry.shift);
+    let base_entry = entries
+        .iter()
+        .find(|entry| entry.shift == 0)
+        .unwrap_or_else(|| &entries[0]);
+    BitSimilarityRow {
+        index: base_entry.index,
+        r: base_entry.r.clone(),
+        e: base_entry.e.clone(),
+        x: base_entry.x.clone(),
+        base_match_pct: base_entry.base_match_pct,
+        base_matching_bits: base_entry.base_matching_bits,
+        entries,
+    }
+}
+
 fn build_match_counts(
     entries: &[BitSimilarityEntry],
     original_bits: &[bool],
@@ -2294,10 +2807,7 @@ fn build_match_counts(
             if cand_idx >= bit_width {
                 continue;
             }
-            if candidate_bits
-                .get(cand_idx)
-                .copied()
-                .unwrap_or(false)
+            if candidate_bits.get(cand_idx).copied().unwrap_or(false)
                 == original_bits.get(bit_idx).copied().unwrap_or(false)
             {
                 counts[bit_idx] += 1;
@@ -2328,23 +2838,21 @@ fn draw_bit_similarity_canvas(
     let box_offset = 0.0;
     let label_width = 320.0;
 
-    let content_width =
-        margin * 2.0
-            + label_width
-            + (bit_width + max_shift) as f32 * (bit_size + bit_spacing)
-            + label_width;
+    let content_width = margin * 2.0
+        + label_width
+        + (bit_width + max_shift) as f32 * (bit_size + bit_spacing)
+        + label_width;
     let mut content_height = margin * 2.0;
     for row in rows {
-        content_height +=
-            row_height_for(
-                row,
-                bit_size,
-                row_gap,
-                header_height,
-                header_gap,
-                row_padding,
-                box_offset,
-            );
+        content_height += row_height_for(
+            row,
+            bit_size,
+            row_gap,
+            header_height,
+            header_gap,
+            row_padding,
+            box_offset,
+        );
         content_height += row_spacing;
     }
     if !rows.is_empty() {
@@ -2355,8 +2863,10 @@ fn draw_bit_similarity_canvas(
         .id_source("bit_similarity_canvas")
         .auto_shrink([false, false])
         .show(ui, |ui| {
-            let (rect, _) =
-                ui.allocate_exact_size(egui::vec2(content_width, content_height), egui::Sense::hover());
+            let (rect, _) = ui.allocate_exact_size(
+                egui::vec2(content_width, content_height),
+                egui::Sense::hover(),
+            );
             let painter = ui.painter_at(rect);
             let mut y = rect.min.y + margin;
             for row in rows {
@@ -2463,10 +2973,8 @@ fn draw_bit_similarity_row(
             lighten_color(base_color, 0.45)
         };
         let x = boxes_start + bit_idx as f32 * (bit_size + bit_spacing);
-        let rect = egui::Rect::from_min_size(
-            egui::pos2(x, boxes_top),
-            egui::vec2(bit_size, bit_size),
-        );
+        let rect =
+            egui::Rect::from_min_size(egui::pos2(x, boxes_top), egui::vec2(bit_size, bit_size));
         painter.rect_filled(rect, 0.0, color);
         painter.rect_stroke(rect, 0.0, palette.stroke);
         let text_color = text_color_for(color);
@@ -2482,7 +2990,11 @@ fn draw_bit_similarity_row(
     let mut prev_bits: Option<Vec<bool>> = None;
     for (entry_idx, entry) in row.entries.iter().enumerate() {
         let shift = entry.shift;
-        let masked_bits = if entry.masked_bits == 0 { shift } else { entry.masked_bits };
+        let masked_bits = if entry.masked_bits == 0 {
+            shift
+        } else {
+            entry.masked_bits
+        };
         let mut label = if shift == 0 {
             "Candidate".to_string()
         } else {
@@ -2517,14 +3029,10 @@ fn draw_bit_similarity_row(
             } else {
                 false
             };
-            let matches_original = !masked
-                && cand_bit == original_bits.get(bit_idx).copied().unwrap_or(false);
+            let matches_original =
+                !masked && cand_bit == original_bits.get(bit_idx).copied().unwrap_or(false);
             let matches_prev = if let (false, Some(prev_bits)) = (masked, &prev_bits) {
-                prev_bits
-                    .get(cand_idx)
-                    .copied()
-                    .unwrap_or(false)
-                    == cand_bit
+                prev_bits.get(cand_idx).copied().unwrap_or(false) == cand_bit
             } else {
                 false
             };
@@ -2543,23 +3051,15 @@ fn draw_bit_similarity_row(
                 base_candidate
             };
             let x = boxes_start + bit_idx as f32 * (bit_size + bit_spacing);
-            let rect = egui::Rect::from_min_size(
-                egui::pos2(x, y_boxes),
-                egui::vec2(bit_size, bit_size),
-            );
+            let rect =
+                egui::Rect::from_min_size(egui::pos2(x, y_boxes), egui::vec2(bit_size, bit_size));
             painter.rect_filled(rect, 0.0, color);
             painter.rect_stroke(rect, 0.0, palette.stroke);
             let (text, text_color) = if masked {
                 let masked_bit = candidate_bits.get(bit_idx).copied().unwrap_or(false);
-                (
-                    if masked_bit { "1" } else { "0" },
-                    palette.masked_text,
-                )
+                (if masked_bit { "1" } else { "0" }, palette.masked_text)
             } else {
-                (
-                    if cand_bit { "1" } else { "0" },
-                    text_color_for(color),
-                )
+                (if cand_bit { "1" } else { "0" }, text_color_for(color))
             };
             painter.text(
                 rect.center(),
@@ -2616,9 +3116,7 @@ fn draw_bit_similarity_row(
     painter.text(
         egui::pos2(label_x, majority_y),
         egui::Align2::LEFT_TOP,
-        format!(
-            "Majority vote | adj={majority_pct:.2}% ({majority_matches}/{majority_denom})"
-        ),
+        format!("Majority vote | adj={majority_pct:.2}% ({majority_matches}/{majority_denom})"),
         egui::FontId::proportional(11.0),
         palette.label_color,
     );
@@ -2626,8 +3124,8 @@ fn draw_bit_similarity_row(
         let votes = majority_votes[bit_idx];
         let masked = votes == 0;
         let majority_bit = majority_bits[bit_idx];
-        let matches_original = !masked
-            && majority_bit == original_bits.get(bit_idx).copied().unwrap_or(false);
+        let matches_original =
+            !masked && majority_bit == original_bits.get(bit_idx).copied().unwrap_or(false);
         let base_candidate = if matches_original && votes > 1 {
             palette.multi_match_color
         } else if matches_original {
@@ -2761,5 +3259,191 @@ fn text_color_for(color: egui::Color32) -> egui::Color32 {
         egui::Color32::BLACK
     } else {
         egui::Color32::WHITE
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[cfg(not(target_arch = "wasm32"))]
+    use std::fs;
+    #[cfg(not(target_arch = "wasm32"))]
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn bit_similarity_entry(
+        orig_index: usize,
+        index: usize,
+        shift: usize,
+        r: &str,
+    ) -> BitSimilarityEntry {
+        BitSimilarityEntry {
+            orig_index,
+            index,
+            shift,
+            r: r.to_string(),
+            e: Some("17".to_string()),
+            x: Some("3".to_string()),
+            candidate_hex: "01".to_string(),
+            match_pct: 75.0,
+            matching_bits: 12,
+            adjusted_match_pct: 75.0,
+            adjusted_matching_bits: 12,
+            masked_bits: shift,
+            base_match_pct: 75.0,
+            base_matching_bits: 12,
+        }
+    }
+
+    #[test]
+    fn viewer_cli_accepts_host_and_port_flags() {
+        let args = ViewerArgs::try_parse_from([
+            "viewer",
+            "--host",
+            "10.0.0.5",
+            "--port",
+            "6001",
+            "--zmq-timeout-ms",
+            "900",
+            "--clients-refresh-ms",
+            "3000",
+            "--log-dir",
+            "tmp/logs",
+            "custom-session.log",
+        ])
+        .expect("viewer args should parse");
+
+        assert_eq!(args.session_path, PathBuf::from("custom-session.log"));
+        assert_eq!(args.log_dir, PathBuf::from("tmp/logs"));
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            assert_eq!(args.zmq_host, "10.0.0.5");
+            assert_eq!(args.zmq_port, 6001);
+            assert_eq!(args.zmq_timeout_ms, 900);
+            assert_eq!(args.clients_refresh_ms, 3000);
+        }
+    }
+
+    #[test]
+    fn viewer_cli_reports_help_without_launching_ui() {
+        let err = ViewerArgs::try_parse_from(["viewer", "--help"]).expect_err("help should exit");
+        assert_eq!(err.kind(), clap::error::ErrorKind::DisplayHelp);
+    }
+
+    #[test]
+    fn parse_session_from_str_handles_streaming_ndjson_with_partial_tail() {
+        let raw = concat!(
+            "{\"event\":\"session_start\",\"payload\":{\"started_unix_ms\":100,\"cli\":{\"bits\":32,\"config_path\":\"config/live.json\"}}}\n",
+            "{\"event\":\"step\",\"payload\":{\"name\":\"seed\",\"duration_ms\":7}}\n",
+            "{\"event\":\"session_finish\",\"payload\":{\"finished_unix_ms\":250,\"errors\":[\"warn\"]}}\n",
+            "{\"event\":\"step\",\"payload\":{\"name\":\"partial\""
+        );
+
+        let (session, ndjson) = parse_session_from_str(raw).expect("streaming NDJSON should parse");
+
+        assert!(ndjson);
+        assert_eq!(session.started_unix_ms, Some(100));
+        assert_eq!(session.finished_unix_ms, Some(250));
+        assert_eq!(session.cli.bits, 32);
+        assert_eq!(session.cli.config_path, "config/live.json");
+        assert_eq!(session.steps.len(), 1);
+        assert_eq!(session.steps[0].name, "seed");
+        assert_eq!(session.errors, vec!["warn".to_string()]);
+    }
+
+    #[test]
+    fn parse_session_from_str_preserves_legacy_json_sessions() {
+        let raw = r#"{
+            "started_unix_ms": 11,
+            "finished_unix_ms": 42,
+            "cli": {
+                "bits": 16,
+                "config_path": "config/rsa_config.json"
+            },
+            "steps": [
+                {
+                    "name": "phase",
+                    "duration_ms": 9
+                }
+            ],
+            "errors": ["done"]
+        }"#;
+
+        let (session, ndjson) =
+            parse_session_from_str(raw).expect("legacy JSON session should parse");
+
+        assert!(!ndjson);
+        assert_eq!(session.started_unix_ms, Some(11));
+        assert_eq!(session.finished_unix_ms, Some(42));
+        assert_eq!(session.cli.bits, 16);
+        assert_eq!(session.steps.len(), 1);
+        assert_eq!(session.steps[0].duration_ms, 9);
+        assert_eq!(session.errors, vec!["done".to_string()]);
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn load_session_from_path_streams_ndjson_files() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time should be after epoch")
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!("viewer_session_{unique}.log"));
+        let raw = concat!(
+            "{\"event\":\"session_start\",\"payload\":{\"started_unix_ms\":5,\"cli\":{\"bits\":8,\"config_path\":\"config/live.json\"}}}\n",
+            "{\"event\":\"step_summary\",\"payload\":{\"name\":\"phase\",\"count\":2,\"total_ms\":20,\"mean_ms\":10.0}}\n",
+            "{\"event\":\"session_finish\",\"payload\":{\"finished_unix_ms\":15,\"errors\":[]}}\n",
+            "{\"event\":\"step_summary\",\"payload\":{\"name\":\"partial\""
+        );
+        fs::write(&path, raw).expect("temp session log should be written");
+
+        let result = load_session_from_path(&path);
+        let _ = fs::remove_file(&path);
+        let (session, ndjson) = result.expect("streaming file should parse");
+
+        assert!(ndjson);
+        assert_eq!(session.started_unix_ms, Some(5));
+        assert_eq!(session.finished_unix_ms, Some(15));
+        assert_eq!(session.step_summaries.len(), 1);
+        assert_eq!(session.step_summaries[0].name, "phase");
+        assert_eq!(session.step_summaries[0].count, 2);
+    }
+
+    #[test]
+    fn build_bit_similarity_rows_keeps_distinct_candidates_with_reused_indices() {
+        let entries = vec![
+            bit_similarity_entry(0, 0, 1, "101"),
+            bit_similarity_entry(1, 0, 2, "101"),
+            bit_similarity_entry(2, 0, 1, "202"),
+            bit_similarity_entry(3, 0, 2, "202"),
+            bit_similarity_entry(4, 1, 1, "303"),
+        ];
+
+        let rows = build_bit_similarity_rows(&entries, false, BitSimilaritySort::Original);
+
+        assert_eq!(rows.len(), 3);
+        assert_eq!(rows[0].r, "101");
+        assert_eq!(rows[0].entries.len(), 2);
+        assert_eq!(rows[1].r, "202");
+        assert_eq!(rows[1].entries.len(), 2);
+        assert_eq!(rows[2].r, "303");
+        assert_eq!(rows[2].entries.len(), 1);
+    }
+
+    #[test]
+    fn build_bit_similarity_rows_does_not_merge_hide_shifted_rows() {
+        let entries = vec![
+            bit_similarity_entry(0, 7, 0, "101"),
+            bit_similarity_entry(1, 7, 1, "101"),
+            bit_similarity_entry(2, 7, 0, "202"),
+            bit_similarity_entry(3, 7, 1, "202"),
+        ];
+
+        let rows = build_bit_similarity_rows(&entries, true, BitSimilaritySort::Original);
+
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].r, "101");
+        assert_eq!(rows[0].entries.len(), 1);
+        assert_eq!(rows[1].r, "202");
+        assert_eq!(rows[1].entries.len(), 1);
     }
 }

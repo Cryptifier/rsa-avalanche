@@ -26,22 +26,25 @@ pub struct PolynomialCoordinate {
     pub value: f64,
 }
 
+#[cfg(feature = "cluster")]
+use linfa::prelude::Predict;
 #[cfg(feature = "pca")]
-use linfa::{DatasetBase, prelude::{Fit, Transformer}};
+use linfa::{
+    DatasetBase,
+    prelude::{Fit, Transformer},
+};
+#[cfg(feature = "cluster")]
+use linfa_clustering::KMeans;
 #[cfg(feature = "pca")]
 use linfa_reduction::Pca;
+#[cfg(feature = "cluster")]
+use ndarray::Array1;
 #[cfg(feature = "pca")]
 use ndarray::Array2;
 #[cfg(feature = "pca")]
 use plotters::prelude::*;
 #[cfg(feature = "pca")]
 use std::{error::Error, path::Path};
-#[cfg(feature = "cluster")]
-use linfa::prelude::Predict;
-#[cfg(feature = "cluster")]
-use linfa_clustering::KMeans;
-#[cfg(feature = "cluster")]
-use ndarray::Array1;
 
 /// Builds polynomial fields from configuration.
 ///
@@ -128,7 +131,10 @@ pub fn pca_project_coordinates(
         return Err("coordinate vectors have inconsistent lengths".to_string());
     }
 
-    let flat: Vec<f64> = coordinates.iter().flat_map(|row| row.iter().copied()).collect();
+    let flat: Vec<f64> = coordinates
+        .iter()
+        .flat_map(|row| row.iter().copied())
+        .collect();
     let matrix = Array2::from_shape_vec((rows, cols), flat)
         .map_err(|err| format!("invalid coordinate matrix: {err}"))?;
 
@@ -208,10 +214,15 @@ pub fn plot_clustered_png(
 
     chart.configure_mesh().x_desc("PC1").y_desc("PC2").draw()?;
 
-    chart.draw_series(xs.iter().zip(ys.iter()).zip(labels.iter()).map(|((x, y), label)| {
-        let color = cluster_color(*label);
-        Circle::new((*x, *y), 3, color.filled())
-    }))?;
+    chart.draw_series(
+        xs.iter()
+            .zip(ys.iter())
+            .zip(labels.iter())
+            .map(|((x, y), label)| {
+                let color = cluster_color(*label);
+                Circle::new((*x, *y), 3, color.filled())
+            }),
+    )?;
 
     root.present()?;
     Ok(())
@@ -242,8 +253,7 @@ pub fn cluster_coordinates_to_png(
     }
     let projected = pca_project_coordinates(coordinates, components)
         .map_err(|err| format!("pca projection failed: {err}"))?;
-    let labels = kmeans_cluster(&projected, k)
-        .map_err(|err| format!("kmeans failed: {err}"))?;
+    let labels = kmeans_cluster(&projected, k).map_err(|err| format!("kmeans failed: {err}"))?;
     plot_clustered_png(&projected, &labels, path)
 }
 
@@ -280,9 +290,11 @@ pub fn plot_pca_png(points: &Array2<f64>, path: &Path) -> Result<(), Box<dyn Err
 
     chart.configure_mesh().x_desc("PC1").y_desc("PC2").draw()?;
 
-    chart.draw_series(xs.iter().zip(ys.iter()).map(|(x, y)| {
-        Circle::new((*x, *y), 3, BLUE.mix(0.7).filled())
-    }))?;
+    chart.draw_series(
+        xs.iter()
+            .zip(ys.iter())
+            .map(|(x, y)| Circle::new((*x, *y), 3, BLUE.mix(0.7).filled())),
+    )?;
 
     root.present()?;
     Ok(())
@@ -383,9 +395,7 @@ fn generate_coefficients(seed: u64, modulus: &BigUint, degree: usize) -> Vec<Big
 /// # Expected Output
 /// - Returns the next state; no stdout/stderr output.
 fn lcg_next(state: u64) -> u64 {
-    state
-        .wrapping_mul(6364136223846793005)
-        .wrapping_add(1)
+    state.wrapping_mul(6364136223846793005).wrapping_add(1)
 }
 
 /// Evaluates a polynomial at `x` within the provided modulus.
@@ -541,11 +551,7 @@ mod tests {
 
     #[test]
     fn test_coordinates_vector_6() {
-        let out = snapshot_coords(
-            4096,
-            &[251, 257, 263, 269, 271, 277],
-            &[1, 2, 3, 4, 5, 6],
-        );
+        let out = snapshot_coords(4096, &[251, 257, 263, 269, 271, 277], &[1, 2, 3, 4, 5, 6]);
         assert_yaml_snapshot!(out);
     }
 

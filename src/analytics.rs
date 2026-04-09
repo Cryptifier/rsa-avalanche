@@ -1,3 +1,4 @@
+use bigdecimal::BigDecimal;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
 
@@ -5,7 +6,10 @@ use num_bigint::BigUint;
 use serde::Serialize;
 use serde_json::{Map, Value};
 
-use crate::r_candidates::{generate_r_candidates_batch, RCandidateMode, RCandidateSettings};
+use crate::r_candidates::{
+    RCandidate, RCandidateMode, RCandidateSettings, generate_r_candidates_batch,
+    retarget_r_candidates_for_speculative_oracles,
+};
 use crate::rng::RngChoice;
 
 /// CLI metadata captured for analytics sessions.
@@ -37,8 +41,30 @@ pub struct AnalyticsCliArgs {
     pub use_hamming_distance: bool,
     /// Whether bitwise-inverted avalanche candidates are mirrored into the grid.
     pub mirror_invert_candidates: bool,
+    /// Minimum stored beam value interpreted as bit `1`.
+    pub beam_bit_one_threshold: f64,
+    /// Exponent used to spread normalized avalanche beam probabilities.
+    pub avalanche_probability_spread_exponent: f64,
+    /// Number of avalanche combination samples evaluated per batch.
+    pub avalanche_combination_samples: u64,
+    /// Legacy sampled-width setting retained for compatibility with older configs.
+    pub avalanche_combination_size: usize,
+    /// Number of distinct r candidates mixed into each avalanche combination sample.
+    pub avalanche_combination_mixed_r_candidates: usize,
+    /// Number of top scored candidates retained for avalanche combination sampling.
+    pub avalanche_combination_pool_size: usize,
+    /// Whether sampled avalanche uses per-bit majority-vote probabilities from the combination outputs.
+    pub avalanche_combination_majority_vote: bool,
+    /// Whether sampled avalanche smooths per-bit majority-vote probabilities before beam search.
+    pub avalanche_combination_sample_smoothing: bool,
+    /// Whether sampled avalanche prints a separate majority-vote summary for the selected sample.
+    pub avalanche_combination_majority_vote_print: bool,
     /// Expected bit width for decryptions.
     pub bits_decrypt: Option<u32>,
+    /// Optional CLI override for speculative r-candidate target exponent.
+    pub r_candidate_target_exponent: Option<String>,
+    /// Optional CLI override for speculative r-candidate target exponent minimum.
+    pub r_candidate_target_exponent_minimum: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -56,7 +82,18 @@ pub(crate) struct AnalyticsCliInfo {
     ciphertext_modify: bool,
     use_hamming_distance: bool,
     mirror_invert_candidates: bool,
+    beam_bit_one_threshold: f64,
+    avalanche_probability_spread_exponent: f64,
+    avalanche_combination_samples: u64,
+    avalanche_combination_size: usize,
+    avalanche_combination_mixed_r_candidates: usize,
+    avalanche_combination_pool_size: usize,
+    avalanche_combination_majority_vote: bool,
+    avalanche_combination_sample_smoothing: bool,
+    avalanche_combination_majority_vote_print: bool,
     bits_decrypt: Option<u32>,
+    r_candidate_target_exponent: Option<String>,
+    r_candidate_target_exponent_minimum: Option<String>,
 }
 
 /// Timing entry for a named step.
@@ -103,6 +140,8 @@ pub struct RCandidateEntry {
     pub r: String,
     /// Bit length of the candidate modulus.
     pub r_bits: u64,
+    /// Decimal target exponent used to retarget the candidate.
+    pub target_exponent: String,
     /// Prime factorization metadata.
     pub factors: Vec<RCandidateFactor>,
 }
@@ -114,6 +153,8 @@ pub struct RCandidateTraceEntry {
     pub r: String,
     /// Bit length of the candidate modulus.
     pub r_bits: u64,
+    /// Decimal target exponent used to retarget the candidate.
+    pub target_exponent: String,
     /// Ciphertext after homomorphic base conversion into `r`.
     pub hbc_ciphertext_r: String,
     /// Candidate-derived plaintext.
@@ -160,6 +201,8 @@ pub struct RCandidateAccuracyEntry {
     pub r: String,
     /// Bit length of the candidate modulus.
     pub r_bits: u64,
+    /// Decimal target exponent used to retarget the candidate.
+    pub target_exponent: String,
     /// Prime factorization metadata.
     pub factors: Vec<RCandidateFactor>,
     /// Mean accuracy percentage across the message batch.
@@ -183,12 +226,20 @@ pub struct RCandidateAccuracyBatch {
     pub shifted_ciphertexts: Vec<String>,
     /// Rabin exponent used for the batch transforms.
     pub rabin_exponent: u32,
-    /// Tonelli-Shanks modulus value (`n^k`).
+    /// Historical bootstrap-source modulus field (currently the source modulus before HBC).
     pub tonelli_shanks_modulus: String,
-    /// Tonelli-Shanks ciphertexts (per message).
+    /// Historical bootstrap-source ciphertext field (currently the shifted ciphertexts).
     pub tonelli_shanks_ciphertexts: Vec<String>,
     /// Per-candidate accuracy entries.
     pub candidates: Vec<RCandidateAccuracyEntry>,
+    /// Maximum bitwise match percentage among evaluated `c^x` candidates in the batch.
+    pub cx_max_match_pct: Option<f64>,
+    /// Ciphertext exponent `x` that achieved the batch max bitwise match.
+    pub cx_max_x: Option<String>,
+    /// Total evaluated `c^x` candidates in the batch.
+    pub cx_evaluated_candidates: usize,
+    /// Total avalanche candidates evaluated for the batch.
+    pub avalanche_evaluated_candidates: usize,
     /// Beam search match percentage for the batch (per-bit accuracy).
     pub beam_match_pct: Option<f64>,
     /// Beam search ones-match percentage for the batch.
@@ -197,6 +248,95 @@ pub struct RCandidateAccuracyBatch {
     pub beam_score: Option<f64>,
     /// Bit width of the beam search candidate.
     pub beam_bit_width: Option<usize>,
+    /// Index of the highest-scoring avalanche combination sample for the batch.
+    pub avalanche_selected_sample_index: Option<usize>,
+    /// Mean score percentage of the selected avalanche combination sample.
+    pub avalanche_selected_sample_average_score_pct: Option<f64>,
+    /// Total sampled avalanche candidates evaluated across all combination samples.
+    pub avalanche_sampled_candidates_evaluated: usize,
+    /// Detailed avalanche combination sample results for the batch.
+    pub avalanche_combination_samples: Vec<AvalancheCombinationSample>,
+}
+
+/// Source candidate included in an avalanche combination sample.
+#[derive(Debug, Serialize, Clone)]
+pub struct AvalancheCombinationSampleInput {
+    /// Zero-based index of the scored batch candidate entry.
+    pub batch_candidate_index: usize,
+    /// Zero-based index of the message or ciphertext variant inside the batch candidate.
+    pub message_index: usize,
+    /// Candidate modulus value.
+    pub r: String,
+    /// Bit length of the candidate modulus.
+    pub r_bits: u64,
+    /// Decimal target exponent used to retarget the candidate.
+    pub target_exponent: String,
+    /// Ciphertext exponent applied to the source ciphertext.
+    pub x: String,
+    /// Match percentage used to score the source candidate.
+    pub score_match_pct: f64,
+    /// HBC ciphertext in the candidate modulus.
+    pub hbc_ciphertext_r: String,
+    /// Candidate-derived plaintext for this source input.
+    pub candidate_decryption: String,
+}
+
+/// Beam-search candidate produced from an avalanche combination sample.
+#[derive(Debug, Serialize, Clone)]
+pub struct AvalancheCombinationBeamResult {
+    /// One-based beam rank in descending score order.
+    pub rank: usize,
+    /// Beam search score for the candidate.
+    pub score: f64,
+    /// Match percentage against the original message bits.
+    pub match_pct: f64,
+    /// Percentage of predicted `1` bits that match the message.
+    pub ones_match_pct: f64,
+    /// Hex encoding of the candidate bits.
+    pub hex: String,
+    /// Bit width of the candidate.
+    pub bit_width: usize,
+}
+
+/// Serialized avalanche combination sample including beam-search output.
+#[derive(Debug, Serialize, Clone)]
+pub struct AvalancheCombinationSample {
+    /// One-based sample index within the batch.
+    pub sample_index: usize,
+    /// Number of scored candidates available for sampling in the batch.
+    pub pool_size: usize,
+    /// Number of distinct r candidates available for sampling in the batch.
+    pub r_candidate_pool_size: usize,
+    /// Number of scored candidates selected for this sample.
+    pub combination_size: usize,
+    /// Number of distinct r candidates selected for this sample.
+    pub mixed_r_candidate_count: usize,
+    /// Mean match percentage of the sampled scored candidates.
+    pub average_score_pct: f64,
+    /// Whether this sample used per-bit majority-vote probabilities.
+    pub majority_vote_enabled: bool,
+    /// Whether this sample smoothed per-bit majority-vote probabilities before beam search.
+    pub sample_smoothing_enabled: bool,
+    /// Source scored candidates used to build the avalanche sample.
+    pub inputs: Vec<AvalancheCombinationSampleInput>,
+    /// Majority-vote bit values for the sample when enabled.
+    pub majority_vote_bits: Vec<bool>,
+    /// Per-bit count of `1` votes across the sampled combination.
+    pub majority_vote_ones_count: Vec<usize>,
+    /// Per-bit count of `0` votes across the sampled combination.
+    pub majority_vote_zeros_count: Vec<usize>,
+    /// Per-bit probability of `1` derived from the sampled combination, optionally smoothed.
+    pub majority_vote_probability_one: Vec<f64>,
+    /// Similarity percentages recorded at each avalanche reduction level.
+    pub level_similarity_pct: Vec<f64>,
+    /// Pair counts recorded at each avalanche reduction level.
+    pub level_pair_counts: Vec<usize>,
+    /// Normalized avalanche bias probabilities before spreading.
+    pub normalized_bias_probabilities: Vec<f64>,
+    /// Beam-search probabilities derived from the normalized avalanche biases.
+    pub beam_search_probabilities: Vec<f64>,
+    /// Final beam-search candidates produced from the avalanche result.
+    pub beam_results: Vec<AvalancheCombinationBeamResult>,
 }
 
 /// Trace payload for r candidates evaluated against a specific message.
@@ -212,9 +352,9 @@ pub struct RCandidateTraceBatch {
     pub shifted_ciphertext: String,
     /// Rabin exponent used for the trace transforms.
     pub rabin_exponent: u32,
-    /// Tonelli-Shanks modulus value (`n^k`).
+    /// Historical bootstrap-source modulus field (currently the source modulus before HBC).
     pub tonelli_shanks_modulus: String,
-    /// Tonelli-Shanks ciphertext.
+    /// Historical bootstrap-source ciphertext field (currently the shifted ciphertext).
     pub tonelli_shanks_ciphertext: String,
     /// Per-candidate trace entries.
     pub candidates: Vec<RCandidateTraceEntry>,
@@ -264,7 +404,20 @@ impl SessionAnalytics {
                 ciphertext_modify: args.ciphertext_modify,
                 use_hamming_distance: args.use_hamming_distance,
                 mirror_invert_candidates: args.mirror_invert_candidates,
+                beam_bit_one_threshold: args.beam_bit_one_threshold,
+                avalanche_probability_spread_exponent: args.avalanche_probability_spread_exponent,
+                avalanche_combination_samples: args.avalanche_combination_samples,
+                avalanche_combination_size: args.avalanche_combination_size,
+                avalanche_combination_mixed_r_candidates: args
+                    .avalanche_combination_mixed_r_candidates,
+                avalanche_combination_pool_size: args.avalanche_combination_pool_size,
+                avalanche_combination_majority_vote: args.avalanche_combination_majority_vote,
+                avalanche_combination_sample_smoothing: args.avalanche_combination_sample_smoothing,
+                avalanche_combination_majority_vote_print: args
+                    .avalanche_combination_majority_vote_print,
                 bits_decrypt: args.bits_decrypt,
+                r_candidate_target_exponent: args.r_candidate_target_exponent,
+                r_candidate_target_exponent_minimum: args.r_candidate_target_exponent_minimum,
             },
             steps: Vec::new(),
             step_summaries: Vec::new(),
@@ -481,7 +634,7 @@ impl SessionAnalytics {
 /// - `analytics`: Session analytics accumulator for r candidate metadata.
 ///
 /// # Returns
-/// - `Vec<(BigUint, Vec<(BigUint, u64)>)>`: Candidate list and factor tuples.
+/// - `Vec<RCandidate>`: Candidate list with revised modulus metadata.
 ///
 /// # Expected Output
 /// - Records candidate metadata in `analytics`; no stdout/stderr output.
@@ -492,17 +645,28 @@ pub fn generate_r_candidates_with_analytics(
     rng: &mut RngChoice,
     batch_size: usize,
     analytics: &Arc<Mutex<SessionAnalytics>>,
-) -> Vec<(BigUint, Vec<(BigUint, u64)>)> {
+) -> Vec<RCandidate> {
     let start = std::time::Instant::now();
-    let candidates = generate_r_candidates_batch(n, settings, rng, batch_size);
+    let mut candidates = generate_r_candidates_batch(n, settings, rng, batch_size);
+    retarget_r_candidates_for_speculative_oracles(
+        n,
+        &mut candidates,
+        &settings.target_exponent_minimum,
+        &settings.target_exponent,
+        settings.retarget_partition_count,
+        &settings.retarget_minimum_exponent,
+        rng,
+    );
     let duration = start.elapsed();
 
     let candidate_entries = candidates
         .iter()
-        .map(|(r, factors)| RCandidateEntry {
-            r: r.to_string(),
-            r_bits: r.bits(),
-            factors: factors
+        .map(|candidate| RCandidateEntry {
+            r: candidate.r.to_string(),
+            r_bits: candidate.r.bits(),
+            target_exponent: format_target_exponent(&candidate.target_exponent),
+            factors: candidate
+                .factors
                 .iter()
                 .map(|(p, e)| RCandidateFactor {
                     prime: p.to_string(),
@@ -538,6 +702,20 @@ pub fn generate_r_candidates_with_analytics(
     }
 
     candidates
+}
+
+/// Formats a candidate target exponent for analytics output.
+///
+/// # Parameters
+/// - `target_exponent`: Decimal exponent associated with the candidate.
+///
+/// # Returns
+/// - `String`: Rendered decimal value.
+///
+/// # Expected Output
+/// - Returns a plain string form; no side effects.
+fn format_target_exponent(target_exponent: &BigDecimal) -> String {
+    target_exponent.normalized().to_string()
 }
 
 /// Writes the analytics session JSON to disk.

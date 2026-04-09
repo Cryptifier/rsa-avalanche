@@ -1930,10 +1930,12 @@ mod tests {
         assert!(windows.covers_all_bits());
         assert!(!windows.has_overlaps());
         assert!(uncovered_ranges(windows.total_bits(), windows.partitions()).is_empty());
-        assert!(windows
-            .partitions()
-            .iter()
-            .all(|partition| partition.width() >= 1));
+        assert!(
+            windows
+                .partitions()
+                .iter()
+                .all(|partition| partition.width() >= 1)
+        );
     }
 
     #[test]
@@ -1944,10 +1946,12 @@ mod tests {
         assert_eq!(windows.total_bits(), 512);
         assert!(windows.covers_all_bits());
         assert!(!windows.has_overlaps());
-        assert!(windows
-            .partitions()
-            .iter()
-            .all(|partition| partition.width() <= 19));
+        assert!(
+            windows
+                .partitions()
+                .iter()
+                .all(|partition| partition.width() <= 19)
+        );
     }
 
     #[test]
@@ -1956,10 +1960,12 @@ mod tests {
 
         assert_eq!(windows.total_bits(), 128);
         assert!(windows.covers_all_bits());
-        assert!(windows
-            .partitions()
-            .iter()
-            .all(|partition| partition.end_exclusive() <= 128));
+        assert!(
+            windows
+                .partitions()
+                .iter()
+                .all(|partition| partition.end_exclusive() <= 128)
+        );
     }
 
     #[test]
@@ -2048,13 +2054,17 @@ mod tests {
             .generate()
             .expect("windows should build");
 
-        assert!(windows
-            .requested_partitions()
-            .all(|partition| partition.width() >= 3));
-        assert!(windows
-            .partitions()
-            .iter()
-            .all(|partition| partition.width() <= 7));
+        assert!(
+            windows
+                .requested_partitions()
+                .all(|partition| partition.width() >= 3)
+        );
+        assert!(
+            windows
+                .partitions()
+                .iter()
+                .all(|partition| partition.width() <= 7)
+        );
     }
 
     #[test]
@@ -2084,10 +2094,12 @@ mod tests {
         assert!(query.covered_bits() <= 20);
         assert!(query.covered_bits() <= query.target_bits());
         assert!(!query.has_overlaps());
-        assert!(query
-            .partitions()
-            .iter()
-            .all(|partition| partition.end_exclusive() <= windows.total_bits()));
+        assert!(
+            query
+                .partitions()
+                .iter()
+                .all(|partition| partition.end_exclusive() <= windows.total_bits())
+        );
     }
 
     #[test]

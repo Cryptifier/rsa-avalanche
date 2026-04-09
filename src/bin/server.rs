@@ -1,57 +1,62 @@
 use std::fs::File;
 use std::path::{Path, PathBuf};
+use std::sync::{
+    Arc, Mutex,
+    atomic::{AtomicBool, Ordering},
+};
+use std::time::Duration;
 
+use clap::Parser;
+use rsademo::zmq_status::{
+    RouterServerBuilder, ZmqBindAddress, ZmqStatusContext, join_router, router_endpoint,
+    stop_router,
+};
 use serde::Serialize;
 use tiny_http::{Header, Method, Request, Response, Server, StatusCode};
 
-#[derive(Debug)]
+#[derive(Debug, Parser, Clone)]
+#[command(
+    name = "server",
+    about = "Serve the viewer HTTP assets and a concurrent ZMQ ping router",
+    author,
+    version
+)]
 struct ServerArgs {
+    /// HTTP bind address for the viewer server
+    #[arg(long, default_value = "127.0.0.1:8080")]
     addr: String,
-    log_dir: PathBuf,
-    web_dir: PathBuf,
-}
 
-impl ServerArgs {
-    /// Parses command-line arguments for the log server.
-    ///
-    /// # Parameters
-    /// - `args`: Iterator over command-line arguments.
-    ///
-    /// # Returns
-    /// - `ServerArgs`: Parsed configuration values.
-    ///
-    /// # Expected Output
-    /// - None.
-    fn parse(mut args: impl Iterator<Item = String>) -> Self {
-        let mut addr = "127.0.0.1:8080".to_string();
-        let mut log_dir = PathBuf::from("logs");
-        let mut web_dir = PathBuf::from("web");
-        while let Some(arg) = args.next() {
-            match arg.as_str() {
-                "--addr" => {
-                    if let Some(value) = args.next() {
-                        addr = value;
-                    }
-                }
-                "--log-dir" => {
-                    if let Some(value) = args.next() {
-                        log_dir = PathBuf::from(value);
-                    }
-                }
-                "--web-dir" => {
-                    if let Some(value) = args.next() {
-                        web_dir = PathBuf::from(value);
-                    }
-                }
-                _ => {}
-            }
-        }
-        Self {
-            addr,
-            log_dir,
-            web_dir,
-        }
-    }
+    /// Directory containing session log files
+    #[arg(long, default_value = "logs")]
+    log_dir: PathBuf,
+
+    /// Directory containing the web viewer assets
+    #[arg(long, default_value = "web")]
+    web_dir: PathBuf,
+
+    /// Host or interface for the ZMQ ROUTER socket
+    #[arg(long, default_value = "127.0.0.1")]
+    zmq_host: String,
+
+    /// TCP port for the ZMQ ROUTER socket
+    #[arg(long, default_value_t = 5555)]
+    zmq_port: u16,
+
+    /// Interval between poller resource queries in seconds
+    #[arg(long, default_value_t = 10)]
+    zmq_query_interval_secs: u64,
+
+    /// Stop the ZMQ router automatically after this many pings
+    #[arg(long)]
+    zmq_expected_pings: Option<usize>,
+
+    /// ZMQ linger timeout in milliseconds
+    #[arg(long, default_value_t = 0)]
+    zmq_linger_ms: i32,
+
+    /// HTTP receive poll timeout in milliseconds
+    #[arg(long, default_value_t = 250)]
+    http_poll_timeout_ms: u64,
 }
 
 #[derive(Debug, Serialize)]
@@ -61,7 +66,7 @@ struct LogEntry {
     modified_ms: Option<u64>,
 }
 
-/// Launches a minimal server for the WebAssembly viewer.
+/// Launches the viewer HTTP server together with a background ZMQ ROUTER server.
 ///
 /// # Parameters
 /// - None.
@@ -70,15 +75,95 @@ struct LogEntry {
 /// - `Result<(), Box<dyn std::error::Error>>`: Ok on clean shutdown, or an error.
 ///
 /// # Expected Output
-/// - Starts an HTTP server that serves the viewer and logs.
+/// - Starts an HTTP server, starts a ZMQ router, and prints both endpoints to stdout.
 fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let args = ServerArgs::parse(std::env::args().skip(1));
-    let server = Server::http(&args.addr)?;
+    let args = ServerArgs::parse();
+    run_server(args)
+}
+
+/// Runs the combined HTTP and ZMQ server workflow.
+///
+/// # Parameters
+/// - `args`: Parsed CLI arguments for HTTP and ZMQ configuration.
+///
+/// # Returns
+/// - `Result<(), Box<dyn std::error::Error + Send + Sync>>`: Ok on clean shutdown, or an error.
+///
+/// # Expected Output
+/// - Starts the configured servers, serves requests, and prints startup/shutdown status.
+fn run_server(args: ServerArgs) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let http_server = Server::http(&args.addr)?;
+    let status_context = Arc::new(Mutex::new(ZmqStatusContext::new()));
+    let router_builder = build_router_builder(&args);
+    let router_handle = router_builder.build_with_shared_context(Arc::clone(&status_context))?;
+    let router_endpoint_value = router_endpoint(&router_handle).to_string();
+    let shutdown_requested = Arc::new(AtomicBool::new(false));
+    install_ctrlc_handler(Arc::clone(&shutdown_requested))?;
+
     println!("Viewer server running at http://{}/", args.addr);
-    for request in server.incoming_requests() {
-        handle_request(request, &args);
+    println!("ZMQ router listening at {}", router_endpoint_value);
+    println!(
+        "ZMQ router will query connected pollers every {} seconds.",
+        args.zmq_query_interval_secs
+    );
+
+    while !shutdown_requested.load(Ordering::Relaxed) {
+        match http_server.recv_timeout(Duration::from_millis(args.http_poll_timeout_ms)) {
+            Ok(Some(request)) => handle_request(request, &args),
+            Ok(None) => {}
+            Err(err) => return Err(err.into()),
+        }
     }
+
+    println!("Shutdown requested; stopping ZMQ router.");
+    let _ = stop_router(&router_endpoint_value);
+    let router_stats = join_router(router_handle)?;
+    println!(
+        "ZMQ router stopped after {} pings, {} status queries, {} query requests, and {} query responses across {} known clients.",
+        router_stats.pings,
+        router_stats.status_queries,
+        router_stats.query_requests_sent,
+        router_stats.query_responses,
+        router_stats.known_clients
+    );
     Ok(())
+}
+
+/// Builds the ROUTER server configuration from CLI arguments.
+///
+/// # Parameters
+/// - `args`: Parsed CLI arguments.
+///
+/// # Returns
+/// - `RouterServerBuilder`: Configured builder for the ZMQ router.
+///
+/// # Expected Output
+/// - Returns a builder value; no side effects.
+fn build_router_builder(args: &ServerArgs) -> RouterServerBuilder {
+    let builder = RouterServerBuilder::new()
+        .bind_address(ZmqBindAddress::new(args.zmq_host.clone(), args.zmq_port))
+        .query_interval(Duration::from_secs(args.zmq_query_interval_secs))
+        .linger_ms(args.zmq_linger_ms);
+    match args.zmq_expected_pings {
+        Some(expected_pings) => builder.expected_pings(expected_pings),
+        None => builder.until_stopped(),
+    }
+}
+
+/// Installs a Ctrl+C handler that requests a clean shutdown.
+///
+/// # Parameters
+/// - `shutdown_requested`: Shared shutdown flag updated by the signal handler.
+///
+/// # Returns
+/// - `Result<(), ctrlc::Error>`: `Ok(())` on success or a handler registration error.
+///
+/// # Expected Output
+/// - Registers a signal handler; no immediate stdout/stderr output.
+fn install_ctrlc_handler(shutdown_requested: Arc<AtomicBool>) -> Result<(), ctrlc::Error> {
+    ctrlc::set_handler(move || {
+        shutdown_requested.store(true, Ordering::Relaxed);
+    })
 }
 
 /// Routes an incoming HTTP request to the appropriate handler.
@@ -88,7 +173,7 @@ fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 /// - `args`: Server configuration.
 ///
 /// # Returns
-/// - `()` to indicate the request has been handled.
+/// - `()`: This function returns nothing.
 ///
 /// # Expected Output
 /// - Writes an HTTP response to the client.
@@ -120,7 +205,7 @@ fn split_url(url: &str) -> (&str, Option<&str>) {
 /// - `args`: Server configuration.
 ///
 /// # Returns
-/// - `()` to indicate the request has been handled.
+/// - `()`: This function returns nothing.
 ///
 /// # Expected Output
 /// - Writes an HTTP response to the client.
@@ -188,7 +273,7 @@ fn handle_api_request(request: Request, args: &ServerArgs) {
 /// - `args`: Server configuration.
 ///
 /// # Returns
-/// - `()` to indicate the request has been handled.
+/// - `()`: This function returns nothing.
 ///
 /// # Expected Output
 /// - Writes an HTTP response to the client.
@@ -245,7 +330,7 @@ fn respond_text(request: Request, status: StatusCode, body: String, content_type
 /// - `Vec<LogEntry>`: Metadata for each log file.
 ///
 /// # Expected Output
-/// - None.
+/// - Returns file metadata; no stdout/stderr output.
 fn list_logs(log_dir: &Path) -> Vec<LogEntry> {
     let mut entries = Vec::new();
     if let Ok(read_dir) = std::fs::read_dir(log_dir) {
@@ -297,10 +382,7 @@ fn is_safe_name(name: &str) -> bool {
 }
 
 fn is_safe_static_path(path: &str) -> bool {
-    !path.is_empty()
-        && !path.contains("..")
-        && !path.starts_with('/')
-        && !path.starts_with('\\')
+    !path.is_empty() && !path.contains("..") && !path.starts_with('/') && !path.starts_with('\\')
 }
 
 fn content_type_for_path(path: &Path) -> Option<&'static str> {

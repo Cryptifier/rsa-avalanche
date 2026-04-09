@@ -194,6 +194,7 @@ def normalize_cli(cli):
         "use_hamming_distance": coerce_bool(cli.get("use_hamming_distance")),
         "mirror_invert_candidates": coerce_bool(cli.get("mirror_invert_candidates")),
         "bits_decrypt": coerce_optional(cli.get("bits_decrypt")),
+        "r_candidate_target_exponent": coerce_str(cli.get("r_candidate_target_exponent")),
     }
 
 

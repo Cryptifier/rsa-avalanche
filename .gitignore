@@ -17,3 +17,4 @@ snapshots/*
 old-logs/
 *.bkp
 *.wasm
+config/keys/private_key.yaml

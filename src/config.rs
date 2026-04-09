@@ -2,6 +2,7 @@
 
 use std::{error::Error, fs, path::Path};
 
+use bigdecimal::BigDecimal;
 use num_bigint::BigUint;
 use serde::Deserialize;
 
@@ -106,16 +107,43 @@ pub struct EngineConfig {
     pub analysis_batch_candidates: u64,
     #[serde(default = "default_analysis_batch_batches")]
     pub analysis_batch_batches: u64,
+    /// Number of avalanche combination samples to evaluate per batch.
+    #[serde(default = "default_avalanche_combination_samples")]
+    pub avalanche_combination_samples: u64,
+    /// Legacy sampled-width setting retained for compatibility with older configs.
+    #[serde(default = "default_avalanche_combination_size")]
+    pub avalanche_combination_size: usize,
+    /// Number of distinct r candidates mixed into each sampled avalanche input set.
+    #[serde(default = "default_avalanche_combination_mixed_r_candidates")]
+    pub avalanche_combination_mixed_r_candidates: usize,
+    /// Legacy pool-size setting retained for compatibility; sampled pools now use the full batch.
+    #[serde(default = "default_avalanche_combination_pool_size")]
+    pub avalanche_combination_pool_size: usize,
+    /// Whether sampled avalanche uses per-bit majority-vote probabilities from the combination outputs.
+    #[serde(default = "default_avalanche_combination_majority_vote")]
+    pub avalanche_combination_majority_vote: bool,
+    /// Whether sampled avalanche smooths per-bit majority-vote probabilities before beam search.
+    #[serde(default = "default_avalanche_combination_sample_smoothing")]
+    pub avalanche_combination_sample_smoothing: bool,
+    /// Whether sampled avalanche prints a separate majority-vote summary for the selected sample.
+    #[serde(default = "default_avalanche_combination_majority_vote_print")]
+    pub avalanche_combination_majority_vote_print: bool,
     #[serde(default = "default_same_r_batch")]
     pub same_r_batch: bool,
     #[serde(default = "default_ciphertext_modify")]
     pub ciphertext_modify: bool,
     #[serde(default = "default_oracle_accuracy_threshold")]
     pub oracle_accuracy_threshold: f64,
+    /// Minimum stored beam value interpreted as bit `1`.
+    #[serde(default = "default_beam_bit_one_threshold")]
+    pub beam_bit_one_threshold: f64,
+    /// Exponent used to spread normalized avalanche beam probabilities.
+    #[serde(default = "default_avalanche_probability_spread_exponent")]
+    pub avalanche_probability_spread_exponent: f64,
     /// Whether to sort avalanche candidates by Hamming distance.
     #[serde(default = "default_use_hamming_distance")]
     pub use_hamming_distance: bool,
-    /// Whether to add bitwise-inverted avalanche candidates to the Hamming-distance grid.
+    /// Whether to mirror avalanche candidates with bitwise-inverted copies before ordering.
     #[serde(default = "default_mirror_invert_candidates")]
     pub mirror_invert_candidates: bool,
     #[serde(default = "default_r_use_list_enable")]
@@ -146,6 +174,30 @@ pub struct EngineConfig {
     pub r_candidate_max_factors: usize,
     #[serde(default)]
     pub r_candidate_bit_length: Option<u64>,
+    /// Whether factoring-mode r candidates sample bounds from a random `N^a` window with `a ∈ [0.8, 0.9]`.
+    #[serde(default = "default_r_candidate_random_power_window")]
+    pub r_candidate_random_power_window: bool,
+    /// Lower bound for the sampled total exponent used when retargeting speculative r candidates.
+    #[serde(
+        default = "default_r_candidate_target_exponent_minimum",
+        deserialize_with = "deserialize_bigdecimal"
+    )]
+    pub r_candidate_target_exponent_minimum: BigDecimal,
+    /// Upper bound for the sampled total exponent used when retargeting speculative r candidates.
+    #[serde(
+        default = "default_r_candidate_target_exponent",
+        deserialize_with = "deserialize_bigdecimal"
+    )]
+    pub r_candidate_target_exponent: BigDecimal,
+    /// Maximum number of exponent partitions used when retargeting speculative r candidates.
+    #[serde(default = "default_r_candidate_retarget_partition_count")]
+    pub r_candidate_retarget_partition_count: usize,
+    /// Minimum exponent assigned to each retargeted partition when feasible.
+    #[serde(
+        default = "default_r_candidate_retarget_minimum_exponent",
+        deserialize_with = "deserialize_bigdecimal"
+    )]
+    pub r_candidate_retarget_minimum_exponent: BigDecimal,
     #[serde(default = "default_combiner_enable")]
     pub combiner_enable: bool,
     #[serde(default = "default_combiner_k_oracles")]
@@ -256,9 +308,21 @@ impl Default for EngineConfig {
             analysis_batch_messages: default_analysis_batch_messages(),
             analysis_batch_candidates: default_analysis_batch_candidates(),
             analysis_batch_batches: default_analysis_batch_batches(),
+            avalanche_combination_samples: default_avalanche_combination_samples(),
+            avalanche_combination_size: default_avalanche_combination_size(),
+            avalanche_combination_mixed_r_candidates:
+                default_avalanche_combination_mixed_r_candidates(),
+            avalanche_combination_pool_size: default_avalanche_combination_pool_size(),
+            avalanche_combination_majority_vote: default_avalanche_combination_majority_vote(),
+            avalanche_combination_sample_smoothing: default_avalanche_combination_sample_smoothing(
+            ),
+            avalanche_combination_majority_vote_print:
+                default_avalanche_combination_majority_vote_print(),
             same_r_batch: default_same_r_batch(),
             ciphertext_modify: default_ciphertext_modify(),
             oracle_accuracy_threshold: default_oracle_accuracy_threshold(),
+            beam_bit_one_threshold: default_beam_bit_one_threshold(),
+            avalanche_probability_spread_exponent: default_avalanche_probability_spread_exponent(),
             use_hamming_distance: default_use_hamming_distance(),
             mirror_invert_candidates: default_mirror_invert_candidates(),
             r_use_list_enable: default_r_use_list_enable(),
@@ -275,6 +339,11 @@ impl Default for EngineConfig {
             r_candidate_small_prime_factors: default_r_candidate_small_prime_factors(),
             r_candidate_max_factors: default_r_candidate_max_factors(),
             r_candidate_bit_length: None,
+            r_candidate_random_power_window: default_r_candidate_random_power_window(),
+            r_candidate_target_exponent_minimum: default_r_candidate_target_exponent_minimum(),
+            r_candidate_target_exponent: default_r_candidate_target_exponent(),
+            r_candidate_retarget_partition_count: default_r_candidate_retarget_partition_count(),
+            r_candidate_retarget_minimum_exponent: default_r_candidate_retarget_minimum_exponent(),
             combiner_enable: default_combiner_enable(),
             combiner_k_oracles: default_combiner_k_oracles(),
             combiner_match_probability: default_combiner_match_probability(),
@@ -346,7 +415,9 @@ where
 
     let maybe_value = Option::<serde_json::Value>::deserialize(deserializer)?;
     match maybe_value {
-        Some(serde_json::Value::String(s)) => s.parse::<BigUint>().map(Some).map_err(DeError::custom),
+        Some(serde_json::Value::String(s)) => {
+            s.parse::<BigUint>().map(Some).map_err(DeError::custom)
+        }
         Some(serde_json::Value::Number(num)) => num
             .to_string()
             .parse::<BigUint>()
@@ -378,14 +449,43 @@ where
     let value = serde_json::Value::deserialize(deserializer)?;
     match value {
         serde_json::Value::String(s) => s.parse::<BigUint>().map_err(DeError::custom),
-        serde_json::Value::Number(num) => num
-            .to_string()
-            .parse::<BigUint>()
-            .map_err(DeError::custom),
+        serde_json::Value::Number(num) => {
+            num.to_string().parse::<BigUint>().map_err(DeError::custom)
+        }
         other => Err(DeError::custom(format!(
             "expected string or number for big integer, got {other}"
         ))),
     }
+}
+
+/// Deserializes a `BigDecimal` from a string or number JSON value.
+///
+/// # Parameters
+/// - `deserializer`: Serde deserializer provided by the caller.
+///
+/// # Returns
+/// - `Result<BigDecimal, D::Error>`: Parsed decimal value or an error when invalid.
+///
+/// # Expected Output
+/// - Returns a parse error if the value is not a string/number or is invalid.
+fn deserialize_bigdecimal<'de, D>(deserializer: D) -> Result<BigDecimal, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::de::Error as DeError;
+
+    let value = serde_json::Value::deserialize(deserializer)?;
+    let raw = match value {
+        serde_json::Value::String(s) => s,
+        serde_json::Value::Number(num) => num.to_string(),
+        other => {
+            return Err(DeError::custom(format!(
+                "expected string or number for decimal value, got {other}"
+            )));
+        }
+    };
+
+    raw.parse::<BigDecimal>().map_err(DeError::custom)
 }
 
 /// Default flag for RSA key generation.
@@ -780,6 +880,104 @@ fn default_analysis_batch_batches() -> u64 {
     1
 }
 
+/// Default number of avalanche combination samples to evaluate per batch.
+///
+/// # Parameters
+/// - None.
+///
+/// # Returns
+/// - `u64`: Default sampled-combination count.
+///
+/// # Expected Output
+/// - Returns a constant default value; no side effects.
+fn default_avalanche_combination_samples() -> u64 {
+    100
+}
+
+/// Default legacy size of each avalanche combination sample.
+///
+/// # Parameters
+/// - None.
+///
+/// # Returns
+/// - `usize`: Default compatibility value for older sampled-combination configs.
+///
+/// # Expected Output
+/// - Returns a constant default value; no side effects.
+fn default_avalanche_combination_size() -> usize {
+    50
+}
+
+/// Default number of distinct r candidates mixed into each avalanche sample.
+///
+/// # Parameters
+/// - None.
+///
+/// # Returns
+/// - `usize`: Default number of r candidates contributing their `c^x` inputs.
+///
+/// # Expected Output
+/// - Returns a constant default value; no side effects.
+fn default_avalanche_combination_mixed_r_candidates() -> usize {
+    1
+}
+
+/// Default number of scored candidates retained for avalanche combination sampling.
+///
+/// # Parameters
+/// - None.
+///
+/// # Returns
+/// - `usize`: Default scored-candidate pool size.
+///
+/// # Expected Output
+/// - Returns a constant default value; no side effects.
+fn default_avalanche_combination_pool_size() -> usize {
+    100
+}
+
+/// Default flag for per-bit majority voting across sampled avalanche combinations.
+///
+/// # Parameters
+/// - None.
+///
+/// # Returns
+/// - `bool`: Default majority-vote setting for sampled avalanche runs.
+///
+/// # Expected Output
+/// - Returns a constant default value; no side effects.
+fn default_avalanche_combination_majority_vote() -> bool {
+    true
+}
+
+/// Default flag for smoothing per-bit majority-vote probabilities across sampled avalanche combinations.
+///
+/// # Parameters
+/// - None.
+///
+/// # Returns
+/// - `bool`: Default sample-smoothing setting for sampled avalanche runs.
+///
+/// # Expected Output
+/// - Returns a constant default value; no side effects.
+fn default_avalanche_combination_sample_smoothing() -> bool {
+    false
+}
+
+/// Default flag for printing the sampled-combination majority vote alongside beam output.
+///
+/// # Parameters
+/// - None.
+///
+/// # Returns
+/// - `bool`: Default majority-vote console-output setting for sampled avalanche runs.
+///
+/// # Expected Output
+/// - Returns a constant default value; no side effects.
+fn default_avalanche_combination_majority_vote_print() -> bool {
+    true
+}
+
 /// Default flag for using the same r candidate across a batch.
 ///
 /// # Parameters
@@ -822,16 +1020,34 @@ fn default_oracle_accuracy_threshold() -> f64 {
     55.0
 }
 
-/// Default avalanche bias threshold for beam search normalization.
+/// Default cutoff for interpreting stored beam values as bit `1`.
 ///
 /// # Parameters
 /// - None.
 ///
 /// # Returns
-/// - `f64`: Default avalanche bias normalization threshold.
+/// - `f64`: Default beam bit-one threshold.
 ///
 /// # Expected Output
 /// - Returns a constant default value; no side effects.
+fn default_beam_bit_one_threshold() -> f64 {
+    0.4
+}
+
+/// Default exponent for spreading normalized avalanche beam probabilities.
+///
+/// # Parameters
+/// - None.
+///
+/// # Returns
+/// - `f64`: Default avalanche probability spread exponent.
+///
+/// # Expected Output
+/// - Returns a constant default value; no side effects.
+fn default_avalanche_probability_spread_exponent() -> f64 {
+    0.5
+}
+
 /// Default toggle for Hamming-distance sorting in avalanche candidate ordering.
 ///
 /// # Parameters
@@ -984,6 +1200,77 @@ fn default_r_candidate_small_prime_factors() -> usize {
 /// - Returns a constant default value; no side effects.
 fn default_r_candidate_max_factors() -> usize {
     6
+}
+
+/// Default flag for factoring-mode random `N^a` r-candidate sampling.
+///
+/// # Parameters
+/// - None.
+///
+/// # Returns
+/// - `bool`: Default power-window sampling flag.
+///
+/// # Expected Output
+/// - Returns a constant default value; no side effects.
+fn default_r_candidate_random_power_window() -> bool {
+    false
+}
+
+/// Default upper bound for sampled retarget exponents.
+///
+/// # Parameters
+/// - None.
+///
+/// # Returns
+/// - `BigDecimal`: Default retarget exponent upper bound.
+///
+/// # Expected Output
+/// - Returns a constant default value; no side effects.
+fn default_r_candidate_target_exponent() -> BigDecimal {
+    BigDecimal::parse_bytes(b"2.005", 10).expect("valid default r candidate target exponent")
+}
+
+/// Default lower bound for sampled retarget exponents.
+///
+/// # Parameters
+/// - None.
+///
+/// # Returns
+/// - `BigDecimal`: Default retarget exponent lower bound.
+///
+/// # Expected Output
+/// - Returns a constant default value; no side effects.
+fn default_r_candidate_target_exponent_minimum() -> BigDecimal {
+    BigDecimal::parse_bytes(b"0.8", 10).expect("valid default r candidate target exponent minimum")
+}
+
+/// Default partition count used for speculative r-candidate retargeting.
+///
+/// # Parameters
+/// - None.
+///
+/// # Returns
+/// - `usize`: Default partition count.
+///
+/// # Expected Output
+/// - Returns a constant default value; no side effects.
+fn default_r_candidate_retarget_partition_count() -> usize {
+    3
+}
+
+/// Default minimum exponent per retargeted speculative factor.
+///
+/// # Parameters
+/// - None.
+///
+/// # Returns
+/// - `BigDecimal`: Default minimum per-part exponent.
+///
+/// # Expected Output
+/// - Returns a constant default value; no side effects.
+fn default_r_candidate_retarget_minimum_exponent() -> BigDecimal {
+    BigDecimal::parse_bytes(b"0.45", 10)
+        .expect("valid default r candidate retarget minimum exponent")
 }
 
 /// Default flag for enabling the combiner experiment.

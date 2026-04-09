@@ -61,7 +61,10 @@ impl std::fmt::Display for ViterbiError {
                 write!(f, "transition matrix must be square and match state count")
             }
             ViterbiError::InvalidEmissionMatrix => {
-                write!(f, "emission matrix must match state count and observation symbols")
+                write!(
+                    f,
+                    "emission matrix must match state count and observation symbols"
+                )
             }
             ViterbiError::ObservationOutOfRange => write!(f, "observation index out of range"),
         }
@@ -270,10 +273,7 @@ pub fn viterbi_decode(
         return Err(ViterbiError::InvalidEmissionMatrix);
     }
     let max_obs = observations.iter().copied().max().unwrap_or(0);
-    if emission_log_probs
-        .iter()
-        .any(|row| row.len() <= max_obs)
-    {
+    if emission_log_probs.iter().any(|row| row.len() <= max_obs) {
         return Err(ViterbiError::ObservationOutOfRange);
     }
     let first_obs = observations[0];
@@ -327,7 +327,10 @@ pub fn viterbi_decode(
         }
     }
 
-    Ok(ViterbiResult { path, log_prob: best_score })
+    Ok(ViterbiResult {
+        path,
+        log_prob: best_score,
+    })
 }
 
 /// Scores a list of candidates and normalizes scores for ordering.
@@ -395,7 +398,7 @@ fn select_top_k(candidates: &mut Vec<ScoredCandidate>, k: usize) {
 
 #[cfg(test)]
 mod tests {
-    use super::{beam_search, viterbi_decode, BeamSearchError, ViterbiError};
+    use super::{BeamSearchError, ViterbiError, beam_search, viterbi_decode};
 
     #[test]
     fn beam_search_finds_best_candidate() {
@@ -464,8 +467,8 @@ mod tests {
             vec![0.6f64.ln(), 0.3f64.ln(), 0.1f64.ln()],
         ];
 
-        let result = viterbi_decode(&observations, &start, &transition, &emission)
-            .expect("viterbi failed");
+        let result =
+            viterbi_decode(&observations, &start, &transition, &emission).expect("viterbi failed");
 
         assert_eq!(result.path, vec![1, 0, 0]);
     }

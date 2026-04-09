@@ -1,16 +1,12 @@
 # RSA Analysis Demo
 This demo shows homomorphic key switching as a viable method to retrieve up to 52% of the bits of an RSA message on average given a public modulus with private factorization and several homomorphically related keys with easier factorizations.
 
-Proof of concept by Nicholas LaRoche <nicholas.louis.laroche@outlook.com>.
+Proof of concept by Nicholas LaRoche <nlaroche@cryptifier.dev>.
 
 # Theory
 - Use regular RSA encryption using a large modulus N = pq where p and q are large private primes.
-- Use phi of phi(N) = (p-1)(q-1) to generate a public/private key pair (e, d) such that ed ≡ 1 (mod phi(N)).
-- Use the Tonelli-Shanks approach to increase the relation of the ciphertext mod N to the new ciphertext mod N^k for a small k = 3.
-- Use homomorphic base switching to go from mod N^k to mod R where R is an easily factored modulus with at least three factors (more than regular RSA).
-- Use the easy factorization of R to retrieve partial information about the original message by calculating a new d' such that ed' ≡ 1 (mod phi(R)).
-- For analysis, decryption is performed with the candidate modulus R and its d', not with N or the private exponent derived from N (those are only used for the baseline RSA round-trip check).
-- Compute the difference between each independent trial with random message and ciphertext using modulus R in a random oracle model to retrieve percentage of bits matching the original message via the ciphertext using modulus N.
+- Use homomorphic base switching to go from mod N to mod N^0.850 where N^0.850 is an easily factored modulus with at least three factors (more than regular RSA).
+- Use the easy factorization of R to retrieve partial information about the original message by calculating a new d' such that ed' ≡ 1 (mod phi(N^0.850)).
 - A bit-wise speculative decryption oracle is used to recover message bits.
 
 # Setup
@@ -18,6 +14,7 @@ Proof of concept by Nicholas LaRoche <nicholas.louis.laroche@outlook.com>.
 ```bash
 cargo build --bin analysis
 cargo build --bin demo
+cargo build --bin kgen
 cargo run --bin analysis | tee output.txt
 ```
 
@@ -32,10 +29,19 @@ cargo run --bin analysis -- --config config/rsa_config.json
 - `--seed <u64>`: Optional RNG seed for deterministic key generation.
 - `--crypto-rng`: Use cryptographic RNGs for sampling and candidate generation.
 - `-c, --config <PATH>`: JSON/JSON5 config path. Default `config/rsa_config.json`.
+- `--r-candidate-target-exponent <DECIMAL>`: Override the speculative retarget exponent used to build r candidates. Default `2.005`.
 - `--tests`: Run extended analysis tests and sufficiency checks.
 - `--export`: Export oracle entropy timeline charts and enciphered CSV artifacts.
 - `--session-json <PATH>`: Output analytics session JSON. Default `session.json`.
 - `--shift`: Multiply ciphertext by encrypted 2 before base conversion.
+- `--batches <u64>`: Number of r-candidate accuracy batches to run.
+- `--batch-size <u64>`: Number of ciphertext/message variants scored per batch before avalanche sampling.
+- `--avalanche-combination-samples <u64>`: Number of sampled combinations evaluated by avalanche per batch. Default `100`.
+- `--avalanche-combination-size <u64>`: Number of scored items taken in each sampled combination. Default `50`.
+- `--avalanche-combination-pool-size <u64>`: Legacy compatibility override recorded in session metadata; runtime sampling now uses the full batch-sized pool.
+- `--avalanche-combination-majority-vote <bool>`: Use per-bit majority-vote probabilities from each sampled combination. Default `true`.
+- `--avalanche-combination-sample-smoothing <bool>`: Apply Jeffreys smoothing to sampled majority-vote probabilities before beam search. Default `false`.
+- `--avalanche-combination-majority-vote-print <bool>`: Print a separate sampled-combination majority-vote summary for the selected sample. Default `true`.
 
 # Command Line (demo)
 ```bash
@@ -50,6 +56,26 @@ cargo run --bin demo -- --decrypt --ciphertext 0x1234
 - `--ciphertext <VALUE>`: Ciphertext override (decimal or hex). Falls back to `verify.ciphertext_hex` or `verify.ciphertext` in the config.
 - `--shift`: Multiply ciphertext by encrypted 2 before base conversion.
 - Demo runs require `rsa_keypair.generate = false` with `rsa_keypair.p` and `rsa_keypair.q` supplied.
+
+# Command Line (kgen)
+```bash
+cargo run --bin kgen
+cargo run --bin kgen -- --size-mode modulus --modulus-bits 144 --output config/keys/private_key.yaml
+```
+
+- `--size-mode <prime|modulus>`: Choose whether generation is driven by prime size or modulus size. Default `prime`.
+- `--prime-bits <u32>`: Prime bit length used in `prime` mode. Default `56` (range `16..=8192`).
+- `--modulus-bits <u32>`: Exact modulus bit length targeted in `modulus` mode. Default `144` (range `32..=16384`).
+- `-e, --public-exponent <u64>`: Starting public exponent candidate. Default `65537`; the first odd coprime exponent at or above it is used.
+- `-o, --output <PATH>`: YAML output path. Default `config/keys/private_key.yaml`.
+- `--force`: Overwrite an existing output file.
+- `--seed <u64>`: Optional deterministic RNG seed for reproducible key generation.
+- `--crypto-rng`: Use cryptographic RNGs instead of the standard seeded generator.
+
+# Private Key YAML
+- `kgen` writes RSA private keys as YAML under `config/keys`.
+- A non-secret example schema lives at `config/keys/private_key.example.yaml`.
+- The tracked repository ignores the default generated key path `config/keys/private_key.yaml`.
 
 # Configuration (config/rsa_config.json)
 Notes:
@@ -77,6 +103,17 @@ Notes:
 | `engine.oracle_screen_iterations` | u64 | `500` | Iterations for per-bit oracle screening. |
 | `engine.analysis_tests_window` | usize | `32` | Window size for analysis timelines. |
 | `engine.analysis_tests_stride` | usize | `8` | Window stride for analysis timelines. |
+| `engine.analysis_batch_enable` | bool | `false` | Enable batched r-candidate scoring plus avalanche sampling. |
+| `engine.analysis_batch_messages` | u64 | `1` | Number of ciphertext/message variants scored per batch before avalanche sampling. |
+| `engine.analysis_batch_candidates` | u64 | `0` | Number of r candidates scored in each batch. |
+| `engine.analysis_batch_batches` | u64 | `1` | Number of batch-analysis runs. |
+| `engine.avalanche_combination_samples` | u64 | `100` | Number of sampled combinations evaluated by avalanche per batch. |
+| `engine.avalanche_combination_size` | usize | `50` | Legacy compatibility field retained from the older scored-item sampler. |
+| `engine.avalanche_combination_mixed_r_candidates` | usize | `1` | Number of distinct `r` candidates mixed into each avalanche sample; each selected `r` contributes all of its scored `c^x` inputs. |
+| `engine.avalanche_combination_pool_size` | usize | `100` | Legacy compatibility field; runtime sampling now uses the full batch-sized pool. |
+| `engine.avalanche_combination_majority_vote` | bool | `true` | Use per-bit majority-vote probabilities from each sampled combination. |
+| `engine.avalanche_combination_sample_smoothing` | bool | `false` | Apply Jeffreys smoothing to sampled majority-vote probabilities before beam search. |
+| `engine.avalanche_combination_majority_vote_print` | bool | `true` | Print a separate sampled-combination majority-vote summary for the selected sample. |
 | `engine.process_min_count` | u64 | `25` | Minimum r candidates to process. |
 | `engine.process_count` | u64 | `25` | Target r candidates per batch. |
 | `engine.process_scale` | u32 | `12` | Scaling factor for candidate generation. |
@@ -87,6 +124,8 @@ Notes:
 | `engine.overlap_report_threshold` | number | `51` | Overlap % threshold for reporting. |
 | `engine.entropy_report_threshold` | number | `0.99` | Entropy threshold for sufficiency checks. |
 | `engine.oracle_accuracy_threshold` | number | `51.0` | Oracle accuracy threshold for sufficiency checks. |
+| `engine.beam_bit_one_threshold` | number | `0.4` | Minimum stored beam value interpreted as bit `1`. |
+| `engine.avalanche_probability_spread_exponent` | number | `0.5` | Power exponent applied to confidence around `0.5`; values below `1.0` sharpen confidence while preserving the original side of `0.5`, and values above `1.0` soften it. |
 | `engine.reuse_r_candidates` | bool | `true` | Reuse cached r candidates. |
 | `engine.reuse_r_candidates_path` | string | `data/r_candidates.csv` | Cache file path. |
 | `engine.reuse_r_candidates_append_only` | bool | `false` | Append-only reuse file behavior. |
@@ -95,6 +134,11 @@ Notes:
 | `engine.r_candidate_small_prime_factors` | usize | `3` | Number of small prime factors. |
 | `engine.r_candidate_max_factors` | usize | `6` | Maximum total factors per r candidate. |
 | `engine.r_candidate_bit_length` | u64 | `null` | Optional target bit length for r candidates. |
+| `engine.r_candidate_random_power_window` | bool | `false` | In factoring mode, sample candidate bounds from a random `N^a` window with `a` chosen in `[0.8, 0.9]` before uniqueness filtering. |
+| `engine.r_candidate_target_exponent_minimum` | number | `0.8` | Lower bound for the sampled total exponent used when retargeting speculative r candidates. |
+| `engine.r_candidate_target_exponent` | number | `2.005` | Upper bound for the sampled total exponent used when retargeting speculative r candidates. |
+| `engine.r_candidate_retarget_partition_count` | usize | `3` | Number of exponent partitions required for speculative retargeting. |
+| `engine.r_candidate_retarget_minimum_exponent` | number | `0.45` | Minimum exponent assigned to each retargeted partition when feasible. |
 | `engine.combiner_enable` | bool | `true` | Enable speculative combiner. |
 | `engine.combiner_k_oracles` | usize | `5` | Number of oracles to request. |
 | `engine.combiner_match_probability` | number | `0.75` | Target oracle match probability. |
@@ -115,6 +159,8 @@ Notes:
 | `engine.message.is_random` | bool | `true` | Use random message. |
 | `engine.message.bits` | u32 | `128` | Random message bit length. |
 | `engine.message.fixed_message` | string | `HeloWrld1234` | Fixed message when `is_random` is `false`. |
+
+For `config/rsa_config_small_batch.json`, sampled avalanche now draws every combination from the full scored batch-sized pool rather than truncating to a separate top-pool limit. `engine.avalanche_combination_mixed_r_candidates` controls how many distinct `r` candidates are allowed into a sampled avalanche input set, and each chosen `r` contributes all of its configured `c^x` message variants. When `engine.avalanche_combination_majority_vote` is enabled, which is the default, the beam probabilities come from per-bit majority-vote frequencies across each sampled combination. Enable `engine.avalanche_combination_sample_smoothing` or `--avalanche-combination-sample-smoothing true` to apply Jeffreys smoothing to those frequencies before beam search. `engine.avalanche_combination_majority_vote_print` controls the separate console summary for the sampled-combination majority vote and defaults to `true`.
 
 # Configuration (demo verification inputs)
 These optional keys are used by `demo` when `--ciphertext` is not provided.
