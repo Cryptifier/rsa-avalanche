@@ -93,6 +93,22 @@ fn log_progress_every_ten_percent(done: u64, total: u64, next_pct: &mut u64, lab
     }
 }
 
+/// Builds the per-level progress label used during avalanche reduction.
+///
+/// # Parameters
+/// - `base_label`: Human-readable label for the overall reduction.
+/// - `level_index`: One-based reduction level currently being processed.
+/// - `total_levels`: Total number of reduction levels expected.
+///
+/// # Returns
+/// - `String`: Progress label that names the current reduction level.
+///
+/// # Expected Output
+/// - Returns a formatted label string; no stdout/stderr output.
+fn avalanche_level_progress_label(base_label: &str, level_index: u64, total_levels: u64) -> String {
+    format!("{base_label} level {level_index}/{total_levels}")
+}
+
 /// Sorts candidates by Hamming distance to the reference bits.
 ///
 /// # Parameters
@@ -267,16 +283,20 @@ fn search_avalanche_tree_internal(
     }
 
     let total_levels = avalanche_reduction_level_count(candidates.len());
-    let mut next_pct = 10u64;
     let mut completed_levels = 0u64;
     let mut current = candidates;
 
     while current.len() > 1 {
-        current = build_next_level(&current, bit_width)?;
+        current = if let Some(label) = progress_label {
+            build_next_level_with_progress(
+                &current,
+                bit_width,
+                &avalanche_level_progress_label(label, completed_levels + 1, total_levels),
+            )?
+        } else {
+            build_next_level(&current, bit_width)?
+        };
         completed_levels += 1;
-        if let Some(label) = progress_label {
-            log_progress_every_ten_percent(completed_levels, total_levels, &mut next_pct, label);
-        }
     }
 
     let node = current
@@ -318,7 +338,6 @@ fn search_avalanche_tree_with_scores_internal(
     }
 
     let total_levels = avalanche_reduction_level_count(candidates.len());
-    let mut next_pct = 10u64;
     let mut completed_levels = 0u64;
     let mut current = candidates;
     let mut level_similarity_pct = Vec::new();
@@ -326,16 +345,21 @@ fn search_avalanche_tree_with_scores_internal(
 
     while current.len() > 1 {
         let (next, level_match_weight, level_weight, pair_count) =
-            build_next_level_with_similarity(&current, bit_width)?;
+            if let Some(label) = progress_label {
+                build_next_level_with_similarity_progress(
+                    &current,
+                    bit_width,
+                    &avalanche_level_progress_label(label, completed_levels + 1, total_levels),
+                )?
+            } else {
+                build_next_level_with_similarity(&current, bit_width)?
+            };
         if level_weight > 0.0 {
             level_similarity_pct.push(level_match_weight / level_weight * 100.0);
             level_pair_counts.push(pair_count);
         }
         current = next;
         completed_levels += 1;
-        if let Some(label) = progress_label {
-            log_progress_every_ten_percent(completed_levels, total_levels, &mut next_pct, label);
-        }
     }
 
     let node = current
@@ -402,10 +426,55 @@ fn build_next_level(
     candidates: &[AvalancheNode],
     bit_width: usize,
 ) -> Result<Vec<AvalancheNode>, AvalancheError> {
+    build_next_level_internal(candidates, bit_width, None)
+}
+
+/// Builds the next avalanche level and prints progress while scanning the current level.
+///
+/// # Parameters
+/// - `candidates`: Current level of avalanche nodes.
+/// - `bit_width`: Expected bit width for all nodes.
+/// - `progress_label`: Human-readable label for progress reporting.
+///
+/// # Returns
+/// - `Result<Vec<AvalancheNode>, AvalancheError>`: Next-level candidates.
+///
+/// # Expected Output
+/// - Prints progress updates to stdout and returns a reduced candidate list.
+fn build_next_level_with_progress(
+    candidates: &[AvalancheNode],
+    bit_width: usize,
+    progress_label: &str,
+) -> Result<Vec<AvalancheNode>, AvalancheError> {
+    build_next_level_internal(candidates, bit_width, Some(progress_label))
+}
+
+/// Builds the next avalanche level while optionally printing scan progress.
+///
+/// # Parameters
+/// - `candidates`: Current level of avalanche nodes.
+/// - `bit_width`: Expected bit width for all nodes.
+/// - `progress_label`: Optional human-readable label for progress reporting.
+///
+/// # Returns
+/// - `Result<Vec<AvalancheNode>, AvalancheError>`: Next-level candidates.
+///
+/// # Expected Output
+/// - Optionally prints progress updates to stdout and returns a reduced candidate list.
+fn build_next_level_internal(
+    candidates: &[AvalancheNode],
+    bit_width: usize,
+    progress_label: Option<&str>,
+) -> Result<Vec<AvalancheNode>, AvalancheError> {
     let mut next = Vec::with_capacity((candidates.len() + 1) / 2);
     let mut used = vec![false; candidates.len()];
+    let mut next_pct = 10u64;
+    let total = candidates.len() as u64;
     for idx in 0..candidates.len() {
         if used[idx] {
+            if let Some(label) = progress_label {
+                log_progress_every_ten_percent((idx + 1) as u64, total, &mut next_pct, label);
+            }
             continue;
         }
         let best_partner = (idx + 1..candidates.len())
@@ -435,6 +504,9 @@ fn build_next_level(
             used[idx] = true;
             next.push(candidates[idx].clone());
         }
+        if let Some(label) = progress_label {
+            log_progress_every_ten_percent((idx + 1) as u64, total, &mut next_pct, label);
+        }
     }
     Ok(next)
 }
@@ -454,14 +526,59 @@ fn build_next_level_with_similarity(
     candidates: &[AvalancheNode],
     bit_width: usize,
 ) -> Result<(Vec<AvalancheNode>, f64, f64, usize), AvalancheError> {
+    build_next_level_with_similarity_internal(candidates, bit_width, None)
+}
+
+/// Builds the next avalanche level with similarity totals and prints scan progress.
+///
+/// # Parameters
+/// - `candidates`: Current level of avalanche nodes.
+/// - `bit_width`: Expected bit width for all nodes.
+/// - `progress_label`: Human-readable label for progress reporting.
+///
+/// # Returns
+/// - `Result<(Vec<AvalancheNode>, f64, f64, usize), AvalancheError>`: Next-level nodes, match-weight sum, weight sum, and pair count.
+///
+/// # Expected Output
+/// - Prints progress updates to stdout and returns reduced candidates plus similarity totals.
+fn build_next_level_with_similarity_progress(
+    candidates: &[AvalancheNode],
+    bit_width: usize,
+    progress_label: &str,
+) -> Result<(Vec<AvalancheNode>, f64, f64, usize), AvalancheError> {
+    build_next_level_with_similarity_internal(candidates, bit_width, Some(progress_label))
+}
+
+/// Builds the next avalanche level with similarity totals while optionally printing scan progress.
+///
+/// # Parameters
+/// - `candidates`: Current level of avalanche nodes.
+/// - `bit_width`: Expected bit width for all nodes.
+/// - `progress_label`: Optional human-readable label for progress reporting.
+///
+/// # Returns
+/// - `Result<(Vec<AvalancheNode>, f64, f64, usize), AvalancheError>`: Next-level nodes, match-weight sum, weight sum, and pair count.
+///
+/// # Expected Output
+/// - Optionally prints progress updates to stdout and returns reduced candidates plus similarity totals.
+fn build_next_level_with_similarity_internal(
+    candidates: &[AvalancheNode],
+    bit_width: usize,
+    progress_label: Option<&str>,
+) -> Result<(Vec<AvalancheNode>, f64, f64, usize), AvalancheError> {
     let mut next = Vec::with_capacity((candidates.len() + 1) / 2);
     let mut used = vec![false; candidates.len()];
     let mut match_weight_sum = 0.0f64;
     let mut weight_sum = 0.0f64;
     let mut pair_count = 0usize;
+    let mut next_pct = 10u64;
+    let total = candidates.len() as u64;
 
     for idx in 0..candidates.len() {
         if used[idx] {
+            if let Some(label) = progress_label {
+                log_progress_every_ten_percent((idx + 1) as u64, total, &mut next_pct, label);
+            }
             continue;
         }
         let best_partner = (idx + 1..candidates.len())
@@ -495,6 +612,9 @@ fn build_next_level_with_similarity(
         } else {
             used[idx] = true;
             next.push(candidates[idx].clone());
+        }
+        if let Some(label) = progress_label {
+            log_progress_every_ten_percent((idx + 1) as u64, total, &mut next_pct, label);
         }
     }
 

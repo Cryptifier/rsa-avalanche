@@ -652,6 +652,23 @@ pub fn generate_r_candidates_with_analytics(
 ) -> Vec<RCandidate> {
     let start = std::time::Instant::now();
     let mut candidates = generate_r_candidates_batch(n, settings, rng, batch_size);
+    if settings.reuse_r_candidates
+        && settings.retarget_partition_count > 0
+        && !candidates.is_empty()
+        && candidates.len() < batch_size
+    {
+        let source_count = candidates.len();
+        candidates = candidates
+            .iter()
+            .cloned()
+            .cycle()
+            .take(batch_size)
+            .collect();
+        println!(
+            "Expanded {} reused r candidates to {} retarget inputs before retargeting",
+            source_count, batch_size
+        );
+    }
     retarget_r_candidates_for_speculative_oracles(
         n,
         &mut candidates,

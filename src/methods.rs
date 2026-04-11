@@ -3373,16 +3373,25 @@ fn run_information_sufficiency_tests(
         selected_candidate,
         bits_decrypt,
     )?;
-    run_avalanche_search(
-        ctx,
-        engine,
-        &candidates,
-        message,
-        batch_size,
-        shift,
-        analytics,
-        bits_decrypt,
-    )?;
+    if !engine.analysis_batch_enable {
+        run_avalanche_search(
+            ctx,
+            engine,
+            &candidates,
+            message,
+            batch_size,
+            shift,
+            analytics,
+            bits_decrypt,
+        )?;
+    } else {
+        with_analytics(analytics, |a| {
+            a.add_feature_note(
+                "information_sufficiency",
+                "standalone avalanche search skipped because sampled batch avalanche is enabled",
+            );
+        });
+    }
 
     println!(
         "Bitwise speculative oracle recovered (hex): {}",
@@ -5391,7 +5400,7 @@ fn run_r_candidate_accuracy_batches(
         }
     );
     let settings = build_r_candidate_settings(engine);
-    let mut candidates = generate_r_candidates_with_analytics(
+    let candidates = generate_r_candidates_with_analytics(
         "analysis_batch_accuracy",
         &ctx.n,
         &settings,
@@ -5405,20 +5414,20 @@ fn run_r_candidate_accuracy_batches(
 
     let y = engine.rabin_exponent as u32;
     let e_big = ctx.e.clone();
-    let mut prepared = Vec::with_capacity(candidates.len());
-    for candidate in candidates.drain(..) {
-        let phi_new = compute_totient(&candidate.factors);
-        let Some(d_new) = mod_inverse(&e_big, &phi_new) else {
-            continue;
-        };
-        prepared.push(AccuracyCandidate {
-            r: candidate.r,
-            factors: candidate.factors,
-            phi_new,
-            d_new,
-            target_exponent: candidate.target_exponent,
-        });
-    }
+    let prepared = candidates
+        .into_par_iter()
+        .filter_map(|candidate| {
+            let phi_new = compute_totient(&candidate.factors);
+            let d_new = mod_inverse(&e_big, &phi_new)?;
+            Some(AccuracyCandidate {
+                r: candidate.r,
+                factors: candidate.factors,
+                phi_new,
+                d_new,
+                target_exponent: candidate.target_exponent,
+            })
+        })
+        .collect::<Vec<_>>();
 
     if prepared.len() < total_candidates {
         return Err(format!(

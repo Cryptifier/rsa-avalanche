@@ -892,29 +892,45 @@ pub fn retarget_r_candidates_for_speculative_oracles(
         return;
     }
 
-    for candidate in candidates {
-        let sampled_target_exponent =
-            sample_retarget_total_exponent(minimum_target_exponent, target_exponent, rng);
-        let parts = random_bigdecimal_partition_with_min(
-            &sampled_target_exponent,
-            partition_count,
-            minimum_component_exponent,
-            rng,
-        );
-        if parts.is_empty() {
+    let rng_mode = rng.mode();
+    let candidate_seeds: Vec<u64> = (0..candidates.len()).map(|_| rng.next_u64()).collect();
+    let updates: Vec<Option<(BigUint, Vec<(BigUint, u64)>, BigDecimal)>> = candidate_seeds
+        .into_par_iter()
+        .map(|seed| {
+            let mut local_rng = RngChoice::from_seed(rng_mode, seed);
+            let sampled_target_exponent = sample_retarget_total_exponent(
+                minimum_target_exponent,
+                target_exponent,
+                &mut local_rng,
+            );
+            let parts = random_bigdecimal_partition_with_min(
+                &sampled_target_exponent,
+                partition_count,
+                minimum_component_exponent,
+                &mut local_rng,
+            );
+            if parts.is_empty() {
+                return None;
+            }
+
+            let mut factors = Vec::with_capacity(parts.len());
+            for part in parts {
+                let prime = next_prime_from_biguint_pow_bigdecimal(n, &part);
+                factors.push((prime, 1));
+            }
+            let factors = coalesce_factors(factors);
+            let r = factors
+                .iter()
+                .fold(BigUint::one(), |acc, (p, e)| acc * p.pow(*e as u32));
+
+            Some((r, factors, sampled_target_exponent))
+        })
+        .collect();
+
+    for (candidate, update) in candidates.iter_mut().zip(updates) {
+        let Some((r, factors, sampled_target_exponent)) = update else {
             continue;
-        }
-
-        let mut factors = Vec::with_capacity(parts.len());
-        for part in parts {
-            let prime = next_prime_from_biguint_pow_bigdecimal(n, &part);
-            factors.push((prime, 1));
-        }
-        let factors = coalesce_factors(factors);
-        let r = factors
-            .iter()
-            .fold(BigUint::one(), |acc, (p, e)| acc * p.pow(*e as u32));
-
+        };
         candidate.r = r;
         candidate.factors = factors;
         candidate.target_exponent = sampled_target_exponent;
