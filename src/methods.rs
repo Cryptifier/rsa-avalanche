@@ -47,8 +47,8 @@ use crate::combiner::majority_vote_with_distribution;
 use crate::config::{Config, EngineConfig};
 use crate::dsp::{find_ramp_signals_f64, ramp_signal_strength_f64};
 use crate::helpers::{
-    format_beam_float, normalize_avalanche_biases, spread_normalized_avalanche_biases,
-    stored_beam_value_is_one,
+    format_beam_float, matching_bit_counts_bytes_le, normalize_avalanche_biases,
+    spread_normalized_avalanche_biases, stored_beam_value_is_one,
 };
 use crate::math::{
     bit_length, choose_exponent, compute_totient, factor_composite_with_timeout,
@@ -1436,23 +1436,9 @@ fn count_matching_bits_le(a: &[bool], b: &[bool]) -> (usize, usize) {
         return (0, 0);
     }
 
-    let mut matching_total = 0usize;
-    for i in 0..min_len {
-        if a[i] == b[i] {
-            matching_total += 1;
-        }
-    }
-
-    let mut matching_lsb = 0usize;
-    for i in 0..min_len {
-        if a[i] == b[i] {
-            matching_lsb += 1;
-        } else {
-            break;
-        }
-    }
-
-    (matching_lsb, matching_total)
+    let packed_a = pack_bits_to_bytes_le(&a[..min_len]);
+    let packed_b = pack_bits_to_bytes_le(&b[..min_len]);
+    matching_bit_counts_bytes_le(&packed_a, &packed_b, min_len)
 }
 
 /// Builds speculative oracle bit vectors using `r` candidates and HBC transforms.
@@ -4582,29 +4568,34 @@ fn run_r_stress_entry(
 /// - `(usize, usize)`: `(matching_lsb_run, matching_total)` counts.
 ///
 /// # Expected Output
-/// - Returns counts based on binary string comparisons; no side effects.
+/// - Returns counts based on little-endian byte comparisons; no side effects.
 fn count_matching_bits(a: &BigUint, b: &BigUint) -> (usize, usize) {
-    let a_bits = a.to_str_radix(2);
-    let b_bits = b.to_str_radix(2);
-    let min_len = a_bits.len().min(b_bits.len());
+    let a_bit_len = a.bits().max(1) as usize;
+    let b_bit_len = b.bits().max(1) as usize;
+    let min_len = a_bit_len.min(b_bit_len);
+    let a_bytes = a.to_bytes_le();
+    let b_bytes = b.to_bytes_le();
+    matching_bit_counts_bytes_le(&a_bytes, &b_bytes, min_len)
+}
 
-    let mut matching_total = 0usize;
-    for i in 0..min_len {
-        if a_bits.as_bytes()[a_bits.len() - 1 - i] == b_bits.as_bytes()[b_bits.len() - 1 - i] {
-            matching_total += 1;
+/// Packs a bit slice into bytes in little-endian order.
+///
+/// # Parameters
+/// - `bits`: Bit slice with LSB at index `0`.
+///
+/// # Returns
+/// - `Vec<u8>`: Packed bytes with one bit per source boolean.
+///
+/// # Expected Output
+/// - Returns packed storage; no stdout/stderr output.
+fn pack_bits_to_bytes_le(bits: &[bool]) -> Vec<u8> {
+    let mut packed = vec![0u8; bits.len().div_ceil(8)];
+    for (index, bit) in bits.iter().enumerate() {
+        if *bit {
+            packed[index / 8] |= 1u8 << (index % 8);
         }
     }
-
-    let mut matching_lsb = 0usize;
-    for i in 0..min_len {
-        if a_bits.as_bytes()[a_bits.len() - 1 - i] == b_bits.as_bytes()[b_bits.len() - 1 - i] {
-            matching_lsb += 1;
-        } else {
-            break;
-        }
-    }
-
-    (matching_lsb, matching_total)
+    packed
 }
 
 /// Computes a derived value used in homomorphic base conversion flows.
@@ -6178,6 +6169,27 @@ mod tests {
                 .iter()
                 .all(|variant| mod_inverse(&variant.e_x, &candidate_phi).is_some())
         );
+    }
+
+    #[test]
+    fn test_count_matching_bits_handles_zero_width_mismatch_without_strings() {
+        let left = BigUint::zero();
+        let right = BigUint::from(8u8);
+        assert_eq!(count_matching_bits(&left, &right), (1, 1));
+    }
+
+    #[test]
+    fn test_count_matching_bits_counts_total_and_lsb_run() {
+        let left = BigUint::from(0b1111_0000u8);
+        let right = BigUint::from(0b1110_0000u8);
+        assert_eq!(count_matching_bits(&left, &right), (4, 7));
+    }
+
+    #[test]
+    fn test_count_matching_bits_le_uses_packed_comparison() {
+        let left = [true, false, true, true, false, false, true, false];
+        let right = [true, false, false, true, true, false, true, false];
+        assert_eq!(count_matching_bits_le(&left, &right), (2, 6));
     }
 
     #[test]

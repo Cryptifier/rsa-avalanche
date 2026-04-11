@@ -38,6 +38,78 @@ pub fn hamming_distance_bits(left: &[bool], right: &[bool]) -> usize {
         .count()
 }
 
+/// Counts matching bits across packed little-endian byte slices.
+///
+/// # Parameters
+/// - `left`: First packed byte slice with least-significant byte first.
+/// - `right`: Second packed byte slice with least-significant byte first.
+/// - `bit_len`: Number of low-order bits to compare.
+///
+/// # Returns
+/// - `(usize, usize)`: `(matching_lsb_run, matching_total)` counts.
+///
+/// # Expected Output
+/// - Returns packed-byte match counts; no stdout/stderr output.
+pub(crate) fn matching_bit_counts_bytes_le(
+    left: &[u8],
+    right: &[u8],
+    bit_len: usize,
+) -> (usize, usize) {
+    if bit_len == 0 {
+        return (0, 0);
+    }
+
+    let byte_len = bit_len.div_ceil(8);
+    let tail_bits = bit_len % 8;
+    let tail_mask = if tail_bits == 0 {
+        u8::MAX
+    } else {
+        ((1u16 << tail_bits) - 1) as u8
+    };
+    let mut xor_bytes = vec![0u8; byte_len];
+
+    for byte_idx in 0..byte_len {
+        let left_byte = left.get(byte_idx).copied().unwrap_or(0);
+        let right_byte = right.get(byte_idx).copied().unwrap_or(0);
+        let mask = if byte_idx + 1 == byte_len {
+            tail_mask
+        } else {
+            u8::MAX
+        };
+        xor_bytes[byte_idx] = (left_byte ^ right_byte) & mask;
+    }
+
+    let differing = xor_bytes
+        .iter()
+        .map(|byte| byte.count_ones() as usize)
+        .sum::<usize>();
+    let matching_total = bit_len.saturating_sub(differing);
+
+    let mut matching_lsb = 0usize;
+    for (byte_idx, diff) in xor_bytes.iter().enumerate() {
+        if *diff == 0 {
+            let full_bits = if byte_idx + 1 == byte_len {
+                if tail_bits == 0 { 8 } else { tail_bits }
+            } else {
+                8
+            };
+            matching_lsb += full_bits;
+            continue;
+        }
+
+        let first_diff = diff.trailing_zeros() as usize;
+        let byte_limit = if byte_idx + 1 == byte_len {
+            if tail_bits == 0 { 8 } else { tail_bits }
+        } else {
+            8
+        };
+        matching_lsb += first_diff.min(byte_limit);
+        break;
+    }
+
+    (matching_lsb.min(bit_len), matching_total)
+}
+
 /// Computes the Hamming distance through an accelerated packed path when enabled.
 ///
 /// # Parameters
@@ -396,7 +468,8 @@ pub fn format_beam_float(value: f64, precision: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        hamming_distance_bits, spread_normalized_avalanche_biases, stored_beam_value_is_one,
+        hamming_distance_bits, matching_bit_counts_bytes_le, spread_normalized_avalanche_biases,
+        stored_beam_value_is_one,
     };
 
     #[test]
@@ -436,6 +509,20 @@ mod tests {
         assert!(!stored_beam_value_is_one(0.39, 0.4));
         assert!(stored_beam_value_is_one(0.4, 0.4));
         assert!(stored_beam_value_is_one(1.0, 0.4));
+    }
+
+    #[test]
+    fn matching_bit_counts_bytes_handles_partial_tail_bits() {
+        let left = [0b1011_0101u8, 0b0000_0011u8];
+        let right = [0b1011_0001u8, 0b0000_0010u8];
+        assert_eq!(matching_bit_counts_bytes_le(&left, &right, 10), (2, 8));
+    }
+
+    #[test]
+    fn matching_bit_counts_bytes_treats_missing_high_bytes_as_zero() {
+        let left = [0u8];
+        let right = [0b0000_1000u8];
+        assert_eq!(matching_bit_counts_bytes_le(&left, &right, 4), (3, 3));
     }
 
     #[cfg(any(
