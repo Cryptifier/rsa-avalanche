@@ -84,10 +84,6 @@ pub struct EngineConfig {
     pub process_min_factor: u64,
     #[serde(default = "default_use_rs_decrypt")]
     pub use_rs_decrypt: bool,
-    #[serde(default = "default_test_iterations")]
-    pub test_iterations: u64,
-    #[serde(default = "default_alt_iterations")]
-    pub alt_iterations: u64,
     #[serde(default = "default_analysis_tests_iterations")]
     pub analysis_tests_iterations: u64,
     #[serde(default = "default_oracle_screen_iterations")]
@@ -149,16 +145,6 @@ pub struct EngineConfig {
     /// Whether to mirror avalanche candidates with bitwise-inverted copies before ordering.
     #[serde(default = "default_mirror_invert_candidates")]
     pub mirror_invert_candidates: bool,
-    #[serde(default = "default_r_use_list_enable")]
-    pub r_use_list_enable: bool,
-    #[serde(default)]
-    pub r_use_list: Vec<String>,
-    #[serde(default = "default_r_stress_test_enable")]
-    pub r_stress_test_enable: bool,
-    #[serde(default, deserialize_with = "deserialize_biguint_option")]
-    pub r_stress_start: Option<BigUint>,
-    #[serde(default, deserialize_with = "deserialize_biguint_option")]
-    pub r_stress_end: Option<BigUint>,
     #[serde(default)]
     pub override_best_r: Option<String>,
     #[serde(default = "default_reuse_r_candidates_path")]
@@ -201,36 +187,12 @@ pub struct EngineConfig {
         deserialize_with = "deserialize_bigdecimal"
     )]
     pub r_candidate_retarget_minimum_exponent: BigDecimal,
-    #[serde(default = "default_combiner_enable")]
-    pub combiner_enable: bool,
     #[serde(default = "default_combiner_k_oracles")]
     pub combiner_k_oracles: usize,
-    #[serde(default = "default_combiner_match_probability")]
-    pub combiner_match_probability: f64,
     #[serde(default = "default_combiner_tie_breaker")]
     pub combiner_tie_breaker: bool,
     #[serde(default)]
     pub message: MessageConfig,
-    #[serde(default = "default_enciphered_export_enable")]
-    pub enciphered_export_enable: bool,
-    #[serde(default = "default_enciphered_export_iterations")]
-    pub enciphered_export_iterations: u64,
-    #[serde(default = "default_enciphered_export_bins")]
-    pub enciphered_export_bins: usize,
-    #[serde(default = "default_enciphered_export_window")]
-    pub enciphered_export_window: usize,
-    #[serde(default = "default_enciphered_export_stride")]
-    pub enciphered_export_stride: usize,
-    #[serde(default = "default_enciphered_export_output_csv")]
-    pub enciphered_export_output_csv: String,
-    #[serde(default = "default_enciphered_export_ramp_length")]
-    pub enciphered_export_ramp_length: usize,
-    #[serde(default = "default_enciphered_export_ramp_step_pct")]
-    pub enciphered_export_ramp_step_pct: f64,
-    #[serde(default = "default_enciphered_export_ramp_tolerances")]
-    pub enciphered_export_ramp_tolerances: Vec<f64>,
-    #[serde(default = "default_enciphered_export_ramp_csv")]
-    pub enciphered_export_ramp_csv: String,
 }
 
 /// Polynomial field configuration for coordinate generation.
@@ -300,8 +262,6 @@ impl Default for EngineConfig {
             process_max_best_attempts: default_process_max_best_attempts(),
             process_min_factor: default_process_min_factor(),
             use_rs_decrypt: default_use_rs_decrypt(),
-            test_iterations: default_test_iterations(),
-            alt_iterations: default_alt_iterations(),
             analysis_tests_iterations: default_analysis_tests_iterations(),
             oracle_screen_iterations: default_oracle_screen_iterations(),
             analysis_tests_window: default_analysis_tests_window(),
@@ -329,11 +289,6 @@ impl Default for EngineConfig {
             avalanche_probability_spread_exponent: default_avalanche_probability_spread_exponent(),
             use_hamming_distance: default_use_hamming_distance(),
             mirror_invert_candidates: default_mirror_invert_candidates(),
-            r_use_list_enable: default_r_use_list_enable(),
-            r_use_list: Vec::new(),
-            r_stress_test_enable: default_r_stress_test_enable(),
-            r_stress_start: None,
-            r_stress_end: None,
             override_best_r: None,
             reuse_r_candidates_path: default_reuse_r_candidates_path(),
             reuse_r_candidates: default_reuse_r_candidates(),
@@ -348,21 +303,9 @@ impl Default for EngineConfig {
             r_candidate_target_exponent: default_r_candidate_target_exponent(),
             r_candidate_retarget_partition_count: default_r_candidate_retarget_partition_count(),
             r_candidate_retarget_minimum_exponent: default_r_candidate_retarget_minimum_exponent(),
-            combiner_enable: default_combiner_enable(),
             combiner_k_oracles: default_combiner_k_oracles(),
-            combiner_match_probability: default_combiner_match_probability(),
             combiner_tie_breaker: default_combiner_tie_breaker(),
             message: MessageConfig::default(),
-            enciphered_export_enable: default_enciphered_export_enable(),
-            enciphered_export_iterations: default_enciphered_export_iterations(),
-            enciphered_export_bins: default_enciphered_export_bins(),
-            enciphered_export_window: default_enciphered_export_window(),
-            enciphered_export_stride: default_enciphered_export_stride(),
-            enciphered_export_output_csv: default_enciphered_export_output_csv(),
-            enciphered_export_ramp_length: default_enciphered_export_ramp_length(),
-            enciphered_export_ramp_step_pct: default_enciphered_export_ramp_step_pct(),
-            enciphered_export_ramp_tolerances: default_enciphered_export_ramp_tolerances(),
-            enciphered_export_ramp_csv: default_enciphered_export_ramp_csv(),
         }
     }
 }
@@ -730,34 +673,6 @@ fn default_use_rs_decrypt() -> bool {
     true
 }
 
-/// Default number of test iterations.
-///
-/// # Parameters
-/// - None.
-///
-/// # Returns
-/// - `u64`: Default test iteration count.
-///
-/// # Expected Output
-/// - Returns a constant default value; no side effects.
-fn default_test_iterations() -> u64 {
-    1
-}
-
-/// Default number of alternate iterations for fixed r testing.
-///
-/// # Parameters
-/// - None.
-///
-/// # Returns
-/// - `u64`: Default alternate iteration count.
-///
-/// # Expected Output
-/// - Returns a constant default value; no side effects.
-fn default_alt_iterations() -> u64 {
-    0
-}
-
 /// Default number of timeline iterations for analysis tests.
 ///
 /// # Parameters
@@ -1094,34 +1009,6 @@ fn default_mirror_invert_candidates() -> bool {
     false
 }
 
-/// Default flag for r_use_list stress tests.
-///
-/// # Parameters
-/// - None.
-///
-/// # Returns
-/// - `bool`: Default enable setting.
-///
-/// # Expected Output
-/// - Returns a constant default value; no side effects.
-fn default_r_use_list_enable() -> bool {
-    false
-}
-
-/// Default flag for r_stress range testing.
-///
-/// # Parameters
-/// - None.
-///
-/// # Returns
-/// - `bool`: Default enable setting.
-///
-/// # Expected Output
-/// - Returns a constant default value; no side effects.
-fn default_r_stress_test_enable() -> bool {
-    false
-}
-
 /// Default flag for reusing previously generated r candidates.
 ///
 /// # Parameters
@@ -1291,20 +1178,6 @@ fn default_r_candidate_retarget_minimum_exponent() -> BigDecimal {
         .expect("valid default r candidate retarget minimum exponent")
 }
 
-/// Default flag for enabling the combiner experiment.
-///
-/// # Parameters
-/// - None.
-///
-/// # Returns
-/// - `bool`: Default enable setting.
-///
-/// # Expected Output
-/// - Returns a constant default value; no side effects.
-fn default_combiner_enable() -> bool {
-    false
-}
-
 /// Default number of oracles for the combiner experiment.
 ///
 /// # Parameters
@@ -1319,20 +1192,6 @@ fn default_combiner_k_oracles() -> usize {
     5
 }
 
-/// Default match probability for oracle sampling.
-///
-/// # Parameters
-/// - None.
-///
-/// # Returns
-/// - `f64`: Default match probability.
-///
-/// # Expected Output
-/// - Returns a constant default value; no side effects.
-fn default_combiner_match_probability() -> f64 {
-    0.75
-}
-
 /// Default tie-breaker bit for combiner voting.
 ///
 /// # Parameters
@@ -1345,144 +1204,4 @@ fn default_combiner_match_probability() -> f64 {
 /// - Returns a constant default value; no side effects.
 fn default_combiner_tie_breaker() -> bool {
     true
-}
-
-/// Default flag for enciphered export generation.
-///
-/// # Parameters
-/// - None.
-///
-/// # Returns
-/// - `bool`: Default enable setting.
-///
-/// # Expected Output
-/// - Returns a constant default value; no side effects.
-fn default_enciphered_export_enable() -> bool {
-    false
-}
-
-/// Default number of enciphered export iterations.
-///
-/// # Parameters
-/// - None.
-///
-/// # Returns
-/// - `u64`: Default iteration count.
-///
-/// # Expected Output
-/// - Returns a constant default value; no side effects.
-fn default_enciphered_export_iterations() -> u64 {
-    10_000
-}
-
-/// Default number of bins for enciphered export histograms.
-///
-/// # Parameters
-/// - None.
-///
-/// # Returns
-/// - `usize`: Default bin count.
-///
-/// # Expected Output
-/// - Returns a constant default value; no side effects.
-fn default_enciphered_export_bins() -> usize {
-    128
-}
-
-/// Default window size for enciphered export frames.
-///
-/// # Parameters
-/// - None.
-///
-/// # Returns
-/// - `usize`: Default window size.
-///
-/// # Expected Output
-/// - Returns a constant default value; no side effects.
-fn default_enciphered_export_window() -> usize {
-    512
-}
-
-/// Default stride between enciphered export frames.
-///
-/// # Parameters
-/// - None.
-///
-/// # Returns
-/// - `usize`: Default stride.
-///
-/// # Expected Output
-/// - Returns a constant default value; no side effects.
-fn default_enciphered_export_stride() -> usize {
-    64
-}
-
-/// Default output CSV path for enciphered export.
-///
-/// # Parameters
-/// - None.
-///
-/// # Returns
-/// - `String`: Default CSV path.
-///
-/// # Expected Output
-/// - Returns a constant default value; no side effects.
-fn default_enciphered_export_output_csv() -> String {
-    "enciphered_decryption_bins.csv".to_string()
-}
-
-/// Default ramp length for ramp detection in enciphered export.
-///
-/// # Parameters
-/// - None.
-///
-/// # Returns
-/// - `usize`: Default ramp length.
-///
-/// # Expected Output
-/// - Returns a constant default value; no side effects.
-fn default_enciphered_export_ramp_length() -> usize {
-    3
-}
-
-/// Default ramp step percentage for ramp detection.
-///
-/// # Parameters
-/// - None.
-///
-/// # Returns
-/// - `f64`: Default ramp step percentage.
-///
-/// # Expected Output
-/// - Returns a constant default value; no side effects.
-fn default_enciphered_export_ramp_step_pct() -> f64 {
-    0.05
-}
-
-/// Default list of tolerances for ramp detection.
-///
-/// # Parameters
-/// - None.
-///
-/// # Returns
-/// - `Vec<f64>`: Default tolerance values.
-///
-/// # Expected Output
-/// - Returns a constant default value; no side effects.
-fn default_enciphered_export_ramp_tolerances() -> Vec<f64> {
-    vec![0.005, 0.01, 0.02]
-}
-
-/// Default output CSV path for ramp detection results.
-///
-/// # Parameters
-/// - None.
-///
-/// # Returns
-/// - `String`: Default CSV path.
-///
-/// # Expected Output
-/// - Returns a constant default value; no side effects.
-fn default_enciphered_export_ramp_csv() -> String {
-    "enciphered_ramps.csv".to_string()
 }
