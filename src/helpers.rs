@@ -1,5 +1,12 @@
 #[cfg(all(feature = "aarch64-hamming-accel", target_arch = "aarch64"))]
 use core::arch::aarch64::{vaddvq_u8, vcntq_u8, veorq_u8, vld1q_u8};
+#[cfg(all(feature = "x86-hamming-accel", target_arch = "x86_64"))]
+use core::arch::x86_64::{
+    __m256i, __m512i, _mm256_add_epi8, _mm256_and_si256, _mm256_loadu_si256, _mm256_sad_epu8,
+    _mm256_set1_epi8, _mm256_setr_epi8, _mm256_setzero_si256, _mm256_shuffle_epi8,
+    _mm256_srli_epi16, _mm256_storeu_si256, _mm256_xor_si256, _mm512_loadu_si512,
+    _mm512_popcnt_epi8, _mm512_popcnt_epi64, _mm512_storeu_si512, _mm512_xor_si512,
+};
 
 /// Computes the Hamming distance between two bit slices.
 ///
@@ -18,11 +25,10 @@ pub fn hamming_distance_bits(left: &[bool], right: &[bool]) -> usize {
         return 0;
     }
 
-    #[cfg(all(feature = "aarch64-hamming-accel", target_arch = "aarch64"))]
+    if let Some(distance) =
+        hamming_distance_bits_accelerated(&left[..shared_len], &right[..shared_len])
     {
-        let packed_left = pack_bits_to_bytes(&left[..shared_len]);
-        let packed_right = pack_bits_to_bytes(&right[..shared_len]);
-        return hamming_distance_packed_bytes(&packed_left, &packed_right);
+        return distance;
     }
 
     left[..shared_len]
@@ -30,6 +36,46 @@ pub fn hamming_distance_bits(left: &[bool], right: &[bool]) -> usize {
         .zip(right[..shared_len].iter())
         .filter(|(a, b)| a != b)
         .count()
+}
+
+/// Computes the Hamming distance through an accelerated packed path when enabled.
+///
+/// # Parameters
+/// - `left`: First bit slice with matching length already enforced by the caller.
+/// - `right`: Second bit slice with matching length already enforced by the caller.
+///
+/// # Returns
+/// - `Option<usize>`: Accelerated distance when a packed backend is available.
+///
+/// # Expected Output
+/// - Returns an optional distance; no stdout/stderr output.
+#[cfg(any(
+    all(feature = "aarch64-hamming-accel", target_arch = "aarch64"),
+    all(feature = "x86-hamming-accel", target_arch = "x86_64"),
+))]
+fn hamming_distance_bits_accelerated(left: &[bool], right: &[bool]) -> Option<usize> {
+    let packed_left = pack_bits_to_bytes(left);
+    let packed_right = pack_bits_to_bytes(right);
+    Some(hamming_distance_packed_bytes(&packed_left, &packed_right))
+}
+
+/// Computes the Hamming distance through an accelerated packed path when enabled.
+///
+/// # Parameters
+/// - `left`: First bit slice with matching length already enforced by the caller.
+/// - `right`: Second bit slice with matching length already enforced by the caller.
+///
+/// # Returns
+/// - `Option<usize>`: `None` when no accelerated backend is compiled in.
+///
+/// # Expected Output
+/// - Returns `None`; no stdout/stderr output.
+#[cfg(not(any(
+    all(feature = "aarch64-hamming-accel", target_arch = "aarch64"),
+    all(feature = "x86-hamming-accel", target_arch = "x86_64"),
+)))]
+fn hamming_distance_bits_accelerated(_left: &[bool], _right: &[bool]) -> Option<usize> {
+    None
 }
 
 /// Packs a bit slice into bytes so eight booleans share one storage byte.
@@ -42,7 +88,10 @@ pub fn hamming_distance_bits(left: &[bool], right: &[bool]) -> usize {
 ///
 /// # Expected Output
 /// - Returns packed storage; no stdout/stderr output.
-#[cfg(all(feature = "aarch64-hamming-accel", target_arch = "aarch64"))]
+#[cfg(any(
+    all(feature = "aarch64-hamming-accel", target_arch = "aarch64"),
+    all(feature = "x86-hamming-accel", target_arch = "x86_64"),
+))]
 pub(crate) fn pack_bits_to_bytes(bits: &[bool]) -> Vec<u8> {
     let mut packed = vec![0u8; bits.len().div_ceil(8)];
     for (index, bit) in bits.iter().enumerate() {
@@ -51,6 +100,28 @@ pub(crate) fn pack_bits_to_bytes(bits: &[bool]) -> Vec<u8> {
         }
     }
     packed
+}
+
+/// Computes the Hamming distance between packed byte slices.
+///
+/// # Parameters
+/// - `left`: First packed byte slice.
+/// - `right`: Second packed byte slice.
+///
+/// # Returns
+/// - `usize`: Number of differing bits across the packed bytes.
+///
+/// # Expected Output
+/// - Returns the distance; no stdout/stderr output.
+#[cfg(any(
+    all(feature = "aarch64-hamming-accel", target_arch = "aarch64"),
+    all(feature = "x86-hamming-accel", target_arch = "x86_64"),
+))]
+fn hamming_distance_packed_bytes_scalar(left: &[u8], right: &[u8]) -> usize {
+    left.iter()
+        .zip(right.iter())
+        .map(|(a, b)| (a ^ b).count_ones() as usize)
+        .sum()
 }
 
 /// Computes the Hamming distance between packed byte slices.
@@ -84,12 +155,124 @@ pub(crate) fn hamming_distance_packed_bytes(left: &[u8], right: &[u8]) -> usize 
 ///
 /// # Expected Output
 /// - Returns the distance; no stdout/stderr output.
-#[cfg(all(feature = "aarch64-hamming-accel", target_arch = "aarch64"))]
-fn hamming_distance_packed_bytes_scalar(left: &[u8], right: &[u8]) -> usize {
-    left.iter()
-        .zip(right.iter())
-        .map(|(a, b)| (a ^ b).count_ones() as usize)
-        .sum()
+#[cfg(all(feature = "x86-hamming-accel", target_arch = "x86_64"))]
+pub(crate) fn hamming_distance_packed_bytes(left: &[u8], right: &[u8]) -> usize {
+    if std::arch::is_x86_feature_detected!("avx512bitalg") {
+        unsafe { hamming_distance_packed_bytes_avx512bitalg(left, right) }
+    } else if std::arch::is_x86_feature_detected!("avx512vpopcntdq") {
+        unsafe { hamming_distance_packed_bytes_avx512vpopcntdq(left, right) }
+    } else if std::arch::is_x86_feature_detected!("avx2") {
+        unsafe { hamming_distance_packed_bytes_avx2(left, right) }
+    } else {
+        hamming_distance_packed_bytes_scalar(left, right)
+    }
+}
+
+/// Computes the Hamming distance between packed bytes with AVX-512 byte popcount.
+///
+/// # Parameters
+/// - `left`: First packed byte slice.
+/// - `right`: Second packed byte slice.
+///
+/// # Returns
+/// - `usize`: Number of differing bits across the packed bytes.
+///
+/// # Expected Output
+/// - Returns the distance; no stdout/stderr output.
+#[cfg(all(feature = "x86-hamming-accel", target_arch = "x86_64"))]
+#[target_feature(enable = "avx512f,avx512bitalg")]
+unsafe fn hamming_distance_packed_bytes_avx512bitalg(left: &[u8], right: &[u8]) -> usize {
+    let len = left.len().min(right.len());
+    let mut total = 0usize;
+    let mut index = 0usize;
+
+    while index + 64 <= len {
+        let lhs = unsafe { _mm512_loadu_si512(left.as_ptr().add(index).cast::<__m512i>()) };
+        let rhs = unsafe { _mm512_loadu_si512(right.as_ptr().add(index).cast::<__m512i>()) };
+        let diff = _mm512_xor_si512(lhs, rhs);
+        let counts = _mm512_popcnt_epi8(diff);
+        let mut lanes = [0u8; 64];
+        unsafe { _mm512_storeu_si512(lanes.as_mut_ptr().cast::<__m512i>(), counts) };
+        total += lanes.iter().map(|value| *value as usize).sum::<usize>();
+        index += 64;
+    }
+
+    total + hamming_distance_packed_bytes_scalar(&left[index..len], &right[index..len])
+}
+
+/// Computes the Hamming distance between packed bytes with AVX-512 quadword popcount.
+///
+/// # Parameters
+/// - `left`: First packed byte slice.
+/// - `right`: Second packed byte slice.
+///
+/// # Returns
+/// - `usize`: Number of differing bits across the packed bytes.
+///
+/// # Expected Output
+/// - Returns the distance; no stdout/stderr output.
+#[cfg(all(feature = "x86-hamming-accel", target_arch = "x86_64"))]
+#[target_feature(enable = "avx512f,avx512vpopcntdq")]
+unsafe fn hamming_distance_packed_bytes_avx512vpopcntdq(left: &[u8], right: &[u8]) -> usize {
+    let len = left.len().min(right.len());
+    let mut total = 0usize;
+    let mut index = 0usize;
+
+    while index + 64 <= len {
+        let lhs = unsafe { _mm512_loadu_si512(left.as_ptr().add(index).cast::<__m512i>()) };
+        let rhs = unsafe { _mm512_loadu_si512(right.as_ptr().add(index).cast::<__m512i>()) };
+        let diff = _mm512_xor_si512(lhs, rhs);
+        let counts = _mm512_popcnt_epi64(diff);
+        let mut lanes = [0u64; 8];
+        unsafe { _mm512_storeu_si512(lanes.as_mut_ptr().cast::<__m512i>(), counts) };
+        total += lanes.iter().map(|value| *value as usize).sum::<usize>();
+        index += 64;
+    }
+
+    total + hamming_distance_packed_bytes_scalar(&left[index..len], &right[index..len])
+}
+
+/// Computes the Hamming distance between packed bytes with AVX2 nibble lookup popcount.
+///
+/// # Parameters
+/// - `left`: First packed byte slice.
+/// - `right`: Second packed byte slice.
+///
+/// # Returns
+/// - `usize`: Number of differing bits across the packed bytes.
+///
+/// # Expected Output
+/// - Returns the distance; no stdout/stderr output.
+#[cfg(all(feature = "x86-hamming-accel", target_arch = "x86_64"))]
+#[target_feature(enable = "avx2")]
+unsafe fn hamming_distance_packed_bytes_avx2(left: &[u8], right: &[u8]) -> usize {
+    let len = left.len().min(right.len());
+    let nibble_popcounts = _mm256_setr_epi8(
+        0, 1, 1, 2, 1, 2, 2, 3, 1, 2, 2, 3, 2, 3, 3, 4, 0, 1, 1, 2, 1, 2, 2, 3, 1, 2, 2, 3, 2, 3,
+        3, 4,
+    );
+    let low_mask = _mm256_set1_epi8(0x0f_u8 as i8);
+    let zero = _mm256_setzero_si256();
+    let mut total = 0usize;
+    let mut index = 0usize;
+
+    while index + 32 <= len {
+        let lhs = unsafe { _mm256_loadu_si256(left.as_ptr().add(index).cast::<__m256i>()) };
+        let rhs = unsafe { _mm256_loadu_si256(right.as_ptr().add(index).cast::<__m256i>()) };
+        let diff = _mm256_xor_si256(lhs, rhs);
+        let low_nibbles = _mm256_and_si256(diff, low_mask);
+        let high_nibbles = _mm256_and_si256(_mm256_srli_epi16::<4>(diff), low_mask);
+        let low_counts = _mm256_shuffle_epi8(nibble_popcounts, low_nibbles);
+        let high_counts = _mm256_shuffle_epi8(nibble_popcounts, high_nibbles);
+        let counts = _mm256_add_epi8(low_counts, high_counts);
+        let sums = _mm256_sad_epu8(counts, zero);
+        let mut lanes = [0u64; 4];
+        unsafe { _mm256_storeu_si256(lanes.as_mut_ptr().cast::<__m256i>(), sums) };
+        total += lanes.iter().map(|value| *value as usize).sum::<usize>();
+        index += 32;
+    }
+
+    total + hamming_distance_packed_bytes_scalar(&left[index..len], &right[index..len])
 }
 
 /// Computes the Hamming distance between packed bytes with NEON popcount.
@@ -255,7 +438,10 @@ mod tests {
         assert!(stored_beam_value_is_one(1.0, 0.4));
     }
 
-    #[cfg(all(feature = "aarch64-hamming-accel", target_arch = "aarch64"))]
+    #[cfg(any(
+        all(feature = "aarch64-hamming-accel", target_arch = "aarch64"),
+        all(feature = "x86-hamming-accel", target_arch = "x86_64"),
+    ))]
     #[test]
     fn packed_hamming_distance_matches_scalar_path() {
         let left = [

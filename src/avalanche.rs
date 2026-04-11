@@ -1,7 +1,10 @@
 use rayon::prelude::*;
 
 use crate::helpers::hamming_distance_bits;
-#[cfg(all(feature = "aarch64-hamming-accel", target_arch = "aarch64"))]
+#[cfg(any(
+    all(feature = "aarch64-hamming-accel", target_arch = "aarch64"),
+    all(feature = "x86-hamming-accel", target_arch = "x86_64"),
+))]
 use crate::helpers::{hamming_distance_packed_bytes, pack_bits_to_bytes};
 
 /// Errors returned by avalanche tree search.
@@ -131,12 +134,10 @@ pub fn sort_candidates_by_hamming_distance(
         return Err(AvalancheError::InconsistentBitWidth);
     }
 
-    #[cfg(all(feature = "aarch64-hamming-accel", target_arch = "aarch64"))]
+    if let Some(sorted) =
+        sort_candidates_by_hamming_distance_accelerated(&candidates, reference_bits)
     {
-        return Ok(sort_candidates_by_hamming_distance_aarch64(
-            candidates,
-            reference_bits,
-        ));
+        return Ok(sorted);
     }
 
     let mut sorted = candidates;
@@ -148,25 +149,29 @@ pub fn sort_candidates_by_hamming_distance(
     Ok(sorted)
 }
 
-/// Sorts candidates by precomputed Hamming-distance keys on `aarch64`.
+/// Sorts candidates by precomputed Hamming-distance keys on accelerated targets.
 ///
 /// # Parameters
 /// - `candidates`: Candidate nodes to sort.
 /// - `reference_bits`: Reference bit vector used for distance ordering.
 ///
 /// # Returns
-/// - `Vec<AvalancheNode>`: Candidates sorted by distance and then message bits.
+/// - `Option<Vec<AvalancheNode>>`: Candidates sorted by distance and then message bits.
 ///
 /// # Expected Output
 /// - Returns a sorted candidate list; no stdout/stderr output.
-#[cfg(all(feature = "aarch64-hamming-accel", target_arch = "aarch64"))]
-fn sort_candidates_by_hamming_distance_aarch64(
-    candidates: Vec<AvalancheNode>,
+#[cfg(any(
+    all(feature = "aarch64-hamming-accel", target_arch = "aarch64"),
+    all(feature = "x86-hamming-accel", target_arch = "x86_64"),
+))]
+fn sort_candidates_by_hamming_distance_accelerated(
+    candidates: &[AvalancheNode],
     reference_bits: &[bool],
-) -> Vec<AvalancheNode> {
+) -> Option<Vec<AvalancheNode>> {
     let packed_reference = pack_bits_to_bytes(reference_bits);
     let mut keyed_candidates: Vec<(usize, AvalancheNode)> = candidates
-        .into_iter()
+        .iter()
+        .cloned()
         .map(|candidate| {
             let packed_message = pack_bits_to_bytes(&candidate.message_bits);
             let distance = hamming_distance_packed_bytes(&packed_message, &packed_reference);
@@ -180,10 +185,34 @@ fn sort_candidates_by_hamming_distance_aarch64(
             .then_with(|| compare_message_bits_le(&left.1.message_bits, &right.1.message_bits))
     });
 
-    keyed_candidates
-        .into_iter()
-        .map(|(_, candidate)| candidate)
-        .collect()
+    Some(
+        keyed_candidates
+            .into_iter()
+            .map(|(_, candidate)| candidate)
+            .collect::<Vec<_>>(),
+    )
+}
+
+/// Sorts candidates by precomputed Hamming-distance keys on accelerated targets.
+///
+/// # Parameters
+/// - `candidates`: Candidate nodes to sort.
+/// - `reference_bits`: Reference bit vector used for distance ordering.
+///
+/// # Returns
+/// - `Option<Vec<AvalancheNode>>`: `None` when no accelerated backend is compiled in.
+///
+/// # Expected Output
+/// - Returns `None`; no stdout/stderr output.
+#[cfg(not(any(
+    all(feature = "aarch64-hamming-accel", target_arch = "aarch64"),
+    all(feature = "x86-hamming-accel", target_arch = "x86_64"),
+)))]
+fn sort_candidates_by_hamming_distance_accelerated(
+    _candidates: &[AvalancheNode],
+    _reference_bits: &[bool],
+) -> Option<Vec<AvalancheNode>> {
+    None
 }
 
 /// Mirrors candidates with their bitwise inversions.
