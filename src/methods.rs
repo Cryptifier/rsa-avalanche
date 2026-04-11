@@ -5059,26 +5059,33 @@ fn group_scored_inputs_by_r_candidate(
         .collect()
 }
 
-/// Selects a random set of r-candidate groups and flattens all of their `c^x` inputs.
+/// Selects a random set of r-candidate groups and caps the flattened sample size.
 ///
 /// # Parameters
 /// - `grouped_inputs`: Grouped scored inputs keyed by r candidate.
 /// - `mixed_r_candidate_count`: Number of distinct r candidates to include.
+/// - `combination_size`: Maximum number of scored inputs to keep after group sampling.
 /// - `rng`: Random number generator used for group sampling.
 ///
 /// # Returns
-/// - `Vec<ScoredAvalancheInput>`: Flattened inputs for the selected r groups.
+/// - `Vec<ScoredAvalancheInput>`: Sampled scored inputs for the selected r groups.
 ///
 /// # Expected Output
-/// - Returns every `c^x` input belonging to the sampled r groups; no stdout/stderr output.
+/// - Returns up to `combination_size` sampled `c^x` inputs while preserving selected r-group
+///   coverage when possible; no stdout/stderr output.
 fn select_scored_inputs_for_mixed_r_candidates(
     grouped_inputs: &[ScoredAvalancheInputGroup],
     mixed_r_candidate_count: usize,
+    combination_size: usize,
     rng: &mut RngChoice,
 ) -> Vec<ScoredAvalancheInput> {
+    if combination_size == 0 || grouped_inputs.is_empty() || mixed_r_candidate_count == 0 {
+        return Vec::new();
+    }
+
     let sampled_group_indices =
         sample_unique_indices(grouped_inputs.len(), mixed_r_candidate_count, rng);
-    let mut selected_inputs = Vec::new();
+    let mut sampled_groups = Vec::new();
     for group_idx in sampled_group_indices {
         if let Some(group) = grouped_inputs.get(group_idx) {
             debug_assert_eq!(
@@ -5089,9 +5096,53 @@ fn select_scored_inputs_for_mixed_r_candidates(
                     .unwrap_or(group.batch_candidate_index),
                 group.batch_candidate_index
             );
-            selected_inputs.extend(group.inputs.iter().cloned());
+            sampled_groups.push(group);
         }
     }
+    if sampled_groups.is_empty() {
+        return Vec::new();
+    }
+
+    let available_input_count = sampled_groups
+        .iter()
+        .map(|group| group.inputs.len())
+        .sum::<usize>();
+    if available_input_count <= combination_size {
+        let mut selected_inputs = Vec::with_capacity(available_input_count);
+        for group in sampled_groups {
+            selected_inputs.extend(group.inputs.iter().cloned());
+        }
+        return selected_inputs;
+    }
+
+    let required_group_slots = sampled_groups.len().min(combination_size);
+    let mut selected_inputs = Vec::with_capacity(combination_size);
+    let mut leftover_inputs = Vec::with_capacity(available_input_count - required_group_slots);
+
+    for (group_order, group) in sampled_groups.iter().enumerate() {
+        let pick_indices = sample_unique_indices(group.inputs.len(), 1, rng);
+        if group_order < required_group_slots {
+            if let Some(&picked_index) = pick_indices.first() {
+                selected_inputs.push(group.inputs[picked_index].clone());
+                for (input_idx, input) in group.inputs.iter().enumerate() {
+                    if input_idx != picked_index {
+                        leftover_inputs.push(input.clone());
+                    }
+                }
+                continue;
+            }
+        }
+        leftover_inputs.extend(group.inputs.iter().cloned());
+    }
+
+    let remaining_slots = combination_size.saturating_sub(selected_inputs.len());
+    let leftover_indices = sample_unique_indices(leftover_inputs.len(), remaining_slots, rng);
+    for leftover_idx in leftover_indices {
+        if let Some(input) = leftover_inputs.get(leftover_idx) {
+            selected_inputs.push(input.clone());
+        }
+    }
+
     selected_inputs
 }
 
@@ -5169,6 +5220,9 @@ fn run_sampled_avalanche_beam_search(
     if engine.avalanche_combination_mixed_r_candidates == 0 {
         return Err("avalanche_combination_mixed_r_candidates must be >= 1".into());
     }
+    if engine.avalanche_combination_size == 0 {
+        return Err("avalanche_combination_size must be >= 1".into());
+    }
     if scored_inputs.is_empty() {
         return Ok(SampledAvalancheBatchResult {
             selected_sample: None,
@@ -5189,6 +5243,7 @@ fn run_sampled_avalanche_beam_search(
     }
     let mixed_r_candidate_count = engine
         .avalanche_combination_mixed_r_candidates
+        .min(engine.avalanche_combination_size)
         .min(r_candidate_pool_size);
 
     let sample_count = engine.avalanche_combination_samples as usize;
@@ -5239,6 +5294,7 @@ fn run_sampled_avalanche_beam_search(
         let selected_inputs = select_scored_inputs_for_mixed_r_candidates(
             &grouped_inputs,
             mixed_r_candidate_count,
+            engine.avalanche_combination_size,
             rng,
         );
         let selected_group_count = selected_inputs
@@ -6152,7 +6208,7 @@ mod tests {
     }
 
     #[test]
-    fn test_select_scored_inputs_for_mixed_r_candidates_keeps_complete_r_groups() {
+    fn test_select_scored_inputs_for_mixed_r_candidates_caps_combination_size() {
         let inputs = vec![
             ScoredAvalancheInput {
                 batch_candidate_index: 0,
@@ -6209,7 +6265,7 @@ mod tests {
 
         let mut rng = RngChoice::from_seed(RngMode::Standard, 7);
         let selected_single =
-            select_scored_inputs_for_mixed_r_candidates(&grouped_inputs, 1, &mut rng);
+            select_scored_inputs_for_mixed_r_candidates(&grouped_inputs, 1, 2, &mut rng);
         let selected_single_candidates = selected_single
             .iter()
             .map(|input| input.batch_candidate_index)
@@ -6219,12 +6275,12 @@ mod tests {
 
         let mut rng = RngChoice::from_seed(RngMode::Standard, 7);
         let selected_double =
-            select_scored_inputs_for_mixed_r_candidates(&grouped_inputs, 2, &mut rng);
+            select_scored_inputs_for_mixed_r_candidates(&grouped_inputs, 2, 3, &mut rng);
         let selected_double_candidates = selected_double
             .iter()
             .map(|input| input.batch_candidate_index)
             .collect::<HashSet<_>>();
-        assert_eq!(selected_double.len(), 4);
+        assert_eq!(selected_double.len(), 3);
         assert_eq!(selected_double_candidates.len(), 2);
     }
 
