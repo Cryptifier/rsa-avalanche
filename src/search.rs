@@ -86,6 +86,42 @@ struct ScoredCandidate {
     score: f64,
 }
 
+/// Prints progress updates every ten percent for sequential work.
+///
+/// # Parameters
+/// - `done`: Number of completed work units.
+/// - `total`: Total number of work units.
+/// - `next_pct`: Mutable threshold for the next log event.
+/// - `label`: Human-readable label for the progress report.
+///
+/// # Returns
+/// - `()`: This function returns nothing.
+///
+/// # Expected Output
+/// - Prints progress updates to stdout when thresholds are reached.
+fn log_progress_every_ten_percent(done: u64, total: u64, next_pct: &mut u64, label: &str) {
+    if total == 0 {
+        return;
+    }
+
+    let pct = done.saturating_mul(100) / total;
+    if pct >= *next_pct || done == total {
+        let display_pct = if done == total {
+            100
+        } else {
+            ((pct / 10) * 10).min(100)
+        };
+        println!("{label} progress: {}% ({}/{})", display_pct, done, total);
+
+        while *next_pct <= pct && *next_pct < 100 {
+            *next_pct += 10;
+        }
+        if done == total {
+            *next_pct = 110;
+        }
+    }
+}
+
 /// Performs beam search over `Vec<f64>` candidates using score/expansion callbacks.
 ///
 /// # Parameters
@@ -185,6 +221,73 @@ where
     FExpand: Fn(&[f64]) -> Vec<Vec<f64>>,
     FScore: Fn(&[f64]) -> f64,
 {
+    beam_search_top_k_internal(initial, beam_width, max_steps, None, expand, score)
+}
+
+/// Performs beam search and returns the final beam of top candidates while printing progress.
+///
+/// # Parameters
+/// - `initial`: Starting candidate vectors for the first beam.
+/// - `beam_width`: Maximum number of candidates retained per step.
+/// - `max_steps`: Maximum number of expansion steps to run.
+/// - `progress_label`: Human-readable label used for progress logging.
+/// - `expand`: Function that generates successor vectors for a candidate.
+/// - `score`: Function that assigns a score to a candidate (higher is better).
+///
+/// # Returns
+/// - `Result<BeamSearchBeamResult, BeamSearchError>`: Final beam plus search statistics.
+///
+/// # Expected Output
+/// - Prints progress updates to stdout and returns search results.
+pub fn beam_search_top_k_with_progress<FExpand, FScore>(
+    initial: Vec<Vec<f64>>,
+    beam_width: usize,
+    max_steps: usize,
+    progress_label: &str,
+    expand: FExpand,
+    score: FScore,
+) -> Result<BeamSearchBeamResult, BeamSearchError>
+where
+    FExpand: Fn(&[f64]) -> Vec<Vec<f64>>,
+    FScore: Fn(&[f64]) -> f64,
+{
+    beam_search_top_k_internal(
+        initial,
+        beam_width,
+        max_steps,
+        Some(progress_label),
+        expand,
+        score,
+    )
+}
+
+/// Performs beam search and optionally prints progress updates.
+///
+/// # Parameters
+/// - `initial`: Starting candidate vectors for the first beam.
+/// - `beam_width`: Maximum number of candidates retained per step.
+/// - `max_steps`: Maximum number of expansion steps to run.
+/// - `progress_label`: Optional human-readable label used for progress logging.
+/// - `expand`: Function that generates successor vectors for a candidate.
+/// - `score`: Function that assigns a score to a candidate (higher is better).
+///
+/// # Returns
+/// - `Result<BeamSearchBeamResult, BeamSearchError>`: Final beam plus search statistics.
+///
+/// # Expected Output
+/// - Optionally prints progress updates to stdout and returns search results.
+fn beam_search_top_k_internal<FExpand, FScore>(
+    initial: Vec<Vec<f64>>,
+    beam_width: usize,
+    max_steps: usize,
+    progress_label: Option<&str>,
+    expand: FExpand,
+    score: FScore,
+) -> Result<BeamSearchBeamResult, BeamSearchError>
+where
+    FExpand: Fn(&[f64]) -> Vec<Vec<f64>>,
+    FScore: Fn(&[f64]) -> f64,
+{
     if initial.is_empty() {
         return Err(BeamSearchError::EmptyInitial);
     }
@@ -199,6 +302,8 @@ where
     let mut evaluated = beam.len();
     select_top_k(&mut beam, beam_width);
     let mut steps = 0usize;
+    let total_steps = max_steps as u64;
+    let mut next_pct = 10u64;
 
     for _ in 0..max_steps {
         let mut expanded = Vec::new();
@@ -215,10 +320,16 @@ where
         steps += 1;
         evaluated += expanded.len();
         if expanded.is_empty() {
+            if let Some(label) = progress_label {
+                log_progress_every_ten_percent(total_steps, total_steps, &mut next_pct, label);
+            }
             break;
         }
         select_top_k(&mut expanded, beam_width);
         beam = expanded;
+        if let Some(label) = progress_label {
+            log_progress_every_ten_percent(steps as u64, total_steps, &mut next_pct, label);
+        }
     }
 
     let beam = beam

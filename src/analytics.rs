@@ -43,6 +43,8 @@ pub struct AnalyticsCliArgs {
     pub mirror_invert_candidates: bool,
     /// Minimum stored beam value interpreted as bit `1`.
     pub beam_bit_one_threshold: f64,
+    /// Number of top avalanche beam-search candidates retained per run.
+    pub avalanche_beam_top_k: usize,
     /// Exponent used to spread normalized avalanche beam probabilities.
     pub avalanche_probability_spread_exponent: f64,
     /// Number of avalanche combination samples evaluated per batch.
@@ -83,6 +85,7 @@ pub(crate) struct AnalyticsCliInfo {
     use_hamming_distance: bool,
     mirror_invert_candidates: bool,
     beam_bit_one_threshold: f64,
+    avalanche_beam_top_k: usize,
     avalanche_probability_spread_exponent: f64,
     avalanche_combination_samples: u64,
     avalanche_combination_size: usize,
@@ -405,6 +408,7 @@ impl SessionAnalytics {
                 use_hamming_distance: args.use_hamming_distance,
                 mirror_invert_candidates: args.mirror_invert_candidates,
                 beam_bit_one_threshold: args.beam_bit_one_threshold,
+                avalanche_beam_top_k: args.avalanche_beam_top_k,
                 avalanche_probability_spread_exponent: args.avalanche_probability_spread_exponent,
                 avalanche_combination_samples: args.avalanche_combination_samples,
                 avalanche_combination_size: args.avalanche_combination_size,
@@ -648,6 +652,23 @@ pub fn generate_r_candidates_with_analytics(
 ) -> Vec<RCandidate> {
     let start = std::time::Instant::now();
     let mut candidates = generate_r_candidates_batch(n, settings, rng, batch_size);
+    if settings.reuse_r_candidates
+        && settings.retarget_partition_count > 0
+        && !candidates.is_empty()
+        && candidates.len() < batch_size
+    {
+        let source_count = candidates.len();
+        candidates = candidates
+            .iter()
+            .cloned()
+            .cycle()
+            .take(batch_size)
+            .collect();
+        println!(
+            "Expanded {} reused r candidates to {} retarget inputs before retargeting",
+            source_count, batch_size
+        );
+    }
     retarget_r_candidates_for_speculative_oracles(
         n,
         &mut candidates,

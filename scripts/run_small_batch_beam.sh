@@ -17,6 +17,21 @@ PCA_OUTPUT=${PCA_OUTPUT:-"pca_clusters.png"}
 
 read -r -a EXTRA_ARGS <<< "${ANALYSIS_EXTRA_ARGS}"
 
+arch_name=$(uname -m)
+CARGO_RUN_ARGS=(--release)
+ACCEL_FEATURE="none"
+
+case "${arch_name}" in
+  x86_64 | amd64)
+    ACCEL_FEATURE="x86-hamming-accel"
+    CARGO_RUN_ARGS+=(--features "${ACCEL_FEATURE}")
+    ;;
+  aarch64 | arm64)
+    ACCEL_FEATURE="aarch64-hamming-accel"
+    CARGO_RUN_ARGS+=(--features "${ACCEL_FEATURE}")
+    ;;
+esac
+
 TEST_ARGS=()
 if [[ "${RUN_TESTS}" == "1" ]]; then
   TEST_ARGS=(--tests)
@@ -63,6 +78,7 @@ fail_count=0
 total_ns=0
 
 echo "Running ${RUNS} iterations with config ${CONFIG}"
+echo "Detected architecture ${arch_name}; cargo run args: ${CARGO_RUN_ARGS[*]} (acceleration feature: ${ACCEL_FEATURE})"
 mkdir -p "${LOG_DIR}"
 run_stamp=$(date +"%Y%m%d_%H%M%S")
 
@@ -75,7 +91,7 @@ for i in $(seq 1 "${RUNS}"); do
   echo ""
   echo "===== RUN ${i} (seed ${seed}) ====="
   set +e
-  cargo run --bin analysis -- --true --bits 56 --bits-decrypt 128 --seed "${seed}" -c "${CONFIG}" --tests --crypto-rng --session-json "${session_path}" \
+  cargo run "${CARGO_RUN_ARGS[@]}" --bin analysis -- --true --bits 56 --bits-decrypt 128 --seed "${seed}" -c "${CONFIG}" --crypto-rng --session-json "${session_path}" \
     --batches "${ANALYSIS_BATCHES}" --batch-size "${ANALYSIS_BATCH_SIZE}" "${TEST_ARGS[@]}" "${EXTRA_ARGS[@]}" \
     2>&1 | tee -a "${ANALYSIS_LOG}" | tee "${run_output}" > /dev/null
   status=$?

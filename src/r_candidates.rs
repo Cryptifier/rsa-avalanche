@@ -5,6 +5,7 @@ use crate::math::{
 };
 use bigdecimal::BigDecimal;
 use num_bigint::BigUint;
+use num_integer::Integer;
 use num_traits::{One, ToPrimitive, Zero};
 use rand::RngCore;
 use rand::seq::SliceRandom;
@@ -579,6 +580,115 @@ fn sample_retarget_total_exponent(
     (BigDecimal::from(units) / BigDecimal::from(RETARGET_EXPONENT_SCALE_UNITS)).normalized()
 }
 
+/// Samples one retargeted candidate update from the configured exponent window.
+///
+/// # Parameters
+/// - `n`: RSA modulus used as the base for retargeted `N^a` prime generation.
+/// - `minimum_target_exponent`: Lower bound for the sampled total exponent.
+/// - `target_exponent`: Upper bound for the sampled total exponent.
+/// - `partition_count`: Maximum number of exponent partitions to sample.
+/// - `minimum_component_exponent`: Minimum exponent allowed per partition.
+/// - `rng`: Random number generator used for exponent and partition sampling.
+///
+/// # Returns
+/// - `Option<(BigUint, Vec<(BigUint, u64)>, BigDecimal)>`: The sampled `r`, its factors, and the sampled target exponent.
+///
+/// # Expected Output
+/// - Returns `None` when no feasible partition exists; no stdout/stderr output.
+fn sample_retarget_candidate_update(
+    n: &BigUint,
+    minimum_target_exponent: &BigDecimal,
+    target_exponent: &BigDecimal,
+    partition_count: usize,
+    minimum_component_exponent: &BigDecimal,
+    rng: &mut RngChoice,
+) -> Option<(BigUint, Vec<(BigUint, u64)>, BigDecimal)> {
+    let sampled_target_exponent =
+        sample_retarget_total_exponent(minimum_target_exponent, target_exponent, rng);
+    let parts = random_bigdecimal_partition_with_min(
+        &sampled_target_exponent,
+        partition_count,
+        minimum_component_exponent,
+        rng,
+    );
+    if parts.is_empty() {
+        return None;
+    }
+
+    let mut factors = Vec::with_capacity(parts.len());
+    for part in parts {
+        let prime = next_prime_from_biguint_pow_bigdecimal(n, &part);
+        factors.push((prime, 1));
+    }
+    let factors = coalesce_factors(factors);
+    let r = factors
+        .iter()
+        .fold(BigUint::one(), |acc, (p, e)| acc * p.pow(*e as u32));
+
+    Some((r, factors, sampled_target_exponent))
+}
+
+/// Advances a probable prime upward to the next probable prime.
+///
+/// # Parameters
+/// - `prime`: Starting value to advance beyond.
+///
+/// # Returns
+/// - `BigUint`: The first probable prime strictly greater than `prime`.
+///
+/// # Expected Output
+/// - Returns a probable prime; no stdout/stderr output.
+fn next_probable_prime_after(prime: &BigUint) -> BigUint {
+    let mut candidate = prime + BigUint::one();
+    if candidate <= BigUint::from(2u8) {
+        return BigUint::from(2u8);
+    }
+    if candidate.is_even() {
+        candidate += BigUint::one();
+    }
+    while !is_probable_prime_big(&candidate) {
+        candidate += BigUint::from(2u8);
+    }
+    candidate
+}
+
+/// Forces a sampled retarget update onto a unique final `r` value.
+///
+/// # Parameters
+/// - `r`: Retargeted composite candidate to uniquify in place.
+/// - `factors`: Prime factors associated with `r`.
+/// - `seen`: Set of already-assigned `r` values in the current batch.
+///
+/// # Returns
+/// - `()`: This function returns nothing.
+///
+/// # Expected Output
+/// - Mutates `r` and `factors` until `r` is unique within `seen`; no stdout/stderr output.
+fn uniquify_retarget_update(
+    r: &mut BigUint,
+    factors: &mut Vec<(BigUint, u64)>,
+    seen: &mut HashSet<String>,
+) {
+    if factors.is_empty() {
+        seen.insert(r.to_string());
+        return;
+    }
+
+    loop {
+        if seen.insert(r.to_string()) {
+            return;
+        }
+
+        let last_idx = factors.len() - 1;
+        factors[last_idx].0 = next_probable_prime_after(&factors[last_idx].0);
+        let normalized = coalesce_factors(std::mem::take(factors));
+        *r = normalized
+            .iter()
+            .fold(BigUint::one(), |acc, (p, e)| acc * p.pow(*e as u32));
+        *factors = normalized;
+    }
+}
+
 /// Builds `r` candidates by sampling composites and factoring them.
 ///
 /// # Parameters
@@ -892,29 +1002,29 @@ pub fn retarget_r_candidates_for_speculative_oracles(
         return;
     }
 
-    for candidate in candidates {
-        let sampled_target_exponent =
-            sample_retarget_total_exponent(minimum_target_exponent, target_exponent, rng);
-        let parts = random_bigdecimal_partition_with_min(
-            &sampled_target_exponent,
-            partition_count,
-            minimum_component_exponent,
-            rng,
-        );
-        if parts.is_empty() {
+    let rng_mode = rng.mode();
+    let candidate_seeds: Vec<u64> = (0..candidates.len()).map(|_| rng.next_u64()).collect();
+    let updates: Vec<Option<(BigUint, Vec<(BigUint, u64)>, BigDecimal)>> = candidate_seeds
+        .into_par_iter()
+        .map(|seed| {
+            let mut local_rng = RngChoice::from_seed(rng_mode, seed);
+            sample_retarget_candidate_update(
+                n,
+                minimum_target_exponent,
+                target_exponent,
+                partition_count,
+                minimum_component_exponent,
+                &mut local_rng,
+            )
+        })
+        .collect();
+
+    let mut seen = HashSet::with_capacity(candidates.len());
+    for (candidate, update) in candidates.iter_mut().zip(updates) {
+        let Some((mut r, mut factors, sampled_target_exponent)) = update else {
             continue;
-        }
-
-        let mut factors = Vec::with_capacity(parts.len());
-        for part in parts {
-            let prime = next_prime_from_biguint_pow_bigdecimal(n, &part);
-            factors.push((prime, 1));
-        }
-        let factors = coalesce_factors(factors);
-        let r = factors
-            .iter()
-            .fold(BigUint::one(), |acc, (p, e)| acc * p.pow(*e as u32));
-
+        };
+        uniquify_retarget_update(&mut r, &mut factors, &mut seen);
         candidate.r = r;
         candidate.factors = factors;
         candidate.target_exponent = sampled_target_exponent;
@@ -1385,5 +1495,36 @@ mod tests {
                 .iter()
                 .all(|(p, _)| is_probable_prime_big(p))
         );
+    }
+
+    #[test]
+    fn test_retarget_r_candidates_for_speculative_oracles_enforces_unique_r_values() {
+        let mut candidates = (0..16)
+            .map(|idx| RCandidate::new(BigUint::from(idx + 21usize), vec![]))
+            .collect::<Vec<_>>();
+        let mut rng = RngChoice::from_seed(RngMode::Standard, 52);
+        retarget_r_candidates_for_speculative_oracles(
+            &BigUint::from(10u8).pow(12),
+            &mut candidates,
+            &BigDecimal::parse_bytes(b"0.8", 10).expect("valid lower exponent"),
+            &BigDecimal::parse_bytes(b"0.87", 10).expect("valid exponent"),
+            2,
+            &BigDecimal::parse_bytes(b"0.45", 10).expect("valid minimum exponent"),
+            &mut rng,
+        );
+
+        let unique_r_count = candidates
+            .iter()
+            .map(|candidate| candidate.r.to_string())
+            .collect::<HashSet<_>>()
+            .len();
+        assert_eq!(unique_r_count, candidates.len());
+        for candidate in candidates {
+            let product = candidate
+                .factors
+                .iter()
+                .fold(BigUint::one(), |acc, (p, e)| acc * p.pow(*e as u32));
+            assert_eq!(product, candidate.r);
+        }
     }
 }

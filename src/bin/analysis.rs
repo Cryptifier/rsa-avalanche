@@ -202,6 +202,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         use_hamming_distance: config.engine.use_hamming_distance,
         mirror_invert_candidates: config.engine.mirror_invert_candidates,
         beam_bit_one_threshold: config.engine.beam_bit_one_threshold,
+        avalanche_beam_top_k: config.engine.avalanche_beam_top_k,
         avalanche_probability_spread_exponent: config.engine.avalanche_probability_spread_exponent,
         avalanche_combination_samples: config.engine.avalanche_combination_samples,
         avalanche_combination_size: config.engine.avalanche_combination_size,

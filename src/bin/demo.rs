@@ -18,7 +18,7 @@ use rand::RngCore;
 use rayon::prelude::*;
 
 use rsademo::avalanche::{
-    AvalancheNode, mirror_inverted_candidates, search_avalanche_tree,
+    AvalancheNode, mirror_inverted_candidates, search_avalanche_tree_with_progress,
     sort_candidates_by_hamming_distance,
 };
 use rsademo::config::{Config, EngineConfig, load_config};
@@ -31,7 +31,7 @@ use rsademo::r_candidates::{
     RCandidateSettings, generate_r_candidates_batch, retarget_r_candidates_for_speculative_oracles,
 };
 use rsademo::rng::{RngChoice, RngMode};
-use rsademo::search::{beam_search_top_k, viterbi_decode};
+use rsademo::search::{beam_search_top_k_with_progress, viterbi_decode};
 
 const DEFAULT_DEMO_BATCH_SIZE: u64 = 1000;
 
@@ -727,7 +727,8 @@ fn run_avalanche_beam_search(
         .filter(|node| node.message_bits.last().copied().unwrap_or(false))
         .count();
     let msb_zero_count = avalanche_nodes.len().saturating_sub(msb_one_count);
-    let avalanche_result = search_avalanche_tree(avalanche_nodes)?;
+    let avalanche_result =
+        search_avalanche_tree_with_progress(avalanche_nodes, "Avalanche tree reduction")?;
     let beam_bit_one_threshold = engine.beam_bit_one_threshold;
     let avalanche_probability_spread_exponent = engine.avalanche_probability_spread_exponent;
     let raw_bias_line = avalanche_result
@@ -770,15 +771,17 @@ fn run_avalanche_beam_search(
         "Avalanche beam MSB count: ones {} zeros {}",
         msb_one_count, msb_zero_count
     );
+    let avalanche_beam_top_k = engine.avalanche_beam_top_k.max(1);
     println!(
         "Avalanche beam scoring thresholds: bit_one >= {} spread_exponent {}",
         format_beam_float(beam_bit_one_threshold, BEAM_SCORE_DECIMALS),
         format_beam_float(avalanche_probability_spread_exponent, BEAM_SCORE_DECIMALS)
     );
-    let beam_result = beam_search_top_k(
+    let beam_result = beam_search_top_k_with_progress(
         vec![Vec::new()],
-        5,
+        avalanche_beam_top_k,
         bit_width,
+        "Avalanche beam search",
         |candidate| {
             if candidate.len() >= bit_width {
                 return Vec::new();
