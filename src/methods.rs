@@ -683,6 +683,50 @@ pub fn run_demo(
     Ok(())
 }
 
+/// Logs progress updates at a fixed percentage increment.
+///
+/// # Parameters
+/// - `done`: Number of completed items.
+/// - `total`: Total number of items.
+/// - `next_pct`: Mutable threshold for the next log event.
+/// - `label`: Human-readable label for the progress report.
+/// - `step_pct`: Percentage increment used for log emission.
+///
+/// # Returns
+/// - `()`: This function returns nothing.
+///
+/// # Expected Output
+/// - Prints progress updates to stdout when thresholds are reached.
+fn log_progress_every_percent_step(
+    done: u64,
+    total: u64,
+    next_pct: &mut u64,
+    label: &str,
+    step_pct: u64,
+) {
+    if total == 0 {
+        return;
+    }
+    let step_pct = step_pct.clamp(1, 100);
+
+    let pct = done.saturating_mul(100) / total;
+    if pct >= *next_pct || done == total {
+        let display_pct = if done == total {
+            100
+        } else {
+            ((pct / step_pct) * step_pct).min(100)
+        };
+        println!("{label} progress: {}% ({}/{})", display_pct, done, total);
+
+        while *next_pct <= pct && *next_pct < 100 {
+            *next_pct += step_pct;
+        }
+        if done == total {
+            *next_pct = 100;
+        }
+    }
+}
+
 /// Logs progress updates at 10% increments.
 ///
 /// # Parameters
@@ -697,26 +741,7 @@ pub fn run_demo(
 /// # Expected Output
 /// - Prints progress updates to stdout when thresholds are reached.
 fn log_progress_every_ten_percent(done: u64, total: u64, next_pct: &mut u64, label: &str) {
-    if total == 0 {
-        return;
-    }
-
-    let pct = done.saturating_mul(100) / total;
-    if pct >= *next_pct || done == total {
-        let display_pct = if done == total {
-            100
-        } else {
-            ((pct / 10) * 10).min(100)
-        };
-        println!("{label} progress: {}% ({}/{})", display_pct, done, total);
-
-        while *next_pct <= pct && *next_pct < 100 {
-            *next_pct += 10;
-        }
-        if done == total {
-            *next_pct = 100;
-        }
-    }
+    log_progress_every_percent_step(done, total, next_pct, label, 10);
 }
 
 /// Logs progress for parallel work every ten percent using atomics.
@@ -844,30 +869,47 @@ fn collect_invertible_ciphertext_variants(
 
     let e_big = ctx.e.clone();
     let mut variants = Vec::with_capacity(count);
-    let mut instance_idx = 0usize;
+    let mut next_instance_idx = 0usize;
+    let thread_chunk_floor = rayon::current_num_threads().saturating_mul(8).max(32);
     while variants.len() < count {
-        let x = odd_ciphertext_exponent(&e_big, instance_idx, context)?;
-        instance_idx = instance_idx
-            .checked_add(1)
+        let remaining = count.saturating_sub(variants.len());
+        let search_width = remaining.saturating_mul(4).max(thread_chunk_floor).max(1);
+        let end_instance_idx = next_instance_idx
+            .checked_add(search_width)
             .ok_or_else(|| format!("{context} exponent index overflow"))?;
+        let chunk_results = (next_instance_idx..end_instance_idx)
+            .into_par_iter()
+            .map(|instance_idx| {
+                let x = odd_ciphertext_exponent(&e_big, instance_idx, context)
+                    .map_err(|err| err.to_string())?;
+                let e_x = &e_big * &x;
+                if !phi_values.iter().all(|phi| e_x.gcd(phi).is_one()) {
+                    return Ok(None);
+                }
 
-        let e_x = &e_big * &x;
-        if !phi_values.iter().all(|phi| e_x.gcd(phi).is_one()) {
-            continue;
+                let ciphertext = if x.is_one() {
+                    base_ciphertext.clone()
+                } else {
+                    base_ciphertext.modpow(&x, &ctx.n)
+                };
+                let shifted = maybe_shift_ciphertext(ctx, &ciphertext, shift);
+                Ok::<_, String>(Some(CiphertextVariant {
+                    x,
+                    e_x,
+                    ciphertext,
+                    shifted,
+                }))
+            })
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|err| -> Box<dyn Error> { err.into() })?;
+        next_instance_idx = end_instance_idx;
+
+        for variant in chunk_results.into_iter().flatten() {
+            variants.push(variant);
+            if variants.len() >= count {
+                break;
+            }
         }
-
-        let ciphertext = if x.is_one() {
-            base_ciphertext.clone()
-        } else {
-            base_ciphertext.modpow(&x, &ctx.n)
-        };
-        let shifted = maybe_shift_ciphertext(ctx, &ciphertext, shift);
-        variants.push(CiphertextVariant {
-            x,
-            e_x,
-            ciphertext,
-            shifted,
-        });
     }
 
     Ok(variants)
@@ -5313,11 +5355,12 @@ fn run_sampled_avalanche_beam_search(
             selected_sample = Some(execution);
         }
         all_samples.push(sample);
-        log_progress_every_ten_percent(
+        log_progress_every_percent_step(
             (sample_index + 1) as u64,
             sample_count as u64,
             &mut next_sample_pct,
             &format!("Avalanche sample batch {}", batch_number),
+            1,
         );
     }
 
