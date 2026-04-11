@@ -37,6 +37,62 @@ pub struct AvalancheSearchResult {
     pub level_pair_counts: Vec<usize>,
 }
 
+/// Counts the number of reduction levels needed to collapse an avalanche tree.
+///
+/// # Parameters
+/// - `candidate_count`: Number of candidates in the initial level.
+///
+/// # Returns
+/// - `u64`: Number of reduction levels required to reach a single node.
+///
+/// # Expected Output
+/// - Returns a deterministic level count; no stdout/stderr output.
+fn avalanche_reduction_level_count(candidate_count: usize) -> u64 {
+    let mut levels = 0u64;
+    let mut remaining = candidate_count;
+    while remaining > 1 {
+        remaining = remaining.div_ceil(2);
+        levels += 1;
+    }
+    levels
+}
+
+/// Prints progress updates every ten percent for sequential work.
+///
+/// # Parameters
+/// - `done`: Number of completed work units.
+/// - `total`: Total number of work units.
+/// - `next_pct`: Mutable threshold for the next log event.
+/// - `label`: Human-readable label for the progress report.
+///
+/// # Returns
+/// - `()`: This function returns nothing.
+///
+/// # Expected Output
+/// - Prints progress updates to stdout when thresholds are reached.
+fn log_progress_every_ten_percent(done: u64, total: u64, next_pct: &mut u64, label: &str) {
+    if total == 0 {
+        return;
+    }
+
+    let pct = done.saturating_mul(100) / total;
+    if pct >= *next_pct || done == total {
+        let display_pct = if done == total {
+            100
+        } else {
+            ((pct / 10) * 10).min(100)
+        };
+        println!("{label} progress: {}% ({}/{})", display_pct, done, total);
+
+        while *next_pct <= pct && *next_pct < 100 {
+            *next_pct += 10;
+        }
+        if done == total {
+            *next_pct = 110;
+        }
+    }
+}
+
 /// Sorts candidates by Hamming distance to the reference bits.
 ///
 /// # Parameters
@@ -102,16 +158,25 @@ pub fn mirror_inverted_candidates(
 pub fn search_avalanche_tree(
     candidates: Vec<AvalancheNode>,
 ) -> Result<AvalancheNode, AvalancheError> {
-    let bit_width = validate_candidates(&candidates)?;
-    if candidates.len() == 1 {
-        return Ok(candidates
-            .into_iter()
-            .next()
-            .ok_or(AvalancheError::EmptyCandidates)?);
-    }
+    search_avalanche_tree_internal(candidates, None).map(|result| result.node)
+}
 
-    let next_level = build_next_level(&candidates, bit_width)?;
-    search_avalanche_tree(next_level)
+/// Recursively reduces candidates by bitwise AND with bias accumulation while printing progress.
+///
+/// # Parameters
+/// - `candidates`: Candidate nodes with message bits and bias vectors.
+/// - `progress_label`: Human-readable label used for progress logging.
+///
+/// # Returns
+/// - `Result<AvalancheNode, AvalancheError>`: Final node after reduction.
+///
+/// # Expected Output
+/// - Prints progress updates to stdout and returns the reduced node.
+pub fn search_avalanche_tree_with_progress(
+    candidates: Vec<AvalancheNode>,
+    progress_label: &str,
+) -> Result<AvalancheNode, AvalancheError> {
+    search_avalanche_tree_internal(candidates, Some(progress_label)).map(|result| result.node)
 }
 
 /// Recursively reduces candidates while computing per-level similarity scores.
@@ -127,41 +192,25 @@ pub fn search_avalanche_tree(
 pub fn search_avalanche_tree_with_scores(
     candidates: Vec<AvalancheNode>,
 ) -> Result<AvalancheSearchResult, AvalancheError> {
-    let bit_width = validate_candidates(&candidates)?;
-    if candidates.len() == 1 {
-        return Ok(AvalancheSearchResult {
-            node: candidates
-                .into_iter()
-                .next()
-                .ok_or(AvalancheError::EmptyCandidates)?,
-            level_similarity_pct: Vec::new(),
-            level_pair_counts: Vec::new(),
-        });
-    }
+    search_avalanche_tree_with_scores_internal(candidates, None)
+}
 
-    let mut current = candidates;
-    let mut level_similarity_pct = Vec::new();
-    let mut level_pair_counts = Vec::new();
-
-    while current.len() > 1 {
-        let (next, level_match_weight, level_weight, pair_count) =
-            build_next_level_with_similarity(&current, bit_width)?;
-        if level_weight > 0.0 {
-            level_similarity_pct.push(level_match_weight / level_weight * 100.0);
-            level_pair_counts.push(pair_count);
-        }
-        current = next;
-    }
-
-    let node = current
-        .into_iter()
-        .next()
-        .ok_or(AvalancheError::EmptyCandidates)?;
-    Ok(AvalancheSearchResult {
-        node,
-        level_similarity_pct,
-        level_pair_counts,
-    })
+/// Recursively reduces candidates while computing per-level similarity scores and printing progress.
+///
+/// # Parameters
+/// - `candidates`: Candidate nodes with message bits and bias vectors.
+/// - `progress_label`: Human-readable label used for progress logging.
+///
+/// # Returns
+/// - `Result<AvalancheSearchResult, AvalancheError>`: Final node and per-level scores.
+///
+/// # Expected Output
+/// - Prints progress updates to stdout and returns the reduced node plus similarity data.
+pub fn search_avalanche_tree_with_scores_progress(
+    candidates: Vec<AvalancheNode>,
+    progress_label: &str,
+) -> Result<AvalancheSearchResult, AvalancheError> {
+    search_avalanche_tree_with_scores_internal(candidates, Some(progress_label))
 }
 
 /// Validates that candidates are non-empty and consistent in bit width.
@@ -188,6 +237,116 @@ fn validate_candidates(candidates: &[AvalancheNode]) -> Result<usize, AvalancheE
         }
     }
     Ok(bit_width)
+}
+
+/// Reduces an avalanche tree while optionally printing per-level progress.
+///
+/// # Parameters
+/// - `candidates`: Candidate nodes with message bits and bias vectors.
+/// - `progress_label`: Optional human-readable label used for progress logging.
+///
+/// # Returns
+/// - `Result<AvalancheSearchResult, AvalancheError>`: Final node with empty similarity vectors.
+///
+/// # Expected Output
+/// - Optionally prints progress updates to stdout and returns the reduced node.
+fn search_avalanche_tree_internal(
+    candidates: Vec<AvalancheNode>,
+    progress_label: Option<&str>,
+) -> Result<AvalancheSearchResult, AvalancheError> {
+    let bit_width = validate_candidates(&candidates)?;
+    if candidates.len() == 1 {
+        return Ok(AvalancheSearchResult {
+            node: candidates
+                .into_iter()
+                .next()
+                .ok_or(AvalancheError::EmptyCandidates)?,
+            level_similarity_pct: Vec::new(),
+            level_pair_counts: Vec::new(),
+        });
+    }
+
+    let total_levels = avalanche_reduction_level_count(candidates.len());
+    let mut next_pct = 10u64;
+    let mut completed_levels = 0u64;
+    let mut current = candidates;
+
+    while current.len() > 1 {
+        current = build_next_level(&current, bit_width)?;
+        completed_levels += 1;
+        if let Some(label) = progress_label {
+            log_progress_every_ten_percent(completed_levels, total_levels, &mut next_pct, label);
+        }
+    }
+
+    let node = current
+        .into_iter()
+        .next()
+        .ok_or(AvalancheError::EmptyCandidates)?;
+    Ok(AvalancheSearchResult {
+        node,
+        level_similarity_pct: Vec::new(),
+        level_pair_counts: Vec::new(),
+    })
+}
+
+/// Reduces an avalanche tree with similarity scoring while optionally printing per-level progress.
+///
+/// # Parameters
+/// - `candidates`: Candidate nodes with message bits and bias vectors.
+/// - `progress_label`: Optional human-readable label used for progress logging.
+///
+/// # Returns
+/// - `Result<AvalancheSearchResult, AvalancheError>`: Final node and per-level scores.
+///
+/// # Expected Output
+/// - Optionally prints progress updates to stdout and returns the reduced node plus similarity data.
+fn search_avalanche_tree_with_scores_internal(
+    candidates: Vec<AvalancheNode>,
+    progress_label: Option<&str>,
+) -> Result<AvalancheSearchResult, AvalancheError> {
+    let bit_width = validate_candidates(&candidates)?;
+    if candidates.len() == 1 {
+        return Ok(AvalancheSearchResult {
+            node: candidates
+                .into_iter()
+                .next()
+                .ok_or(AvalancheError::EmptyCandidates)?,
+            level_similarity_pct: Vec::new(),
+            level_pair_counts: Vec::new(),
+        });
+    }
+
+    let total_levels = avalanche_reduction_level_count(candidates.len());
+    let mut next_pct = 10u64;
+    let mut completed_levels = 0u64;
+    let mut current = candidates;
+    let mut level_similarity_pct = Vec::new();
+    let mut level_pair_counts = Vec::new();
+
+    while current.len() > 1 {
+        let (next, level_match_weight, level_weight, pair_count) =
+            build_next_level_with_similarity(&current, bit_width)?;
+        if level_weight > 0.0 {
+            level_similarity_pct.push(level_match_weight / level_weight * 100.0);
+            level_pair_counts.push(pair_count);
+        }
+        current = next;
+        completed_levels += 1;
+        if let Some(label) = progress_label {
+            log_progress_every_ten_percent(completed_levels, total_levels, &mut next_pct, label);
+        }
+    }
+
+    let node = current
+        .into_iter()
+        .next()
+        .ok_or(AvalancheError::EmptyCandidates)?;
+    Ok(AvalancheSearchResult {
+        node,
+        level_similarity_pct,
+        level_pair_counts,
+    })
 }
 
 /// Builds the bitwise inversion of a candidate node.

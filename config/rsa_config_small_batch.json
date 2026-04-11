@@ -56,6 +56,7 @@
     "r_candidate_retarget_partition_count": 2,
     "r_candidate_retarget_minimum_exponent": 0.45,
     "beam_bit_one_threshold": 0.5,
+    "avalanche_beam_top_k": 6,
     "avalanche_probability_spread_exponent": 0.45, //0.45
     "combiner_enable": false,
     "combiner_k_oracles": 100,

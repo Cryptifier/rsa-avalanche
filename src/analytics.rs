@@ -43,6 +43,8 @@ pub struct AnalyticsCliArgs {
     pub mirror_invert_candidates: bool,
     /// Minimum stored beam value interpreted as bit `1`.
     pub beam_bit_one_threshold: f64,
+    /// Number of top avalanche beam-search candidates retained per run.
+    pub avalanche_beam_top_k: usize,
     /// Exponent used to spread normalized avalanche beam probabilities.
     pub avalanche_probability_spread_exponent: f64,
     /// Number of avalanche combination samples evaluated per batch.
@@ -83,6 +85,7 @@ pub(crate) struct AnalyticsCliInfo {
     use_hamming_distance: bool,
     mirror_invert_candidates: bool,
     beam_bit_one_threshold: f64,
+    avalanche_beam_top_k: usize,
     avalanche_probability_spread_exponent: f64,
     avalanche_combination_samples: u64,
     avalanche_combination_size: usize,
@@ -405,6 +408,7 @@ impl SessionAnalytics {
                 use_hamming_distance: args.use_hamming_distance,
                 mirror_invert_candidates: args.mirror_invert_candidates,
                 beam_bit_one_threshold: args.beam_bit_one_threshold,
+                avalanche_beam_top_k: args.avalanche_beam_top_k,
                 avalanche_probability_spread_exponent: args.avalanche_probability_spread_exponent,
                 avalanche_combination_samples: args.avalanche_combination_samples,
                 avalanche_combination_size: args.avalanche_combination_size,

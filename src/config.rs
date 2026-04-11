@@ -137,6 +137,9 @@ pub struct EngineConfig {
     /// Minimum stored beam value interpreted as bit `1`.
     #[serde(default = "default_beam_bit_one_threshold")]
     pub beam_bit_one_threshold: f64,
+    /// Number of top avalanche beam-search candidates retained per run.
+    #[serde(default = "default_avalanche_beam_top_k")]
+    pub avalanche_beam_top_k: usize,
     /// Exponent used to spread normalized avalanche beam probabilities.
     #[serde(default = "default_avalanche_probability_spread_exponent")]
     pub avalanche_probability_spread_exponent: f64,
@@ -322,6 +325,7 @@ impl Default for EngineConfig {
             ciphertext_modify: default_ciphertext_modify(),
             oracle_accuracy_threshold: default_oracle_accuracy_threshold(),
             beam_bit_one_threshold: default_beam_bit_one_threshold(),
+            avalanche_beam_top_k: default_avalanche_beam_top_k(),
             avalanche_probability_spread_exponent: default_avalanche_probability_spread_exponent(),
             use_hamming_distance: default_use_hamming_distance(),
             mirror_invert_candidates: default_mirror_invert_candidates(),
@@ -1032,6 +1036,20 @@ fn default_oracle_accuracy_threshold() -> f64 {
 /// - Returns a constant default value; no side effects.
 fn default_beam_bit_one_threshold() -> f64 {
     0.4
+}
+
+/// Default number of top avalanche beam-search candidates retained.
+///
+/// # Parameters
+/// - None.
+///
+/// # Returns
+/// - `usize`: Default number of beam-search outputs recorded for avalanche runs.
+///
+/// # Expected Output
+/// - Returns a constant default value; no side effects.
+fn default_avalanche_beam_top_k() -> usize {
+    100
 }
 
 /// Default exponent for spreading normalized avalanche beam probabilities.

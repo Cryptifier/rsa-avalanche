@@ -41,7 +41,7 @@ use crate::analytics::{
 };
 use crate::avalanche::{
     AvalancheNode, mirror_inverted_candidates, search_avalanche_tree_with_scores,
-    sort_candidates_by_hamming_distance,
+    search_avalanche_tree_with_scores_progress, sort_candidates_by_hamming_distance,
 };
 use crate::combiner::majority_vote_with_distribution;
 use crate::config::{Config, EngineConfig};
@@ -57,7 +57,7 @@ use crate::math::{
 };
 use crate::r_candidates::{RCandidate, RCandidateSettings};
 use crate::rng::{RngChoice, RngMode};
-use crate::search::{beam_search_top_k, viterbi_decode};
+use crate::search::{beam_search_top_k, beam_search_top_k_with_progress, viterbi_decode};
 use num_bigint::BigUint;
 use num_integer::Integer;
 use num_traits::{One, Zero};
@@ -715,6 +715,64 @@ fn log_progress_every_ten_percent(done: u64, total: u64, next_pct: &mut u64, lab
         }
         if done == total {
             *next_pct = 100;
+        }
+    }
+}
+
+/// Logs progress for parallel work every ten percent using atomics.
+///
+/// # Parameters
+/// - `done`: Number of completed items after the latest atomic increment.
+/// - `total`: Total number of items expected.
+/// - `next_pct`: Shared next-percentage threshold for the progress report.
+/// - `label`: Human-readable label for the progress report.
+///
+/// # Returns
+/// - `()`: This function returns nothing.
+///
+/// # Expected Output
+/// - Prints progress updates to stdout when thresholds are reached across parallel workers.
+fn log_parallel_progress_every_ten_percent(
+    done: u64,
+    total: u64,
+    next_pct: &AtomicU64,
+    label: &str,
+) {
+    if total == 0 {
+        return;
+    }
+
+    let pct = done.saturating_mul(100) / total;
+    loop {
+        let threshold = next_pct.load(Ordering::Relaxed);
+        if pct < threshold && done != total {
+            return;
+        }
+
+        let display_pct = if done == total {
+            100
+        } else {
+            ((pct / 10) * 10).min(100)
+        };
+        let mut updated_threshold = threshold;
+        while updated_threshold <= pct && updated_threshold < 100 {
+            updated_threshold += 10;
+        }
+        if done == total {
+            updated_threshold = 100;
+        }
+
+        if next_pct
+            .compare_exchange(
+                threshold,
+                updated_threshold,
+                Ordering::SeqCst,
+                Ordering::Relaxed,
+            )
+            .is_ok()
+        {
+            println!("{label} progress: {}% ({}/{})", display_pct, done, total);
+            return;
         }
     }
 }
@@ -2434,7 +2492,8 @@ fn run_avalanche_search(
         .count();
     let msb_zero_count = avalanche_nodes.len().saturating_sub(msb_one_count);
     let avalanche_count = avalanche_nodes.len();
-    let avalanche_search = search_avalanche_tree_with_scores(avalanche_nodes)?;
+    let avalanche_search =
+        search_avalanche_tree_with_scores_progress(avalanche_nodes, "Avalanche tree reduction")?;
     let avalanche_result = avalanche_search.node;
     // dbg!(&avalanche_result);
     with_analytics(analytics, |a| {
@@ -2455,6 +2514,7 @@ fn run_avalanche_search(
 
     let bit_width = avalanche_result.message_bits.len().max(1);
     let beam_bit_one_threshold = engine.beam_bit_one_threshold;
+    let avalanche_beam_top_k = engine.avalanche_beam_top_k.max(1);
     let avalanche_probability_spread_exponent = engine.avalanche_probability_spread_exponent;
     let raw_bias_line = avalanche_result
         .biases
@@ -2510,10 +2570,11 @@ fn run_avalanche_search(
             .join(" ");
         println!("Avalanche similarity per level (%): {}", similarity_line);
     }
-    let beam_result = beam_search_top_k(
+    let beam_result = beam_search_top_k_with_progress(
         vec![Vec::new()],
-        5,
+        avalanche_beam_top_k,
         bit_width,
+        "Avalanche beam search",
         |candidate| {
             if candidate.len() >= bit_width {
                 return Vec::new();
@@ -5046,6 +5107,7 @@ fn run_sampled_avalanche_beam_search(
 
     let sample_count = engine.avalanche_combination_samples as usize;
     let beam_bit_one_threshold = engine.beam_bit_one_threshold;
+    let avalanche_beam_top_k = engine.avalanche_beam_top_k.max(1);
     let spread_exponent = engine.avalanche_probability_spread_exponent;
     let majority_vote_enabled = engine.avalanche_combination_majority_vote;
     let sample_smoothing_enabled = engine.avalanche_combination_sample_smoothing;
@@ -5136,7 +5198,7 @@ fn run_sampled_avalanche_beam_search(
         let bit_width = avalanche_search.node.message_bits.len().max(1);
         let beam_result = beam_search_top_k(
             vec![Vec::new()],
-            5,
+            avalanche_beam_top_k,
             bit_width,
             |candidate| {
                 if candidate.len() >= bit_width {
@@ -5435,6 +5497,15 @@ fn run_r_candidate_accuracy_batches(
         }
 
         let avalanche_bit_width = resolve_decrypt_bit_width(&message, bits_decrypt)?;
+        let batch_cx_total = u64::try_from(batch_candidates.len())
+            .map_err(|_| "batch candidate count exceeds u64 range")?
+            .checked_mul(
+                u64::try_from(message_count).map_err(|_| "message count exceeds u64 range")?,
+            )
+            .ok_or("c^x progress total overflowed u64")?;
+        let batch_cx_done = AtomicU64::new(0);
+        let batch_cx_next_pct = AtomicU64::new(10);
+        let batch_cx_label = format!("Accuracy batch {} c^x candidates", batch_number);
         let computations: Vec<AccuracyComputation> = batch_candidates
             .par_iter()
             .enumerate()
@@ -5497,6 +5568,13 @@ fn run_r_candidate_accuracy_batches(
                     });
                     hbc_ciphertexts_r.push(hbc_result.to_string());
                     candidate_decryptions.push(dm.to_string());
+                    let done = batch_cx_done.fetch_add(1, Ordering::Relaxed) + 1;
+                    log_parallel_progress_every_ten_percent(
+                        done,
+                        batch_cx_total,
+                        &batch_cx_next_pct,
+                        &batch_cx_label,
+                    );
                 }
 
                 let accuracy_pct = total_accuracy / message_count as f64;
@@ -6109,6 +6187,7 @@ mod tests {
             use_hamming_distance: false,
             mirror_invert_candidates: false,
             beam_bit_one_threshold: 0.4,
+            avalanche_beam_top_k: 100,
             avalanche_probability_spread_exponent: 0.5,
             avalanche_combination_samples: 100,
             avalanche_combination_size: 50,
@@ -6177,6 +6256,7 @@ mod tests {
             use_hamming_distance: false,
             mirror_invert_candidates: false,
             beam_bit_one_threshold: 0.4,
+            avalanche_beam_top_k: 100,
             avalanche_probability_spread_exponent: 0.5,
             avalanche_combination_samples: 100,
             avalanche_combination_size: 50,
