@@ -744,6 +744,41 @@ fn log_progress_every_ten_percent(done: u64, total: u64, next_pct: &mut u64, lab
     log_progress_every_percent_step(done, total, next_pct, label, 10);
 }
 
+/// Logs sequential progress updates at a fixed wall-clock interval.
+///
+/// # Parameters
+/// - `done`: Number of completed items.
+/// - `total`: Total number of items.
+/// - `next_log_at`: Deadline for the next timed progress report.
+/// - `label`: Human-readable label for the progress report.
+/// - `interval`: Minimum duration between progress reports.
+///
+/// # Returns
+/// - `()`: This function returns nothing.
+///
+/// # Expected Output
+/// - Prints progress updates to stdout when the interval elapses or when work reaches completion.
+fn log_progress_every_interval(
+    done: u64,
+    total: u64,
+    next_log_at: &mut Instant,
+    label: &str,
+    interval: Duration,
+) {
+    if total == 0 {
+        return;
+    }
+
+    let now = Instant::now();
+    if done != total && now < *next_log_at {
+        return;
+    }
+
+    let pct = ((done as f64) * 100.0 / (total as f64)).min(100.0);
+    println!("{label} progress: {:.5}% ({}/{})", pct, done, total);
+    *next_log_at = now + interval;
+}
+
 /// Logs progress for parallel work every ten percent using atomics.
 ///
 /// # Parameters
@@ -5167,7 +5202,8 @@ fn run_sampled_avalanche_beam_search(
     let mut all_samples = Vec::with_capacity(sample_count);
     let mut selected_sample: Option<SampledAvalancheExecution> = None;
     let mut evaluated_candidates = 0usize;
-    let mut next_sample_pct = 10u64;
+    let sample_progress_interval = Duration::from_secs(5);
+    let mut next_sample_log_at = Instant::now() + sample_progress_interval;
 
     println!(
         "Avalanche combination setup for batch {}: scored inputs {} r-candidate-pool {} configured-mixed-r-candidates {} effective-mixed-r-candidates {} samples {} majority-vote {} sample-smoothing {} majority-print {}",
@@ -5219,148 +5255,147 @@ fn run_sampled_avalanche_beam_search(
         let avalanche_nodes =
             build_avalanche_nodes_from_scored_inputs(&selected_inputs, engine, &message_bits)?;
         evaluated_candidates += avalanche_nodes.len();
-        if avalanche_nodes.is_empty() {
-            continue;
-        }
-
-        let avalanche_search = search_avalanche_tree_with_scores(avalanche_nodes)?;
-        let selected_oracles = selected_inputs
-            .iter()
-            .map(|input| input.message_bits.clone())
-            .collect::<Vec<_>>();
-        let majority_distribution =
-            majority_vote_with_distribution(&selected_oracles, engine.combiner_tie_breaker)
-                .map_err(|err| -> Box<dyn Error> { Box::new(err) })?;
-        let majority_probabilities = if sample_smoothing_enabled {
-            smooth_probability_one_jeffreys(
-                &majority_distribution.ones_count,
-                majority_distribution.total_oracles,
-            )
-        } else {
-            majority_distribution.probability_one.clone()
-        };
-        let normalized_biases = if majority_vote_enabled {
-            majority_probabilities.clone()
-        } else {
-            normalize_avalanche_biases(&avalanche_search.node.biases)
-        };
-        let beam_probabilities =
-            spread_normalized_avalanche_biases(&normalized_biases, spread_exponent);
-        let bit_width = avalanche_search.node.message_bits.len().max(1);
-        let beam_result = beam_search_top_k(
-            vec![Vec::new()],
-            avalanche_beam_top_k,
-            bit_width,
-            |candidate| {
-                if candidate.len() >= bit_width {
-                    return Vec::new();
-                }
-                let mut zero = candidate.to_vec();
-                let mut one = candidate.to_vec();
-                zero.push(0.0);
-                one.push(1.0);
-                vec![zero, one]
-            },
-            |candidate| {
-                candidate
-                    .iter()
-                    .enumerate()
-                    .map(|(idx, bit)| {
-                        let bias = beam_probabilities.get(idx).copied().unwrap_or(0.0);
-                        if stored_beam_value_is_one(*bit, beam_bit_one_threshold) {
-                            bias
-                        } else {
-                            1.0 - bias
-                        }
-                    })
-                    .sum()
-            },
-        )?;
-
-        let mut best_bits = Vec::new();
-        let beam_results = beam_result
-            .beam
-            .iter()
-            .enumerate()
-            .map(|(rank, candidate)| {
-                let candidate_bits: Vec<bool> = candidate
-                    .vector
-                    .iter()
-                    .map(|value| stored_beam_value_is_one(*value, beam_bit_one_threshold))
-                    .collect();
-                if rank == 0 {
-                    best_bits = candidate_bits.clone();
-                }
-                let (match_pct, ones_match_pct) =
-                    compute_bit_match_percentages(&candidate_bits, &message_bits);
-                AvalancheCombinationBeamResult {
-                    rank: rank + 1,
-                    score: candidate.score,
-                    match_pct,
-                    ones_match_pct,
-                    hex: format_bits_hex_le(&candidate_bits),
-                    bit_width: candidate_bits.len(),
-                }
-            })
-            .collect::<Vec<_>>();
-        let top_beam_score = beam_results.first().map(|beam| beam.score).unwrap_or(0.0);
-        let sample = AvalancheCombinationSample {
-            sample_index: sample_index + 1,
-            pool_size,
-            r_candidate_pool_size,
-            combination_size: selected_inputs.len(),
-            mixed_r_candidate_count: selected_group_count,
-            average_score_pct,
-            majority_vote_enabled,
-            sample_smoothing_enabled,
-            inputs: selected_inputs
+        if !avalanche_nodes.is_empty() {
+            let avalanche_search = search_avalanche_tree_with_scores(avalanche_nodes)?;
+            let selected_oracles = selected_inputs
                 .iter()
-                .map(|input| AvalancheCombinationSampleInput {
-                    batch_candidate_index: input.batch_candidate_index,
-                    message_index: input.message_index,
-                    r: input.r.to_string(),
-                    r_bits: input.r_bits,
-                    target_exponent: input.target_exponent.clone(),
-                    x: input.x.to_string(),
-                    score_match_pct: input.score_match_pct,
-                    hbc_ciphertext_r: input.hbc_ciphertext_r.clone(),
-                    candidate_decryption: input.candidate_decryption.clone(),
-                })
-                .collect(),
-            majority_vote_bits: majority_distribution.majority_bits,
-            majority_vote_ones_count: majority_distribution.ones_count,
-            majority_vote_zeros_count: majority_distribution.zeros_count,
-            majority_vote_probability_one: majority_probabilities,
-            level_similarity_pct: avalanche_search.level_similarity_pct,
-            level_pair_counts: avalanche_search.level_pair_counts,
-            normalized_bias_probabilities: normalized_biases,
-            beam_search_probabilities: beam_probabilities,
-            beam_results,
-        };
+                .map(|input| input.message_bits.clone())
+                .collect::<Vec<_>>();
+            let majority_distribution =
+                majority_vote_with_distribution(&selected_oracles, engine.combiner_tie_breaker)
+                    .map_err(|err| -> Box<dyn Error> { Box::new(err) })?;
+            let majority_probabilities = if sample_smoothing_enabled {
+                smooth_probability_one_jeffreys(
+                    &majority_distribution.ones_count,
+                    majority_distribution.total_oracles,
+                )
+            } else {
+                majority_distribution.probability_one.clone()
+            };
+            let normalized_biases = if majority_vote_enabled {
+                majority_probabilities.clone()
+            } else {
+                normalize_avalanche_biases(&avalanche_search.node.biases)
+            };
+            let beam_probabilities =
+                spread_normalized_avalanche_biases(&normalized_biases, spread_exponent);
+            let bit_width = avalanche_search.node.message_bits.len().max(1);
+            let beam_result = beam_search_top_k(
+                vec![Vec::new()],
+                avalanche_beam_top_k,
+                bit_width,
+                |candidate| {
+                    if candidate.len() >= bit_width {
+                        return Vec::new();
+                    }
+                    let mut zero = candidate.to_vec();
+                    let mut one = candidate.to_vec();
+                    zero.push(0.0);
+                    one.push(1.0);
+                    vec![zero, one]
+                },
+                |candidate| {
+                    candidate
+                        .iter()
+                        .enumerate()
+                        .map(|(idx, bit)| {
+                            let bias = beam_probabilities.get(idx).copied().unwrap_or(0.0);
+                            if stored_beam_value_is_one(*bit, beam_bit_one_threshold) {
+                                bias
+                            } else {
+                                1.0 - bias
+                            }
+                        })
+                        .sum()
+                },
+            )?;
 
-        let execution = SampledAvalancheExecution {
-            sample: sample.clone(),
-            best_bits,
-            top_beam_score,
-        };
-        let replace = match selected_sample {
-            Some(ref current) => {
-                average_score_pct > current.sample.average_score_pct
-                    || (average_score_pct == current.sample.average_score_pct
-                        && top_beam_score > current.top_beam_score)
+            let mut best_bits = Vec::new();
+            let beam_results = beam_result
+                .beam
+                .iter()
+                .enumerate()
+                .map(|(rank, candidate)| {
+                    let candidate_bits: Vec<bool> = candidate
+                        .vector
+                        .iter()
+                        .map(|value| stored_beam_value_is_one(*value, beam_bit_one_threshold))
+                        .collect();
+                    if rank == 0 {
+                        best_bits = candidate_bits.clone();
+                    }
+                    let (match_pct, ones_match_pct) =
+                        compute_bit_match_percentages(&candidate_bits, &message_bits);
+                    AvalancheCombinationBeamResult {
+                        rank: rank + 1,
+                        score: candidate.score,
+                        match_pct,
+                        ones_match_pct,
+                        hex: format_bits_hex_le(&candidate_bits),
+                        bit_width: candidate_bits.len(),
+                    }
+                })
+                .collect::<Vec<_>>();
+            let top_beam_score = beam_results.first().map(|beam| beam.score).unwrap_or(0.0);
+            let sample = AvalancheCombinationSample {
+                sample_index: sample_index + 1,
+                pool_size,
+                r_candidate_pool_size,
+                combination_size: selected_inputs.len(),
+                mixed_r_candidate_count: selected_group_count,
+                average_score_pct,
+                majority_vote_enabled,
+                sample_smoothing_enabled,
+                inputs: selected_inputs
+                    .iter()
+                    .map(|input| AvalancheCombinationSampleInput {
+                        batch_candidate_index: input.batch_candidate_index,
+                        message_index: input.message_index,
+                        r: input.r.to_string(),
+                        r_bits: input.r_bits,
+                        target_exponent: input.target_exponent.clone(),
+                        x: input.x.to_string(),
+                        score_match_pct: input.score_match_pct,
+                        hbc_ciphertext_r: input.hbc_ciphertext_r.clone(),
+                        candidate_decryption: input.candidate_decryption.clone(),
+                    })
+                    .collect(),
+                majority_vote_bits: majority_distribution.majority_bits,
+                majority_vote_ones_count: majority_distribution.ones_count,
+                majority_vote_zeros_count: majority_distribution.zeros_count,
+                majority_vote_probability_one: majority_probabilities,
+                level_similarity_pct: avalanche_search.level_similarity_pct,
+                level_pair_counts: avalanche_search.level_pair_counts,
+                normalized_bias_probabilities: normalized_biases,
+                beam_search_probabilities: beam_probabilities,
+                beam_results,
+            };
+
+            let execution = SampledAvalancheExecution {
+                sample: sample.clone(),
+                best_bits,
+                top_beam_score,
+            };
+            let replace = match selected_sample {
+                Some(ref current) => {
+                    average_score_pct > current.sample.average_score_pct
+                        || (average_score_pct == current.sample.average_score_pct
+                            && top_beam_score > current.top_beam_score)
+                }
+                None => true,
+            };
+            if replace {
+                selected_sample = Some(execution);
             }
-            None => true,
-        };
-        if replace {
-            selected_sample = Some(execution);
+            all_samples.push(sample);
         }
-        all_samples.push(sample);
-        log_progress_every_percent_step(
+
+        log_progress_every_interval(
             (sample_index + 1) as u64,
             sample_count as u64,
-            &mut next_sample_pct,
+            &mut next_sample_log_at,
             &format!("Avalanche sample batch {}", batch_number),
-            1,
+            sample_progress_interval,
         );
     }
 
