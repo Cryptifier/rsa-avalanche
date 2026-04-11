@@ -1,6 +1,8 @@
 use rayon::prelude::*;
 
 use crate::helpers::hamming_distance_bits;
+#[cfg(all(feature = "aarch64-hamming-accel", target_arch = "aarch64"))]
+use crate::helpers::{hamming_distance_packed_bytes, pack_bits_to_bytes};
 
 /// Errors returned by avalanche tree search.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -129,6 +131,14 @@ pub fn sort_candidates_by_hamming_distance(
         return Err(AvalancheError::InconsistentBitWidth);
     }
 
+    #[cfg(all(feature = "aarch64-hamming-accel", target_arch = "aarch64"))]
+    {
+        return Ok(sort_candidates_by_hamming_distance_aarch64(
+            candidates,
+            reference_bits,
+        ));
+    }
+
     let mut sorted = candidates;
     sorted.sort_by(|left, right| {
         hamming_distance_bits(&left.message_bits, reference_bits)
@@ -136,6 +146,44 @@ pub fn sort_candidates_by_hamming_distance(
             .then_with(|| compare_message_bits_le(&left.message_bits, &right.message_bits))
     });
     Ok(sorted)
+}
+
+/// Sorts candidates by precomputed Hamming-distance keys on `aarch64`.
+///
+/// # Parameters
+/// - `candidates`: Candidate nodes to sort.
+/// - `reference_bits`: Reference bit vector used for distance ordering.
+///
+/// # Returns
+/// - `Vec<AvalancheNode>`: Candidates sorted by distance and then message bits.
+///
+/// # Expected Output
+/// - Returns a sorted candidate list; no stdout/stderr output.
+#[cfg(all(feature = "aarch64-hamming-accel", target_arch = "aarch64"))]
+fn sort_candidates_by_hamming_distance_aarch64(
+    candidates: Vec<AvalancheNode>,
+    reference_bits: &[bool],
+) -> Vec<AvalancheNode> {
+    let packed_reference = pack_bits_to_bytes(reference_bits);
+    let mut keyed_candidates: Vec<(usize, AvalancheNode)> = candidates
+        .into_iter()
+        .map(|candidate| {
+            let packed_message = pack_bits_to_bytes(&candidate.message_bits);
+            let distance = hamming_distance_packed_bytes(&packed_message, &packed_reference);
+            (distance, candidate)
+        })
+        .collect();
+
+    keyed_candidates.sort_by(|left, right| {
+        left.0
+            .cmp(&right.0)
+            .then_with(|| compare_message_bits_le(&left.1.message_bits, &right.1.message_bits))
+    });
+
+    keyed_candidates
+        .into_iter()
+        .map(|(_, candidate)| candidate)
+        .collect()
 }
 
 /// Mirrors candidates with their bitwise inversions.
