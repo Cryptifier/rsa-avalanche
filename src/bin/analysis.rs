@@ -226,14 +226,14 @@ fn main() -> Result<(), Box<dyn Error>> {
             .r_candidate_target_exponent_minimum
             .as_ref()
             .map(|value| value.normalized().to_string()),
-    })));
+    })?));
 
     let analytics_for_handler = Arc::clone(&analytics);
     ctrlc::set_handler(move || {
         if let Ok(mut guard) = analytics_for_handler.lock() {
             guard.finish(Some("interrupted".to_string()));
             let output_path = guard.session_json_path().to_string();
-            if let Err(err) = write_session_log(&output_path, &guard) {
+            if let Err(err) = write_session_log(&mut guard) {
                 eprintln!("Failed to write {}: {}", output_path, err);
             }
         }
@@ -257,7 +257,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     if let Ok(mut guard) = analytics.lock() {
         guard.finish(result.as_ref().err().map(|err| err.to_string()));
         let output_path = guard.session_json_path().to_string();
-        if let Err(err) = write_session_log(&output_path, &guard) {
+        if let Err(err) = write_session_log(&mut guard) {
             eprintln!("Failed to write {}: {}", output_path, err);
         }
     }

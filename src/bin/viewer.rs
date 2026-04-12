@@ -921,7 +921,7 @@ impl ViewerApp {
                 r_max: stats.max,
                 r_min: stats.min,
                 r_stddev: stats.stddev,
-                candidate_count: batch.candidates.len(),
+                candidate_count: batch.candidate_count as usize,
             });
         }
 
@@ -1582,6 +1582,7 @@ struct RCandidateBatch {
     small_prime_factors: u64,
     max_factors: u64,
     target_bit_length: Option<u64>,
+    candidate_count: u64,
     candidates: Vec<RCandidateEntry>,
 }
 
@@ -1606,6 +1607,7 @@ struct RCandidateAccuracyBatch {
     rabin_exponent: u64,
     tonelli_shanks_modulus: String,
     tonelli_shanks_ciphertexts: Vec<String>,
+    candidate_count: u64,
     candidates: Vec<RCandidateAccuracyEntry>,
     beam_match_pct: Option<f64>,
     beam_ones_match_pct: Option<f64>,
@@ -1632,6 +1634,7 @@ struct RCandidateTraceBatch {
     rabin_exponent: u64,
     tonelli_shanks_modulus: String,
     tonelli_shanks_ciphertext: String,
+    candidate_count: u64,
     candidates: Vec<RCandidateTraceEntry>,
 }
 
@@ -2271,6 +2274,8 @@ fn parse_r_candidate_batch(map: &Map<String, Value>) -> RCandidateBatch {
         small_prime_factors: value_as_u64(map.get("small_prime_factors")),
         max_factors: value_as_u64(map.get("max_factors")),
         target_bit_length: value_as_opt_u64(map.get("target_bit_length")),
+        candidate_count: value_as_opt_u64(map.get("candidate_count"))
+            .unwrap_or(candidates.len() as u64),
         candidates,
     }
 }
@@ -2312,6 +2317,8 @@ fn parse_r_candidate_accuracy_batch(map: &Map<String, Value>) -> RCandidateAccur
         rabin_exponent: value_as_u64(map.get("rabin_exponent")),
         tonelli_shanks_modulus: value_as_string(map.get("tonelli_shanks_modulus")),
         tonelli_shanks_ciphertexts: value_as_vec_string(map.get("tonelli_shanks_ciphertexts")),
+        candidate_count: value_as_opt_u64(map.get("candidate_count"))
+            .unwrap_or(candidates.len() as u64),
         candidates,
         beam_match_pct: value_as_opt_f64(map.get("beam_match_pct")),
         beam_ones_match_pct: value_as_opt_f64(map.get("beam_ones_match_pct")),
@@ -2365,6 +2372,8 @@ fn parse_r_candidate_trace_batch(map: &Map<String, Value>) -> RCandidateTraceBat
         rabin_exponent: value_as_u64(map.get("rabin_exponent")),
         tonelli_shanks_modulus: value_as_string(map.get("tonelli_shanks_modulus")),
         tonelli_shanks_ciphertext: value_as_string(map.get("tonelli_shanks_ciphertext")),
+        candidate_count: value_as_opt_u64(map.get("candidate_count"))
+            .unwrap_or(candidates.len() as u64),
         candidates,
     }
 }

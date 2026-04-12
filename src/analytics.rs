@@ -1,4 +1,6 @@
 use bigdecimal::BigDecimal;
+use std::fs::File;
+use std::io::BufWriter;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
 
@@ -6,6 +8,7 @@ use num_bigint::BigUint;
 use serde::Serialize;
 use serde_json::{Map, Value};
 
+use crate::logs::{LogError, LogWriter, write_session_start};
 use crate::r_candidates::{
     RCandidate, RCandidateMode, RCandidateSettings, generate_r_candidates_batch,
     retarget_r_candidates_for_speculative_oracles,
@@ -193,7 +196,10 @@ pub struct RCandidateBatchAnalytics {
     pub max_factors: usize,
     /// Optional target bit length for candidates.
     pub target_bit_length: Option<u64>,
+    /// Number of candidate entries produced for the batch.
+    pub candidate_count: usize,
     /// Candidate entries for the batch.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
     pub candidates: Vec<RCandidateEntry>,
 }
 
@@ -233,7 +239,10 @@ pub struct RCandidateAccuracyBatch {
     pub tonelli_shanks_modulus: String,
     /// Historical bootstrap-source ciphertext field (currently the shifted ciphertexts).
     pub tonelli_shanks_ciphertexts: Vec<String>,
+    /// Number of per-candidate accuracy entries evaluated for the batch.
+    pub candidate_count: usize,
     /// Per-candidate accuracy entries.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
     pub candidates: Vec<RCandidateAccuracyEntry>,
     /// Maximum bitwise match percentage among evaluated `c^x` candidates in the batch.
     pub cx_max_match_pct: Option<f64>,
@@ -257,7 +266,10 @@ pub struct RCandidateAccuracyBatch {
     pub avalanche_selected_sample_average_score_pct: Option<f64>,
     /// Total sampled avalanche candidates evaluated across all combination samples.
     pub avalanche_sampled_candidates_evaluated: usize,
+    /// Number of avalanche combination samples retained for the batch.
+    pub avalanche_combination_sample_count: usize,
     /// Detailed avalanche combination sample results for the batch.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
     pub avalanche_combination_samples: Vec<AvalancheCombinationSample>,
 }
 
@@ -359,8 +371,60 @@ pub struct RCandidateTraceBatch {
     pub tonelli_shanks_modulus: String,
     /// Historical bootstrap-source ciphertext field (currently the shifted ciphertext).
     pub tonelli_shanks_ciphertext: String,
+    /// Number of trace candidate entries evaluated for the batch.
+    pub candidate_count: usize,
     /// Per-candidate trace entries.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
     pub candidates: Vec<RCandidateTraceEntry>,
+}
+
+impl RCandidateBatchAnalytics {
+    /// Removes per-candidate payloads before session-log persistence.
+    ///
+    /// # Parameters
+    /// - None.
+    ///
+    /// # Returns
+    /// - `()`: This method returns nothing.
+    ///
+    /// # Expected Output
+    /// - Clears candidate-detail storage while preserving summary counts.
+    fn compact_for_session_log(&mut self) {
+        self.candidates.clear();
+    }
+}
+
+impl RCandidateAccuracyBatch {
+    /// Removes per-candidate payloads before session-log persistence.
+    ///
+    /// # Parameters
+    /// - None.
+    ///
+    /// # Returns
+    /// - `()`: This method returns nothing.
+    ///
+    /// # Expected Output
+    /// - Clears candidate and sampled-avalanche detail storage while preserving summary counts.
+    fn compact_for_session_log(&mut self) {
+        self.candidates.clear();
+        self.avalanche_combination_samples.clear();
+    }
+}
+
+impl RCandidateTraceBatch {
+    /// Removes per-candidate payloads before session-log persistence.
+    ///
+    /// # Parameters
+    /// - None.
+    ///
+    /// # Returns
+    /// - `()`: This method returns nothing.
+    ///
+    /// # Expected Output
+    /// - Clears trace-detail storage while preserving summary counts.
+    fn compact_for_session_log(&mut self) {
+        self.candidates.clear();
+    }
 }
 
 /// Top-level analytics session payload.
@@ -376,6 +440,10 @@ pub struct SessionAnalytics {
     pub(crate) r_candidate_accuracy_batches: Vec<RCandidateAccuracyBatch>,
     pub(crate) r_candidate_traces: Vec<RCandidateTraceBatch>,
     pub(crate) errors: Vec<String>,
+    #[serde(skip_serializing)]
+    pub(crate) stream_writer: Option<LogWriter<BufWriter<File>>>,
+    #[serde(skip_serializing)]
+    pub(crate) stream_started: bool,
 }
 
 impl SessionAnalytics {
@@ -385,44 +453,47 @@ impl SessionAnalytics {
     /// - `args`: CLI metadata to persist in the session.
     ///
     /// # Returns
-    /// - `SessionAnalytics`: Initialized analytics container.
+    /// - `Result<SessionAnalytics, LogError>`: Initialized analytics container or an NDJSON stream error.
     ///
     /// # Expected Output
-    /// - Returns a new session with timestamps and CLI metadata; no side effects.
-    pub fn new(args: AnalyticsCliArgs) -> Self {
-        Self {
-            started_unix_ms: now_unix_ms(),
+    /// - Creates or overwrites the configured session NDJSON file and writes `session_start`.
+    pub fn new(args: AnalyticsCliArgs) -> Result<Self, LogError> {
+        let started_unix_ms = now_unix_ms();
+        let cli = AnalyticsCliInfo {
+            bits: args.bits,
+            message_override: args.message_override,
+            public_exponent: args.public_exponent,
+            seed: args.seed,
+            crypto_rng: args.crypto_rng,
+            config_path: args.config_path,
+            tests: args.tests,
+            export: args.export,
+            session_json: args.session_json,
+            shift: args.shift,
+            ciphertext_modify: args.ciphertext_modify,
+            use_hamming_distance: args.use_hamming_distance,
+            mirror_invert_candidates: args.mirror_invert_candidates,
+            beam_bit_one_threshold: args.beam_bit_one_threshold,
+            avalanche_beam_top_k: args.avalanche_beam_top_k,
+            avalanche_probability_spread_exponent: args.avalanche_probability_spread_exponent,
+            avalanche_combination_samples: args.avalanche_combination_samples,
+            avalanche_combination_size: args.avalanche_combination_size,
+            avalanche_combination_mixed_r_candidates: args.avalanche_combination_mixed_r_candidates,
+            avalanche_combination_pool_size: args.avalanche_combination_pool_size,
+            avalanche_combination_majority_vote: args.avalanche_combination_majority_vote,
+            avalanche_combination_sample_smoothing: args.avalanche_combination_sample_smoothing,
+            avalanche_combination_majority_vote_print: args.avalanche_combination_majority_vote_print,
+            bits_decrypt: args.bits_decrypt,
+            r_candidate_target_exponent: args.r_candidate_target_exponent,
+            r_candidate_target_exponent_minimum: args.r_candidate_target_exponent_minimum,
+        };
+        let mut stream_writer = LogWriter::create(&cli.session_json)?;
+        write_session_start(&mut stream_writer, started_unix_ms, &cli)?;
+
+        Ok(Self {
+            started_unix_ms,
             finished_unix_ms: None,
-            cli: AnalyticsCliInfo {
-                bits: args.bits,
-                message_override: args.message_override,
-                public_exponent: args.public_exponent,
-                seed: args.seed,
-                crypto_rng: args.crypto_rng,
-                config_path: args.config_path,
-                tests: args.tests,
-                export: args.export,
-                session_json: args.session_json,
-                shift: args.shift,
-                ciphertext_modify: args.ciphertext_modify,
-                use_hamming_distance: args.use_hamming_distance,
-                mirror_invert_candidates: args.mirror_invert_candidates,
-                beam_bit_one_threshold: args.beam_bit_one_threshold,
-                avalanche_beam_top_k: args.avalanche_beam_top_k,
-                avalanche_probability_spread_exponent: args.avalanche_probability_spread_exponent,
-                avalanche_combination_samples: args.avalanche_combination_samples,
-                avalanche_combination_size: args.avalanche_combination_size,
-                avalanche_combination_mixed_r_candidates: args
-                    .avalanche_combination_mixed_r_candidates,
-                avalanche_combination_pool_size: args.avalanche_combination_pool_size,
-                avalanche_combination_majority_vote: args.avalanche_combination_majority_vote,
-                avalanche_combination_sample_smoothing: args.avalanche_combination_sample_smoothing,
-                avalanche_combination_majority_vote_print: args
-                    .avalanche_combination_majority_vote_print,
-                bits_decrypt: args.bits_decrypt,
-                r_candidate_target_exponent: args.r_candidate_target_exponent,
-                r_candidate_target_exponent_minimum: args.r_candidate_target_exponent_minimum,
-            },
+            cli,
             steps: Vec::new(),
             step_summaries: Vec::new(),
             features: Vec::new(),
@@ -430,7 +501,9 @@ impl SessionAnalytics {
             r_candidate_accuracy_batches: Vec::new(),
             r_candidate_traces: Vec::new(),
             errors: Vec::new(),
-        }
+            stream_writer: Some(stream_writer),
+            stream_started: true,
+        })
     }
 
     /// Returns the configured output path for the session JSON.
@@ -476,10 +549,13 @@ impl SessionAnalytics {
     /// # Expected Output
     /// - Appends a step timing entry; no stdout/stderr output.
     pub fn record_step(&mut self, name: &str, duration: Duration) {
-        self.steps.push(StepTiming {
+        let step = StepTiming {
             name: name.to_string(),
             duration_ms: duration.as_millis(),
-        });
+        };
+        if !self.try_stream_event("step", &step) {
+            self.steps.push(step);
+        }
     }
 
     /// Records an aggregate step summary for repeated operations.
@@ -500,12 +576,15 @@ impl SessionAnalytics {
         }
         let total_ms = total.as_millis();
         let mean_ms = total_ms as f64 / count as f64;
-        self.step_summaries.push(StepSummary {
+        let summary = StepSummary {
             name: name.to_string(),
             count,
             total_ms,
             mean_ms,
-        });
+        };
+        if !self.try_stream_event("step_summary", &summary) {
+            self.step_summaries.push(summary);
+        }
     }
 
     /// Marks a feature as enabled or disabled for this session.
@@ -584,7 +663,11 @@ impl SessionAnalytics {
     /// # Expected Output
     /// - Appends the batch entry; no stdout/stderr output.
     pub fn push_r_candidate_batch(&mut self, batch: RCandidateBatchAnalytics) {
-        self.r_candidate_batches.push(batch);
+        let mut batch = batch;
+        batch.compact_for_session_log();
+        if !self.try_stream_event("r_candidate_batch", &batch) {
+            self.r_candidate_batches.push(batch);
+        }
     }
 
     /// Stores r candidate accuracy batch data for the session.
@@ -598,7 +681,11 @@ impl SessionAnalytics {
     /// # Expected Output
     /// - Appends the accuracy batch entry; no stdout/stderr output.
     pub fn push_r_candidate_accuracy_batch(&mut self, batch: RCandidateAccuracyBatch) {
-        self.r_candidate_accuracy_batches.push(batch);
+        let mut batch = batch;
+        batch.compact_for_session_log();
+        if !self.try_stream_event("r_candidate_accuracy_batch", &batch) {
+            self.r_candidate_accuracy_batches.push(batch);
+        }
     }
 
     /// Stores r candidate trace data for a specific message context.
@@ -612,7 +699,11 @@ impl SessionAnalytics {
     /// # Expected Output
     /// - Appends the trace entry; no stdout/stderr output.
     pub fn push_r_candidate_trace_batch(&mut self, batch: RCandidateTraceBatch) {
-        self.r_candidate_traces.push(batch);
+        let mut batch = batch;
+        batch.compact_for_session_log();
+        if !self.try_stream_event("r_candidate_trace_batch", &batch) {
+            self.r_candidate_traces.push(batch);
+        }
     }
 
     fn feature_mut(&mut self, name: &str) -> &mut FeatureAnalytics {
@@ -624,6 +715,28 @@ impl SessionAnalytics {
             ..FeatureAnalytics::default()
         });
         self.features.last_mut().expect("feature entry missing")
+    }
+
+    fn try_stream_event<T: Serialize>(&mut self, event: &str, payload: &T) -> bool {
+        let mut stream_error = None;
+        let streamed = if let Some(writer) = self.stream_writer.as_mut() {
+            match writer.write_event(event, payload) {
+                Ok(()) => true,
+                Err(err) => {
+                    stream_error = Some(err);
+                    false
+                }
+            }
+        } else {
+            false
+        };
+        if let Some(err) = stream_error {
+            self.stream_writer = None;
+            self.errors.push(format!(
+                "analytics stream disabled after {event} write failure: {err}"
+            ));
+        }
+        streamed
     }
 }
 
@@ -718,6 +831,7 @@ pub fn generate_r_candidates_with_analytics(
             small_prime_factors: settings.small_prime_factors_per_candidate,
             max_factors: settings.max_factors_per_candidate,
             target_bit_length: settings.target_bit_length,
+            candidate_count: candidate_entries.len(),
             candidates: candidate_entries,
         });
     }

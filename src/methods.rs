@@ -3398,6 +3398,7 @@ fn record_r_candidate_trace_batch_from_prepared(
             rabin_exponent: y,
             tonelli_shanks_modulus: ctx.n.to_string(),
             tonelli_shanks_ciphertext: shifted_base_ciphertext.to_string(),
+            candidate_count: entries.len(),
             candidates: entries,
         });
     });
@@ -4546,6 +4547,7 @@ fn run_r_candidate_accuracy_batches(
                     .iter()
                     .map(|c| c.to_string())
                     .collect(),
+                candidate_count: entries.len(),
                 candidates: entries,
                 cx_max_match_pct: batch_cx_max_match_pct,
                 cx_max_x: batch_cx_max_x.map(|x| x.to_string()),
@@ -4560,6 +4562,7 @@ fn run_r_candidate_accuracy_batches(
                     batch_selected_sample_average_score_pct,
                 avalanche_sampled_candidates_evaluated: sampled_avalanche_result
                     .evaluated_candidates,
+                avalanche_combination_sample_count: sampled_avalanche_result.all_samples.len(),
                 avalanche_combination_samples: sampled_avalanche_result.all_samples,
             });
         });
