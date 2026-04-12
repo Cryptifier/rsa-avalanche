@@ -4,7 +4,7 @@
 use std::{
     error::Error,
     fs,
-    path::{Path, PathBuf},
+    path::Path,
     time::{SystemTime, UNIX_EPOCH},
 };
 

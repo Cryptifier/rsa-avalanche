@@ -2432,10 +2432,7 @@ fn value_as_biguint(value: Option<&Value>) -> BigUint {
     };
     match value {
         Value::String(val) => BigUint::parse_bytes(val.as_bytes(), 10).unwrap_or_default(),
-        Value::Number(num) => num
-            .as_u64()
-            .map(BigUint::from)
-            .unwrap_or_default(),
+        Value::Number(num) => num.as_u64().map(BigUint::from).unwrap_or_default(),
         Value::Bool(val) => BigUint::from(u8::from(*val)),
         Value::Array(_) => serde_json::from_value::<BigUint>(value.clone()).unwrap_or_default(),
         _ => BigUint::default(),
@@ -2978,11 +2975,7 @@ fn draw_bit_similarity_row(
     };
     let header_text = format!(
         "#{} | r={} | match={:.2}% | matching bits={}{}",
-        row.index,
-        row.r,
-        row.base_match_pct,
-        row.base_matching_bits,
-        suffix
+        row.index, row.r, row.base_match_pct, row.base_matching_bits, suffix
     );
     painter.text(
         egui::pos2(origin_x, header_y),

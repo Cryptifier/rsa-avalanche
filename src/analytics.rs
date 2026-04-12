@@ -485,7 +485,8 @@ impl SessionAnalytics {
             avalanche_combination_pool_size: args.avalanche_combination_pool_size,
             avalanche_combination_majority_vote: args.avalanche_combination_majority_vote,
             avalanche_combination_sample_smoothing: args.avalanche_combination_sample_smoothing,
-            avalanche_combination_majority_vote_print: args.avalanche_combination_majority_vote_print,
+            avalanche_combination_majority_vote_print: args
+                .avalanche_combination_majority_vote_print,
             avalanche_combination_keep_all_samples_in_memory: args
                 .avalanche_combination_keep_all_samples_in_memory,
             bits_decrypt: args.bits_decrypt,

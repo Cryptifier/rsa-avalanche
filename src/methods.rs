@@ -118,6 +118,20 @@ fn resolve_decrypt_bit_width(
     Ok(message.bits().max(1) as usize)
 }
 
+/// Resolves the bit width used by avalanche inputs and reductions.
+///
+/// # Parameters
+/// - `engine`: Engine configuration containing the configured message width.
+///
+/// # Returns
+/// - `usize`: Avalanche bit width derived from `engine.message.bits`.
+///
+/// # Expected Output
+/// - Returns at least `1`; no stdout/stderr output.
+fn resolve_avalanche_bit_width(engine: &EngineConfig) -> usize {
+    engine.message.bits.max(1) as usize
+}
+
 /// Runs the core RSA demo and analysis pipeline.
 ///
 /// # Parameters
@@ -287,14 +301,9 @@ pub fn run_demo(
 
     if config.engine.analysis_batch_enable {
         let batch_start = Instant::now();
-        if let Err(err) = run_r_candidate_accuracy_batches(
-            &ctx,
-            &config.engine,
-            &mut rng,
-            analytics,
-            args.shift,
-            args.bits_decrypt,
-        ) {
+        if let Err(err) =
+            run_r_candidate_accuracy_batches(&ctx, &config.engine, &mut rng, analytics, args.shift)
+        {
             with_analytics(analytics, |a| {
                 a.add_feature_note("r_candidate_accuracy", &format!("failed: {}", err));
                 a.record_feature_duration("r_candidate_accuracy", batch_start.elapsed());
@@ -1015,6 +1024,25 @@ fn count_matching_bits_le(a: &[bool], b: &[bool]) -> (usize, usize) {
     let packed_a = PackedBits::from_bools(&a[..min_len]);
     let packed_b = PackedBits::from_bools(&b[..min_len]);
     matching_bit_counts_bytes_le(packed_a.bytes_le(), packed_b.bytes_le(), min_len)
+}
+
+/// Computes a truncated match percentage using the provided reference bit width.
+///
+/// # Parameters
+/// - `candidate`: Candidate value to score after truncation.
+/// - `reference_bits`: Reference bit vector whose length defines the truncation width.
+///
+/// # Returns
+/// - `(Vec<bool>, f64)`: Truncated candidate bits and their total match percentage.
+///
+/// # Expected Output
+/// - Returns truncated bits and a percentage score; no stdout/stderr output.
+fn truncated_match_percentage(candidate: &BigUint, reference_bits: &[bool]) -> (Vec<bool>, f64) {
+    let bit_width = reference_bits.len().max(1);
+    let candidate_bits = biguint_to_bits_le(candidate, bit_width);
+    let (_, matching_total) = count_matching_bits_le(&candidate_bits, reference_bits);
+    let match_pct = matching_total as f64 / bit_width as f64 * 100.0;
+    (candidate_bits, match_pct)
 }
 
 /// Resolves the fixed message (if configured) for analysis timelines.
@@ -1865,13 +1893,11 @@ fn run_bitwise_speculative_oracle_attempt(
 /// - `message`: Reference message used for bit width sizing.
 /// - `batch_size`: Number of ciphertext exponent variants in the batch.
 /// - `shift`: Whether to shift ciphertext by encrypted 2 before conversion.
-/// - `bits_decrypt`: Optional expected bit width override.
-///
 /// # Returns
 /// - `Result<Vec<AvalancheNode>, Box<dyn Error>>`: Avalanche nodes for tree search.
 ///
 /// # Expected Output
-/// - Returns candidate nodes; no stdout/stderr output.
+/// - Returns candidate nodes truncated to `engine.message.bits`; no stdout/stderr output.
 fn build_avalanche_nodes_unique_d(
     ctx: &RSAContext,
     engine: &EngineConfig,
@@ -1879,7 +1905,6 @@ fn build_avalanche_nodes_unique_d(
     message: &BigUint,
     batch_size: usize,
     shift: bool,
-    bits_decrypt: Option<u32>,
 ) -> Result<Vec<AvalancheNode>, Box<dyn Error>> {
     if batch_size == 0 {
         return Err("analysis batch size must be >= 1".into());
@@ -1888,7 +1913,7 @@ fn build_avalanche_nodes_unique_d(
         return Ok(Vec::new());
     }
 
-    let bit_width = resolve_decrypt_bit_width(message, bits_decrypt)?;
+    let bit_width = resolve_avalanche_bit_width(engine);
     let base_ciphertext = message.modpow(&ctx.e, &ctx.n);
 
     let use_distance = engine.use_hamming_distance;
@@ -1997,13 +2022,12 @@ const BEAM_PCT_DECIMALS: usize = 8;
 /// - `batch_size`: Number of ciphertext exponent variants in the batch.
 /// - `shift`: Whether to shift ciphertext by encrypted 2 before conversion.
 /// - `analytics`: Session analytics accumulator for reporting.
-/// - `bits_decrypt`: Optional expected bit width override.
-///
 /// # Returns
 /// - `Result<(), Box<dyn Error>>`: `Ok(())` when search runs or is skipped.
 ///
 /// # Expected Output
-/// - Prints avalanche bias diagnostics and, when batch sampling is disabled, detailed beam-search output.
+/// - Prints avalanche bias diagnostics using `engine.message.bits` as the avalanche width and,
+///   when batch sampling is disabled, detailed beam-search output.
 fn run_avalanche_search(
     ctx: &RSAContext,
     engine: &EngineConfig,
@@ -2012,17 +2036,9 @@ fn run_avalanche_search(
     batch_size: usize,
     shift: bool,
     analytics: &Arc<Mutex<SessionAnalytics>>,
-    bits_decrypt: Option<u32>,
 ) -> Result<(), Box<dyn Error>> {
-    let avalanche_nodes = build_avalanche_nodes_unique_d(
-        ctx,
-        engine,
-        candidates,
-        message,
-        batch_size,
-        shift,
-        bits_decrypt,
-    )?;
+    let avalanche_nodes =
+        build_avalanche_nodes_unique_d(ctx, engine, candidates, message, batch_size, shift)?;
     if avalanche_nodes.is_empty() {
         with_analytics(analytics, |a| {
             a.add_feature_note(
@@ -2930,7 +2946,6 @@ fn run_information_sufficiency_tests(
             batch_size,
             shift,
             analytics,
-            bits_decrypt,
         )?;
     } else {
         with_analytics(analytics, |a| {
@@ -3956,9 +3971,10 @@ fn execute_sampled_avalanche_sample(
             inputs: selected_inputs
                 .iter()
                 .map(|input| {
-                    let detail = input.detail.as_ref().expect(
-                        "sample details must exist when storing all avalanche samples",
-                    );
+                    let detail = input
+                        .detail
+                        .as_ref()
+                        .expect("sample details must exist when storing all avalanche samples");
                     AvalancheCombinationSampleInput {
                         batch_candidate_index: input.batch_candidate_index,
                         message_index: input.message_index,
@@ -4086,29 +4102,32 @@ fn run_sampled_avalanche_beam_search(
     let reduced = sample_seeds
         .into_par_iter()
         .enumerate()
-        .try_fold(SampledAvalancheBatchResult::default, |mut acc, (sample_index, seed)| {
-            let mut local_rng = RngChoice::from_seed(rng_mode, seed);
-            let outcome = execute_sampled_avalanche_sample(
-                engine,
-                &message_bits,
-                &grouped_inputs,
-                pool_size,
-                mixed_r_candidate_count,
-                sample_index,
-                &mut local_rng,
-            )?;
-            let done = sample_done.fetch_add(1, Ordering::Relaxed) + 1;
-            log_parallel_progress_every_interval(
-                done,
-                sample_count as u64,
-                &sample_log_start,
-                &sample_next_log_at_ms,
-                &sample_label,
-                sample_log_interval,
-            );
-            acc.absorb_outcome(outcome);
-            Ok::<_, String>(acc)
-        })
+        .try_fold(
+            SampledAvalancheBatchResult::default,
+            |mut acc, (sample_index, seed)| {
+                let mut local_rng = RngChoice::from_seed(rng_mode, seed);
+                let outcome = execute_sampled_avalanche_sample(
+                    engine,
+                    &message_bits,
+                    &grouped_inputs,
+                    pool_size,
+                    mixed_r_candidate_count,
+                    sample_index,
+                    &mut local_rng,
+                )?;
+                let done = sample_done.fetch_add(1, Ordering::Relaxed) + 1;
+                log_parallel_progress_every_interval(
+                    done,
+                    sample_count as u64,
+                    &sample_log_start,
+                    &sample_next_log_at_ms,
+                    &sample_label,
+                    sample_log_interval,
+                );
+                acc.absorb_outcome(outcome);
+                Ok::<_, String>(acc)
+            },
+        )
         .try_reduce(SampledAvalancheBatchResult::default, |left, right| {
             Ok::<_, String>(left.merge(right))
         })
@@ -4125,20 +4144,18 @@ fn run_sampled_avalanche_beam_search(
 /// - `rng`: Random number generator for candidate and message sampling.
 /// - `analytics`: Session analytics accumulator receiving batch data.
 /// - `shift`: Whether to shift ciphertext by encrypted 2 before conversion.
-/// - `bits_decrypt`: Optional expected bit width override.
-///
 /// # Returns
 /// - `Result<(), Box<dyn Error>>`: `Ok(())` on success or an error on invalid configuration.
 ///
 /// # Expected Output
-/// - Prints batch-progress summaries and appends accuracy plus avalanche sample data to the session analytics.
+/// - Prints batch-progress summaries and appends accuracy plus avalanche sample data to the
+///   session analytics, truncating avalanche inputs to `engine.message.bits`.
 fn run_r_candidate_accuracy_batches(
     ctx: &RSAContext,
     engine: &EngineConfig,
     rng: &mut RngChoice,
     analytics: &Arc<Mutex<SessionAnalytics>>,
     shift: bool,
-    bits_decrypt: Option<u32>,
 ) -> Result<(), Box<dyn Error>> {
     if !engine.analysis_batch_enable {
         return Ok(());
@@ -4298,7 +4315,8 @@ fn run_r_candidate_accuracy_batches(
             }
         }
 
-        let avalanche_bit_width = resolve_decrypt_bit_width(&message, bits_decrypt)?;
+        let avalanche_bit_width = resolve_avalanche_bit_width(engine);
+        let avalanche_message_bits = biguint_to_bits_le(&message, avalanche_bit_width);
         let batch_cx_total = u64::try_from(batch_candidates.len())
             .map_err(|_| "batch candidate count exceeds u64 range")?
             .checked_mul(
@@ -4312,85 +4330,89 @@ fn run_r_candidate_accuracy_batches(
         let mut batch_aggregate = batch_candidates
             .par_iter()
             .enumerate()
-            .try_fold(AccuracyBatchAccumulator::default, |mut acc, (batch_candidate_index, candidate)| {
-                let mut cx_max = None;
-                let mut cx_evaluated_candidates = 0usize;
-                let mut scored_samples = Vec::with_capacity(message_count);
-                let target_exponent = keep_sample_details
-                    .then(|| candidate.target_exponent.normalized());
+            .try_fold(
+                AccuracyBatchAccumulator::default,
+                |mut acc, (batch_candidate_index, candidate)| {
+                    let mut cx_max = None;
+                    let mut cx_evaluated_candidates = 0usize;
+                    let mut scored_samples = Vec::with_capacity(message_count);
+                    let target_exponent =
+                        keep_sample_details.then(|| candidate.target_exponent.normalized());
 
-                for (idx, msg) in messages.iter().enumerate() {
-                    let shifted = &shifted_ciphertexts[idx];
-                    let hbc_result =
-                        prepare_candidate_ciphertext(engine, shifted, &candidate.r, &ctx.n);
-                    let x_value = x_values.get(idx).cloned().ok_or_else(|| {
-                        "missing ciphertext exponent for message index".to_string()
-                    })?;
-                    let d_new_owned = if engine.ciphertext_modify {
-                        let e_x = e_x_values.get(idx).ok_or_else(|| {
+                    for idx in 0..messages.len() {
+                        let shifted = &shifted_ciphertexts[idx];
+                        let hbc_result =
+                            prepare_candidate_ciphertext(engine, shifted, &candidate.r, &ctx.n);
+                        let x_value = x_values.get(idx).cloned().ok_or_else(|| {
                             "missing ciphertext exponent for message index".to_string()
                         })?;
-                        Some(mod_inverse(e_x, &candidate.phi_new).ok_or_else(|| {
-                            format!("analysis_batch missing modular inverse for x {}", x_value)
-                        })?)
-                    } else {
-                        None
-                    };
-                    let d_new = d_new_owned.as_ref().unwrap_or(&candidate.d_new);
+                        let d_new_owned = if engine.ciphertext_modify {
+                            let e_x = e_x_values.get(idx).ok_or_else(|| {
+                                "missing ciphertext exponent for message index".to_string()
+                            })?;
+                            Some(mod_inverse(e_x, &candidate.phi_new).ok_or_else(|| {
+                                format!("analysis_batch missing modular inverse for x {}", x_value)
+                            })?)
+                        } else {
+                            None
+                        };
+                        let d_new = d_new_owned.as_ref().unwrap_or(&candidate.d_new);
 
-                    let dm = derive_candidate_message_from_result(
-                        ctx,
-                        engine,
-                        &hbc_result,
-                        &candidate.r,
-                        d_new,
-                    );
-                    let message_bits = msg.bits().max(1) as f64;
-                    let (_, matching_total) = count_matching_bits(&dm, msg);
-                    let match_pct = (matching_total as f64 / message_bits) * 100.0;
-                    cx_evaluated_candidates += 1;
-                    if cx_max.as_ref().is_none_or(|current: &BatchCxMax| match_pct > current.match_pct)
-                    {
-                        cx_max = Some(BatchCxMax {
-                            match_pct,
-                            x: x_value.clone(),
-                            r: candidate.r.clone(),
+                        let dm = derive_candidate_message_from_result(
+                            ctx,
+                            engine,
+                            &hbc_result,
+                            &candidate.r,
+                            d_new,
+                        );
+                        let (dm_bits, match_pct) =
+                            truncated_match_percentage(&dm, &avalanche_message_bits);
+                        cx_evaluated_candidates += 1;
+                        if cx_max
+                            .as_ref()
+                            .is_none_or(|current: &BatchCxMax| match_pct > current.match_pct)
+                        {
+                            cx_max = Some(BatchCxMax {
+                                match_pct,
+                                x: x_value.clone(),
+                                r: candidate.r.clone(),
+                                batch_candidate_index,
+                            });
+                        }
+
+                        scored_samples.push(ScoredAvalancheInput {
                             batch_candidate_index,
+                            message_index: idx,
+                            r: candidate.r.clone(),
+                            x: x_value,
+                            score_match_pct: match_pct,
+                            message_bits: PackedBits::from_bools(&dm_bits),
+                            detail: target_exponent.as_ref().map(|target_exponent| {
+                                ScoredAvalancheInputDetail {
+                                    target_exponent: target_exponent.clone(),
+                                    hbc_ciphertext_r: hbc_result.clone(),
+                                    candidate_decryption: dm.clone(),
+                                }
+                            }),
                         });
+                        let done = batch_cx_done.fetch_add(1, Ordering::Relaxed) + 1;
+                        log_parallel_progress_every_ten_percent(
+                            done,
+                            batch_cx_total,
+                            &batch_cx_next_pct,
+                            &batch_cx_label,
+                        );
                     }
 
-                    scored_samples.push(ScoredAvalancheInput {
-                        batch_candidate_index,
-                        message_index: idx,
-                        r: candidate.r.clone(),
-                        x: x_value,
-                        score_match_pct: match_pct,
-                        message_bits: biguint_to_packed_bits_le(&dm, avalanche_bit_width),
-                        detail: target_exponent.as_ref().map(|target_exponent| {
-                            ScoredAvalancheInputDetail {
-                                target_exponent: target_exponent.clone(),
-                                hbc_ciphertext_r: hbc_result.clone(),
-                                candidate_decryption: dm.clone(),
-                            }
-                        }),
-                    });
-                    let done = batch_cx_done.fetch_add(1, Ordering::Relaxed) + 1;
-                    log_parallel_progress_every_ten_percent(
-                        done,
-                        batch_cx_total,
-                        &batch_cx_next_pct,
-                        &batch_cx_label,
-                    );
-                }
-
-                acc.candidate_count += 1;
-                acc.cx_evaluated_candidates += cx_evaluated_candidates;
-                if let Some(candidate) = cx_max {
-                    acc.set_cx_max(candidate);
-                }
-                acc.scored_samples.extend(scored_samples);
-                Ok::<_, String>(acc)
-            })
+                    acc.candidate_count += 1;
+                    acc.cx_evaluated_candidates += cx_evaluated_candidates;
+                    if let Some(candidate) = cx_max {
+                        acc.set_cx_max(candidate);
+                    }
+                    acc.scored_samples.extend(scored_samples);
+                    Ok::<_, String>(acc)
+                },
+            )
             .try_reduce(AccuracyBatchAccumulator::default, |left, right| {
                 Ok::<_, String>(left.merge(right))
             })
@@ -4825,6 +4847,26 @@ mod tests {
         let left = [true, false, true, true, false, false, true, false];
         let right = [true, false, false, true, true, false, true, false];
         assert_eq!(count_matching_bits_le(&left, &right), (2, 6));
+    }
+
+    #[test]
+    fn test_resolve_avalanche_bit_width_uses_configured_message_bits() {
+        let mut config = Config::default();
+        config.engine.message.bits = 13;
+        assert_eq!(resolve_avalanche_bit_width(&config.engine), 13);
+
+        config.engine.message.bits = 0;
+        assert_eq!(resolve_avalanche_bit_width(&config.engine), 1);
+    }
+
+    #[test]
+    fn test_truncated_match_percentage_uses_reference_width() {
+        let candidate = BigUint::from(0b1111_0000u8);
+        let reference = biguint_to_bits_le(&BigUint::from(0b1110_0000u8), 4);
+        let (candidate_bits, match_pct) = truncated_match_percentage(&candidate, &reference);
+
+        assert_eq!(candidate_bits, vec![false, false, false, false]);
+        assert!((match_pct - 100.0).abs() < f64::EPSILON);
     }
 
     #[test]
