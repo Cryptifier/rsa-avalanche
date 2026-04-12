@@ -217,15 +217,18 @@ fn main() -> Result<(), Box<dyn Error>> {
         avalanche_combination_majority_vote_print: config
             .engine
             .avalanche_combination_majority_vote_print,
+        avalanche_combination_keep_all_samples_in_memory: config
+            .engine
+            .avalanche_combination_keep_all_samples_in_memory,
         bits_decrypt: args.bits_decrypt,
         r_candidate_target_exponent: args
             .r_candidate_target_exponent
             .as_ref()
-            .map(|value| value.normalized().to_string()),
+            .map(|value| value.normalized()),
         r_candidate_target_exponent_minimum: args
             .r_candidate_target_exponent_minimum
             .as_ref()
-            .map(|value| value.normalized().to_string()),
+            .map(|value| value.normalized()),
     })?));
 
     let analytics_for_handler = Arc::clone(&analytics);

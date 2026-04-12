@@ -17,6 +17,7 @@ use clap::Parser;
 use eframe::egui;
 use egui_extras::{Column, TableBuilder};
 use egui_plot::{Plot, PlotPoints, Points};
+use num_bigint::BigUint;
 #[cfg(not(target_arch = "wasm32"))]
 use rsademo::zmq_status::{QueryResponsePayload, build_client_from_endpoint_with_timeouts};
 use serde::Deserialize;
@@ -1554,14 +1555,14 @@ struct Feature {
 #[derive(Debug, Default, Clone)]
 #[allow(dead_code)]
 struct RCandidateFactor {
-    prime: String,
+    prime: BigUint,
     exponent: u64,
     prime_bits: u64,
 }
 
 #[derive(Debug, Default, Clone)]
 struct RCandidateEntry {
-    r: String,
+    r: BigUint,
     r_bits: u64,
     factors: Vec<RCandidateFactor>,
 }
@@ -1577,7 +1578,7 @@ struct RCandidateBatch {
     reuse_path: String,
     reuse_enabled: bool,
     reuse_append_only: bool,
-    min_factor: String,
+    min_factor: BigUint,
     process_scale: u64,
     small_prime_factors: u64,
     max_factors: u64,
@@ -1589,24 +1590,24 @@ struct RCandidateBatch {
 #[derive(Debug, Default, Clone)]
 #[allow(dead_code)]
 struct RCandidateAccuracyEntry {
-    r: String,
+    r: BigUint,
     r_bits: u64,
     factors: Vec<RCandidateFactor>,
     accuracy_pct: f64,
-    hbc_ciphertexts_r: Vec<String>,
-    candidate_decryptions: Vec<String>,
+    hbc_ciphertexts_r: Vec<BigUint>,
+    candidate_decryptions: Vec<BigUint>,
 }
 
 #[derive(Debug, Default, Clone)]
 #[allow(dead_code)]
 struct RCandidateAccuracyBatch {
     context: Option<String>,
-    messages: Vec<String>,
-    ciphertexts: Vec<String>,
-    shifted_ciphertexts: Vec<String>,
+    messages: Vec<BigUint>,
+    ciphertexts: Vec<BigUint>,
+    shifted_ciphertexts: Vec<BigUint>,
     rabin_exponent: u64,
-    tonelli_shanks_modulus: String,
-    tonelli_shanks_ciphertexts: Vec<String>,
+    tonelli_shanks_modulus: BigUint,
+    tonelli_shanks_ciphertexts: Vec<BigUint>,
     candidate_count: u64,
     candidates: Vec<RCandidateAccuracyEntry>,
     beam_match_pct: Option<f64>,
@@ -1618,22 +1619,22 @@ struct RCandidateAccuracyBatch {
 #[derive(Debug, Default, Clone)]
 #[allow(dead_code)]
 struct RCandidateTraceEntry {
-    r: String,
+    r: BigUint,
     r_bits: u64,
-    hbc_ciphertext_r: String,
-    candidate_decryption: String,
+    hbc_ciphertext_r: BigUint,
+    candidate_decryption: BigUint,
 }
 
 #[derive(Debug, Default, Clone)]
 #[allow(dead_code)]
 struct RCandidateTraceBatch {
     context: Option<String>,
-    message: String,
-    ciphertext: String,
-    shifted_ciphertext: String,
+    message: BigUint,
+    ciphertext: BigUint,
+    shifted_ciphertext: BigUint,
     rabin_exponent: u64,
-    tonelli_shanks_modulus: String,
-    tonelli_shanks_ciphertext: String,
+    tonelli_shanks_modulus: BigUint,
+    tonelli_shanks_ciphertext: BigUint,
     candidate_count: u64,
     candidates: Vec<RCandidateTraceEntry>,
 }
@@ -1703,9 +1704,9 @@ struct BitSimilarityEntry {
     orig_index: usize,
     index: usize,
     shift: usize,
-    r: String,
-    e: Option<String>,
-    x: Option<String>,
+    r: BigUint,
+    e: Option<BigUint>,
+    x: Option<BigUint>,
     candidate_hex: String,
     match_pct: f64,
     matching_bits: u64,
@@ -1719,9 +1720,9 @@ struct BitSimilarityEntry {
 #[derive(Debug, Clone)]
 struct BitSimilarityRow {
     index: usize,
-    r: String,
-    e: Option<String>,
-    x: Option<String>,
+    r: BigUint,
+    e: Option<BigUint>,
+    x: Option<BigUint>,
     base_match_pct: f64,
     base_matching_bits: u64,
     entries: Vec<BitSimilarityEntry>,
@@ -2269,7 +2270,7 @@ fn parse_r_candidate_batch(map: &Map<String, Value>) -> RCandidateBatch {
         reuse_path: value_as_string(map.get("reuse_path")),
         reuse_enabled: value_as_bool(map.get("reuse_enabled")),
         reuse_append_only: value_as_bool(map.get("reuse_append_only")),
-        min_factor: value_as_string(map.get("min_factor")),
+        min_factor: value_as_biguint(map.get("min_factor")),
         process_scale: value_as_u64(map.get("process_scale")),
         small_prime_factors: value_as_u64(map.get("small_prime_factors")),
         max_factors: value_as_u64(map.get("max_factors")),
@@ -2286,7 +2287,7 @@ fn parse_r_candidate_entry(map: &Map<String, Value>) -> RCandidateEntry {
         for factor in list {
             if let Some(factor) = factor.as_object() {
                 factors.push(RCandidateFactor {
-                    prime: value_as_string(factor.get("prime")),
+                    prime: value_as_biguint(factor.get("prime")),
                     exponent: value_as_u64(factor.get("exponent")),
                     prime_bits: value_as_u64(factor.get("prime_bits")),
                 });
@@ -2294,7 +2295,7 @@ fn parse_r_candidate_entry(map: &Map<String, Value>) -> RCandidateEntry {
         }
     }
     RCandidateEntry {
-        r: value_as_string(map.get("r")),
+        r: value_as_biguint(map.get("r")),
         r_bits: value_as_u64(map.get("r_bits")),
         factors,
     }
@@ -2311,12 +2312,12 @@ fn parse_r_candidate_accuracy_batch(map: &Map<String, Value>) -> RCandidateAccur
     }
     RCandidateAccuracyBatch {
         context: value_as_opt_string(map.get("context")),
-        messages: value_as_vec_string(map.get("messages")),
-        ciphertexts: value_as_vec_string(map.get("ciphertexts")),
-        shifted_ciphertexts: value_as_vec_string(map.get("shifted_ciphertexts")),
+        messages: value_as_vec_biguint(map.get("messages")),
+        ciphertexts: value_as_vec_biguint(map.get("ciphertexts")),
+        shifted_ciphertexts: value_as_vec_biguint(map.get("shifted_ciphertexts")),
         rabin_exponent: value_as_u64(map.get("rabin_exponent")),
-        tonelli_shanks_modulus: value_as_string(map.get("tonelli_shanks_modulus")),
-        tonelli_shanks_ciphertexts: value_as_vec_string(map.get("tonelli_shanks_ciphertexts")),
+        tonelli_shanks_modulus: value_as_biguint(map.get("tonelli_shanks_modulus")),
+        tonelli_shanks_ciphertexts: value_as_vec_biguint(map.get("tonelli_shanks_ciphertexts")),
         candidate_count: value_as_opt_u64(map.get("candidate_count"))
             .unwrap_or(candidates.len() as u64),
         candidates,
@@ -2333,7 +2334,7 @@ fn parse_r_candidate_accuracy_entry(map: &Map<String, Value>) -> RCandidateAccur
         for factor in list {
             if let Some(factor) = factor.as_object() {
                 factors.push(RCandidateFactor {
-                    prime: value_as_string(factor.get("prime")),
+                    prime: value_as_biguint(factor.get("prime")),
                     exponent: value_as_u64(factor.get("exponent")),
                     prime_bits: value_as_u64(factor.get("prime_bits")),
                 });
@@ -2341,12 +2342,12 @@ fn parse_r_candidate_accuracy_entry(map: &Map<String, Value>) -> RCandidateAccur
         }
     }
     RCandidateAccuracyEntry {
-        r: value_as_string(map.get("r")),
+        r: value_as_biguint(map.get("r")),
         r_bits: value_as_u64(map.get("r_bits")),
         factors,
         accuracy_pct: value_as_f64(map.get("accuracy_pct")),
-        hbc_ciphertexts_r: value_as_vec_string(map.get("hbc_ciphertexts_r")),
-        candidate_decryptions: value_as_vec_string(map.get("candidate_decryptions")),
+        hbc_ciphertexts_r: value_as_vec_biguint(map.get("hbc_ciphertexts_r")),
+        candidate_decryptions: value_as_vec_biguint(map.get("candidate_decryptions")),
     }
 }
 
@@ -2356,22 +2357,22 @@ fn parse_r_candidate_trace_batch(map: &Map<String, Value>) -> RCandidateTraceBat
         for entry in list {
             if let Some(entry) = entry.as_object() {
                 candidates.push(RCandidateTraceEntry {
-                    r: value_as_string(entry.get("r")),
+                    r: value_as_biguint(entry.get("r")),
                     r_bits: value_as_u64(entry.get("r_bits")),
-                    hbc_ciphertext_r: value_as_string(entry.get("hbc_ciphertext_r")),
-                    candidate_decryption: value_as_string(entry.get("candidate_decryption")),
+                    hbc_ciphertext_r: value_as_biguint(entry.get("hbc_ciphertext_r")),
+                    candidate_decryption: value_as_biguint(entry.get("candidate_decryption")),
                 });
             }
         }
     }
     RCandidateTraceBatch {
         context: value_as_opt_string(map.get("context")),
-        message: value_as_string(map.get("message")),
-        ciphertext: value_as_string(map.get("ciphertext")),
-        shifted_ciphertext: value_as_string(map.get("shifted_ciphertext")),
+        message: value_as_biguint(map.get("message")),
+        ciphertext: value_as_biguint(map.get("ciphertext")),
+        shifted_ciphertext: value_as_biguint(map.get("shifted_ciphertext")),
         rabin_exponent: value_as_u64(map.get("rabin_exponent")),
-        tonelli_shanks_modulus: value_as_string(map.get("tonelli_shanks_modulus")),
-        tonelli_shanks_ciphertext: value_as_string(map.get("tonelli_shanks_ciphertext")),
+        tonelli_shanks_modulus: value_as_biguint(map.get("tonelli_shanks_modulus")),
+        tonelli_shanks_ciphertext: value_as_biguint(map.get("tonelli_shanks_ciphertext")),
         candidate_count: value_as_opt_u64(map.get("candidate_count"))
             .unwrap_or(candidates.len() as u64),
         candidates,
@@ -2422,6 +2423,29 @@ fn value_as_opt_string(value: Option<&Value>) -> Option<String> {
         Some(Value::Number(num)) => Some(num.to_string()),
         Some(Value::Bool(val)) => Some(val.to_string()),
         _ => None,
+    }
+}
+
+fn value_as_biguint(value: Option<&Value>) -> BigUint {
+    let Some(value) = value else {
+        return BigUint::default();
+    };
+    match value {
+        Value::String(val) => BigUint::parse_bytes(val.as_bytes(), 10).unwrap_or_default(),
+        Value::Number(num) => num
+            .as_u64()
+            .map(BigUint::from)
+            .unwrap_or_default(),
+        Value::Bool(val) => BigUint::from(u8::from(*val)),
+        Value::Array(_) => serde_json::from_value::<BigUint>(value.clone()).unwrap_or_default(),
+        _ => BigUint::default(),
+    }
+}
+
+fn value_as_opt_biguint(value: Option<&Value>) -> Option<BigUint> {
+    match value {
+        Some(Value::Null) | None => None,
+        Some(_) => Some(value_as_biguint(value)),
     }
 }
 
@@ -2510,6 +2534,13 @@ fn value_as_opt_f64(value: Option<&Value>) -> Option<f64> {
 fn value_as_vec_string(value: Option<&Value>) -> Vec<String> {
     match value {
         Some(Value::Array(list)) => list.iter().map(|v| value_as_string(Some(v))).collect(),
+        _ => Vec::new(),
+    }
+}
+
+fn value_as_vec_biguint(value: Option<&Value>) -> Vec<BigUint> {
+    match value {
+        Some(Value::Array(list)) => list.iter().map(|v| value_as_biguint(Some(v))).collect(),
         _ => Vec::new(),
     }
 }
@@ -2603,7 +2634,7 @@ fn flatten_candidate_batches(session: &Session) -> Vec<CandidateRow> {
                 context: context.clone(),
                 mode: mode.clone(),
                 index: idx,
-                r: entry.r.clone(),
+                r: entry.r.to_string(),
                 r_bits: entry.r_bits,
                 factors: factor_str,
             });
@@ -2668,9 +2699,9 @@ fn parse_bit_similarity_data(map: &Map<String, Value>) -> BitSimilarityData {
                 orig_index: idx,
                 index: value_as_usize(entry.get("index")),
                 shift: value_as_usize(entry.get("shift")),
-                r: value_as_string(entry.get("r")),
-                e: value_as_opt_string(entry.get("e")),
-                x: value_as_opt_string(entry.get("x")),
+                r: value_as_biguint(entry.get("r")),
+                e: value_as_opt_biguint(entry.get("e")),
+                x: value_as_opt_biguint(entry.get("x")),
                 candidate_hex: value_as_string(entry.get("candidate_hex")),
                 match_pct,
                 matching_bits,
@@ -2942,12 +2973,16 @@ fn draw_bit_similarity_row(
     let boxes_start = origin_x + label_width;
     let label_x = origin_x;
     let suffix = match (&row.e, &row.x) {
-        (Some(e), Some(x)) if !e.is_empty() && !x.is_empty() => format!(" | e={e} | x={x}"),
+        (Some(e), Some(x)) => format!(" | e={e} | x={x}"),
         _ => String::new(),
     };
     let header_text = format!(
         "#{} | r={} | match={:.2}% | matching bits={}{}",
-        row.index, row.r, row.base_match_pct, row.base_matching_bits, suffix
+        row.index,
+        row.r,
+        row.base_match_pct,
+        row.base_matching_bits,
+        suffix
     );
     painter.text(
         egui::pos2(origin_x, header_y),
@@ -3010,9 +3045,7 @@ fn draw_bit_similarity_row(
             format!("Candidate << {shift}")
         };
         if let (Some(e), Some(x)) = (&entry.e, &entry.x) {
-            if !e.is_empty() && !x.is_empty() {
-                label.push_str(&format!(" | e={e} | x={x}"));
-            }
+            label.push_str(&format!(" | e={e} | x={x}"));
         }
         let adjusted_denom = bit_width.saturating_sub(masked_bits).max(1) as u64;
         let line = format!(
@@ -3289,9 +3322,9 @@ mod tests {
             orig_index,
             index,
             shift,
-            r: r.to_string(),
-            e: Some("17".to_string()),
-            x: Some("3".to_string()),
+            r: BigUint::parse_bytes(r.as_bytes(), 10).expect("valid r"),
+            e: Some(BigUint::from(17u8)),
+            x: Some(BigUint::from(3u8)),
             candidate_hex: "01".to_string(),
             match_pct: 75.0,
             matching_bits: 12,
@@ -3430,11 +3463,11 @@ mod tests {
         let rows = build_bit_similarity_rows(&entries, false, BitSimilaritySort::Original);
 
         assert_eq!(rows.len(), 3);
-        assert_eq!(rows[0].r, "101");
+        assert_eq!(rows[0].r, BigUint::from(101u16));
         assert_eq!(rows[0].entries.len(), 2);
-        assert_eq!(rows[1].r, "202");
+        assert_eq!(rows[1].r, BigUint::from(202u16));
         assert_eq!(rows[1].entries.len(), 2);
-        assert_eq!(rows[2].r, "303");
+        assert_eq!(rows[2].r, BigUint::from(303u16));
         assert_eq!(rows[2].entries.len(), 1);
     }
 
@@ -3450,9 +3483,9 @@ mod tests {
         let rows = build_bit_similarity_rows(&entries, true, BitSimilaritySort::Original);
 
         assert_eq!(rows.len(), 2);
-        assert_eq!(rows[0].r, "101");
+        assert_eq!(rows[0].r, BigUint::from(101u16));
         assert_eq!(rows[0].entries.len(), 1);
-        assert_eq!(rows[1].r, "202");
+        assert_eq!(rows[1].r, BigUint::from(202u16));
         assert_eq!(rows[1].entries.len(), 1);
     }
 }

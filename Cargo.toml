@@ -4,10 +4,10 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-bigdecimal = "0.4"
+bigdecimal = { version = "0.4", features = ["serde"] }
 cty = "0.2.2"
 hex = "0.4.3"
-num-bigint = { version = "0.4", default-features = false, features = ["std"] }
+num-bigint = { version = "0.4", default-features = false, features = ["std", "serde"] }
 num-integer = "0.1"
 num-traits = "0.2"
 libc = "0.2.175"

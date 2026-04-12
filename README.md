@@ -114,6 +114,7 @@ Notes:
 | `engine.avalanche_combination_majority_vote` | bool | `true` | Use per-bit majority-vote probabilities from each sampled combination. |
 | `engine.avalanche_combination_sample_smoothing` | bool | `false` | Apply Jeffreys smoothing to sampled majority-vote probabilities before beam search. |
 | `engine.avalanche_combination_majority_vote_print` | bool | `true` | Print a separate sampled-combination majority-vote summary for the selected sample. |
+| `engine.avalanche_combination_keep_all_samples_in_memory` | bool | `false` | Retain every sampled avalanche combination in memory for downstream consumers instead of keeping only the selected best sample. |
 | `engine.process_min_count` | u64 | `25` | Minimum r candidates to process. |
 | `engine.process_count` | u64 | `25` | Target r candidates per batch. |
 | `engine.process_scale` | u32 | `12` | Scaling factor for candidate generation. |

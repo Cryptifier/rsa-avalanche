@@ -124,6 +124,9 @@ pub struct EngineConfig {
     /// Whether sampled avalanche prints a separate majority-vote summary for the selected sample.
     #[serde(default = "default_avalanche_combination_majority_vote_print")]
     pub avalanche_combination_majority_vote_print: bool,
+    /// Whether sampled avalanche retains every evaluated sample in memory for downstream consumers.
+    #[serde(default = "default_avalanche_combination_keep_all_samples_in_memory")]
+    pub avalanche_combination_keep_all_samples_in_memory: bool,
     #[serde(default = "default_same_r_batch")]
     pub same_r_batch: bool,
     #[serde(default = "default_ciphertext_modify")]
@@ -281,6 +284,8 @@ impl Default for EngineConfig {
             ),
             avalanche_combination_majority_vote_print:
                 default_avalanche_combination_majority_vote_print(),
+            avalanche_combination_keep_all_samples_in_memory:
+                default_avalanche_combination_keep_all_samples_in_memory(),
             same_r_batch: default_same_r_batch(),
             ciphertext_modify: default_ciphertext_modify(),
             oracle_accuracy_threshold: default_oracle_accuracy_threshold(),
@@ -895,6 +900,20 @@ fn default_avalanche_combination_sample_smoothing() -> bool {
 /// - Returns a constant default value; no side effects.
 fn default_avalanche_combination_majority_vote_print() -> bool {
     true
+}
+
+/// Returns the default in-memory sampled-avalanche retention mode.
+///
+/// # Parameters
+/// - None.
+///
+/// # Returns
+/// - `bool`: `false` so only the selected sample is retained by default.
+///
+/// # Expected Output
+/// - Returns the default configuration value; no side effects.
+fn default_avalanche_combination_keep_all_samples_in_memory() -> bool {
+    false
 }
 
 /// Default flag for using the same r candidate across a batch.

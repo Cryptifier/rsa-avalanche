@@ -64,12 +64,14 @@ pub struct AnalyticsCliArgs {
     pub avalanche_combination_sample_smoothing: bool,
     /// Whether sampled avalanche prints a separate majority-vote summary for the selected sample.
     pub avalanche_combination_majority_vote_print: bool,
+    /// Whether all sampled-avalanche combinations were retained in memory during the run.
+    pub avalanche_combination_keep_all_samples_in_memory: bool,
     /// Expected bit width for decryptions.
     pub bits_decrypt: Option<u32>,
     /// Optional CLI override for speculative r-candidate target exponent.
-    pub r_candidate_target_exponent: Option<String>,
+    pub r_candidate_target_exponent: Option<BigDecimal>,
     /// Optional CLI override for speculative r-candidate target exponent minimum.
-    pub r_candidate_target_exponent_minimum: Option<String>,
+    pub r_candidate_target_exponent_minimum: Option<BigDecimal>,
 }
 
 #[derive(Debug, Serialize)]
@@ -97,9 +99,10 @@ pub(crate) struct AnalyticsCliInfo {
     avalanche_combination_majority_vote: bool,
     avalanche_combination_sample_smoothing: bool,
     avalanche_combination_majority_vote_print: bool,
+    avalanche_combination_keep_all_samples_in_memory: bool,
     bits_decrypt: Option<u32>,
-    r_candidate_target_exponent: Option<String>,
-    r_candidate_target_exponent_minimum: Option<String>,
+    r_candidate_target_exponent: Option<BigDecimal>,
+    r_candidate_target_exponent_minimum: Option<BigDecimal>,
 }
 
 /// Timing entry for a named step.
@@ -132,7 +135,7 @@ pub struct FeatureAnalytics {
 #[derive(Debug, Serialize)]
 pub struct RCandidateFactor {
     /// Prime factor value.
-    pub prime: String,
+    pub prime: BigUint,
     /// Exponent for the prime factor.
     pub exponent: u64,
     /// Bit length of the prime factor.
@@ -143,11 +146,11 @@ pub struct RCandidateFactor {
 #[derive(Debug, Serialize)]
 pub struct RCandidateEntry {
     /// Candidate modulus value.
-    pub r: String,
+    pub r: BigUint,
     /// Bit length of the candidate modulus.
     pub r_bits: u64,
     /// Decimal target exponent used to retarget the candidate.
-    pub target_exponent: String,
+    pub target_exponent: BigDecimal,
     /// Prime factorization metadata.
     pub factors: Vec<RCandidateFactor>,
 }
@@ -156,15 +159,15 @@ pub struct RCandidateEntry {
 #[derive(Debug, Serialize)]
 pub struct RCandidateTraceEntry {
     /// Candidate modulus value.
-    pub r: String,
+    pub r: BigUint,
     /// Bit length of the candidate modulus.
     pub r_bits: u64,
     /// Decimal target exponent used to retarget the candidate.
-    pub target_exponent: String,
+    pub target_exponent: BigDecimal,
     /// Ciphertext after homomorphic base conversion into `r`.
-    pub hbc_ciphertext_r: String,
+    pub hbc_ciphertext_r: BigUint,
     /// Candidate-derived plaintext.
-    pub candidate_decryption: String,
+    pub candidate_decryption: BigUint,
 }
 
 /// Analytics payload for a batch of r candidates.
@@ -187,7 +190,7 @@ pub struct RCandidateBatchAnalytics {
     /// Whether reuse append-only mode is enabled.
     pub reuse_append_only: bool,
     /// Minimum factor used for candidate screening.
-    pub min_factor: String,
+    pub min_factor: BigUint,
     /// Process scale factor for candidate generation.
     pub process_scale: u32,
     /// Number of small primes per candidate.
@@ -207,19 +210,19 @@ pub struct RCandidateBatchAnalytics {
 #[derive(Debug, Serialize)]
 pub struct RCandidateAccuracyEntry {
     /// Candidate modulus value.
-    pub r: String,
+    pub r: BigUint,
     /// Bit length of the candidate modulus.
     pub r_bits: u64,
     /// Decimal target exponent used to retarget the candidate.
-    pub target_exponent: String,
+    pub target_exponent: BigDecimal,
     /// Prime factorization metadata.
     pub factors: Vec<RCandidateFactor>,
     /// Mean accuracy percentage across the message batch.
     pub accuracy_pct: f64,
     /// HBC ciphertexts in the candidate modulus (per message).
-    pub hbc_ciphertexts_r: Vec<String>,
+    pub hbc_ciphertexts_r: Vec<BigUint>,
     /// Candidate-derived plaintexts (per message).
-    pub candidate_decryptions: Vec<String>,
+    pub candidate_decryptions: Vec<BigUint>,
 }
 
 /// Accuracy batch payload for a shared message set.
@@ -228,17 +231,17 @@ pub struct RCandidateAccuracyBatch {
     /// Label describing the batch usage.
     pub context: String,
     /// Plaintext messages used in the batch.
-    pub messages: Vec<String>,
+    pub messages: Vec<BigUint>,
     /// Ciphertexts corresponding to the messages.
-    pub ciphertexts: Vec<String>,
+    pub ciphertexts: Vec<BigUint>,
     /// Shifted ciphertexts when shift is enabled.
-    pub shifted_ciphertexts: Vec<String>,
+    pub shifted_ciphertexts: Vec<BigUint>,
     /// Rabin exponent used for the batch transforms.
     pub rabin_exponent: u32,
     /// Historical bootstrap-source modulus field (currently the source modulus before HBC).
-    pub tonelli_shanks_modulus: String,
+    pub tonelli_shanks_modulus: BigUint,
     /// Historical bootstrap-source ciphertext field (currently the shifted ciphertexts).
-    pub tonelli_shanks_ciphertexts: Vec<String>,
+    pub tonelli_shanks_ciphertexts: Vec<BigUint>,
     /// Number of per-candidate accuracy entries evaluated for the batch.
     pub candidate_count: usize,
     /// Per-candidate accuracy entries.
@@ -247,7 +250,7 @@ pub struct RCandidateAccuracyBatch {
     /// Maximum bitwise match percentage among evaluated `c^x` candidates in the batch.
     pub cx_max_match_pct: Option<f64>,
     /// Ciphertext exponent `x` that achieved the batch max bitwise match.
-    pub cx_max_x: Option<String>,
+    pub cx_max_x: Option<BigUint>,
     /// Total evaluated `c^x` candidates in the batch.
     pub cx_evaluated_candidates: usize,
     /// Total avalanche candidates evaluated for the batch.
@@ -281,19 +284,19 @@ pub struct AvalancheCombinationSampleInput {
     /// Zero-based index of the message or ciphertext variant inside the batch candidate.
     pub message_index: usize,
     /// Candidate modulus value.
-    pub r: String,
+    pub r: BigUint,
     /// Bit length of the candidate modulus.
     pub r_bits: u64,
     /// Decimal target exponent used to retarget the candidate.
-    pub target_exponent: String,
+    pub target_exponent: BigDecimal,
     /// Ciphertext exponent applied to the source ciphertext.
-    pub x: String,
+    pub x: BigUint,
     /// Match percentage used to score the source candidate.
     pub score_match_pct: f64,
     /// HBC ciphertext in the candidate modulus.
-    pub hbc_ciphertext_r: String,
+    pub hbc_ciphertext_r: BigUint,
     /// Candidate-derived plaintext for this source input.
-    pub candidate_decryption: String,
+    pub candidate_decryption: BigUint,
 }
 
 /// Beam-search candidate produced from an avalanche combination sample.
@@ -360,17 +363,17 @@ pub struct RCandidateTraceBatch {
     /// Label describing the batch usage.
     pub context: String,
     /// Plaintext message used in the trace.
-    pub message: String,
+    pub message: BigUint,
     /// Ciphertext corresponding to the message.
-    pub ciphertext: String,
+    pub ciphertext: BigUint,
     /// Shifted ciphertext when shift is enabled.
-    pub shifted_ciphertext: String,
+    pub shifted_ciphertext: BigUint,
     /// Rabin exponent used for the trace transforms.
     pub rabin_exponent: u32,
     /// Historical bootstrap-source modulus field (currently the source modulus before HBC).
-    pub tonelli_shanks_modulus: String,
+    pub tonelli_shanks_modulus: BigUint,
     /// Historical bootstrap-source ciphertext field (currently the shifted ciphertext).
-    pub tonelli_shanks_ciphertext: String,
+    pub tonelli_shanks_ciphertext: BigUint,
     /// Number of trace candidate entries evaluated for the batch.
     pub candidate_count: usize,
     /// Per-candidate trace entries.
@@ -483,6 +486,8 @@ impl SessionAnalytics {
             avalanche_combination_majority_vote: args.avalanche_combination_majority_vote,
             avalanche_combination_sample_smoothing: args.avalanche_combination_sample_smoothing,
             avalanche_combination_majority_vote_print: args.avalanche_combination_majority_vote_print,
+            avalanche_combination_keep_all_samples_in_memory: args
+                .avalanche_combination_keep_all_samples_in_memory,
             bits_decrypt: args.bits_decrypt,
             r_candidate_target_exponent: args.r_candidate_target_exponent,
             r_candidate_target_exponent_minimum: args.r_candidate_target_exponent_minimum,
@@ -796,14 +801,14 @@ pub fn generate_r_candidates_with_analytics(
     let candidate_entries = candidates
         .iter()
         .map(|candidate| RCandidateEntry {
-            r: candidate.r.to_string(),
+            r: candidate.r.clone(),
             r_bits: candidate.r.bits(),
-            target_exponent: format_target_exponent(&candidate.target_exponent),
+            target_exponent: candidate.target_exponent.normalized(),
             factors: candidate
                 .factors
                 .iter()
                 .map(|(p, e)| RCandidateFactor {
-                    prime: p.to_string(),
+                    prime: p.clone(),
                     exponent: *e,
                     prime_bits: p.bits(),
                 })
@@ -826,7 +831,7 @@ pub fn generate_r_candidates_with_analytics(
             reuse_path: settings.reuse_r_candidates_path.clone(),
             reuse_enabled: settings.reuse_r_candidates,
             reuse_append_only: settings.reuse_r_candidates_append_only,
-            min_factor: settings.process_min_factor.to_string(),
+            min_factor: settings.process_min_factor.clone(),
             process_scale: settings.process_scale,
             small_prime_factors: settings.small_prime_factors_per_candidate,
             max_factors: settings.max_factors_per_candidate,
@@ -837,20 +842,6 @@ pub fn generate_r_candidates_with_analytics(
     }
 
     candidates
-}
-
-/// Formats a candidate target exponent for analytics output.
-///
-/// # Parameters
-/// - `target_exponent`: Decimal exponent associated with the candidate.
-///
-/// # Returns
-/// - `String`: Rendered decimal value.
-///
-/// # Expected Output
-/// - Returns a plain string form; no side effects.
-fn format_target_exponent(target_exponent: &BigDecimal) -> String {
-    target_exponent.normalized().to_string()
 }
 
 /// Writes the analytics session JSON to disk.
