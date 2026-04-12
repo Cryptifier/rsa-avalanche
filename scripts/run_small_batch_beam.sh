@@ -8,8 +8,8 @@ ANALYSIS_LOG=${ANALYSIS_LOG:-"logs_current.log"}
 SCRIPT_LOG=${SCRIPT_LOG:-"logs_current_script.log"}
 RESUME=${RESUME:-0}
 ANALYSIS_EXTRA_ARGS=${ANALYSIS_EXTRA_ARGS:-}
-ANALYSIS_BATCHES=${ANALYSIS_BATCHES:-1}
-ANALYSIS_BATCH_SIZE=${ANALYSIS_BATCH_SIZE:-100}
+AVALANCHE_BATCHES=${AVALANCHE_BATCHES:-${ANALYSIS_BATCHES:-}}
+AVALANCHE_BATCH_SIZE=${AVALANCHE_BATCH_SIZE:-${ANALYSIS_BATCH_SIZE:-}}
 LOG_DIR=${LOG_DIR:-"logs"}
 RUN_TESTS=${RUN_TESTS:-0}
 RUN_PCA=${RUN_PCA:-0}
@@ -35,6 +35,14 @@ esac
 TEST_ARGS=()
 if [[ "${RUN_TESTS}" == "1" ]]; then
   TEST_ARGS=(--tests)
+fi
+
+BATCH_ARGS=()
+if [[ -n "${AVALANCHE_BATCHES}" ]]; then
+  BATCH_ARGS+=(--batches "${AVALANCHE_BATCHES}")
+fi
+if [[ -n "${AVALANCHE_BATCH_SIZE}" ]]; then
+  BATCH_ARGS+=(--batch-size "${AVALANCHE_BATCH_SIZE}")
 fi
 
 RED=$'\033[0;31m'
@@ -92,7 +100,7 @@ for i in $(seq 1 "${RUNS}"); do
   echo "===== RUN ${i} (seed ${seed}) ====="
   set +e
   cargo run "${CARGO_RUN_ARGS[@]}" --bin analysis -- --true --bits 56 --bits-decrypt 128 --seed "${seed}" -c "${CONFIG}" --crypto-rng --session-json "${session_path}" \
-    --batches "${ANALYSIS_BATCHES}" --batch-size "${ANALYSIS_BATCH_SIZE}" "${TEST_ARGS[@]}" "${EXTRA_ARGS[@]}" \
+    "${BATCH_ARGS[@]}" "${TEST_ARGS[@]}" "${EXTRA_ARGS[@]}" \
     2>&1 | tee -a "${ANALYSIS_LOG}" | tee "${run_output}" > /dev/null
   status=$?
   set -e
