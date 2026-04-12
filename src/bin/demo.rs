@@ -628,10 +628,7 @@ fn build_avalanche_nodes_unique_d_demo(
                     &d_new,
                 );
                 let message_bits = biguint_to_bits_le(&dm, bit_width);
-                let node = AvalancheNode {
-                    biases: vec![0.0; bit_width],
-                    message_bits,
-                };
+                let node = AvalancheNode::new(message_bits, vec![0.0; bit_width]);
                 nodes.push(CandidateInstanceNode {
                     candidate_idx,
                     d_new,

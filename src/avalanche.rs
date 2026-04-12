@@ -1,10 +1,5 @@
 use rayon::prelude::*;
 
-use crate::helpers::hamming_distance_bits;
-#[cfg(any(
-    all(feature = "aarch64-hamming-accel", target_arch = "aarch64"),
-    all(feature = "x86-hamming-accel", target_arch = "x86_64"),
-))]
 use crate::helpers::{hamming_distance_packed_bytes, pack_bits_to_bytes};
 
 /// Errors returned by avalanche tree search.
@@ -30,8 +25,47 @@ impl std::error::Error for AvalancheError {}
 /// Container for avalanche tree state.
 #[derive(Debug, Clone)]
 pub struct AvalancheNode {
+    /// Per-bit accumulated bias values.
     pub biases: Vec<f64>,
+    /// Candidate message bits in little-endian order.
     pub message_bits: Vec<bool>,
+    packed_message_bits: Vec<u8>,
+}
+
+impl AvalancheNode {
+    /// Creates an avalanche node and caches its packed bit representation.
+    ///
+    /// # Parameters
+    /// - `message_bits`: Candidate message bits in little-endian order.
+    /// - `biases`: Per-bit bias values aligned with `message_bits`.
+    ///
+    /// # Returns
+    /// - `AvalancheNode`: Node with cached packed bytes for repeated Hamming-distance scans.
+    ///
+    /// # Expected Output
+    /// - Returns the constructed node; no stdout/stderr output.
+    pub fn new(message_bits: Vec<bool>, biases: Vec<f64>) -> Self {
+        let packed_message_bits = pack_bits_to_bytes(&message_bits);
+        Self {
+            biases,
+            message_bits,
+            packed_message_bits,
+        }
+    }
+
+    /// Returns the cached packed message bits.
+    ///
+    /// # Parameters
+    /// - None.
+    ///
+    /// # Returns
+    /// - `&[u8]`: Cached little-endian packed bit bytes.
+    ///
+    /// # Expected Output
+    /// - Returns the cached slice; no stdout/stderr output.
+    fn packed_message_bits(&self) -> &[u8] {
+        &self.packed_message_bits
+    }
 }
 
 /// Result of an avalanche tree search with per-level similarity scores.
@@ -134,85 +168,17 @@ pub fn sort_candidates_by_hamming_distance(
         return Err(AvalancheError::InconsistentBitWidth);
     }
 
-    if let Some(sorted) =
-        sort_candidates_by_hamming_distance_accelerated(&candidates, reference_bits)
-    {
-        return Ok(sorted);
-    }
-
+    let packed_reference = pack_bits_to_bytes(reference_bits);
     let mut sorted = candidates;
     sorted.sort_by(|left, right| {
-        hamming_distance_bits(&left.message_bits, reference_bits)
-            .cmp(&hamming_distance_bits(&right.message_bits, reference_bits))
+        hamming_distance_packed_bytes(left.packed_message_bits(), &packed_reference)
+            .cmp(&hamming_distance_packed_bytes(
+                right.packed_message_bits(),
+                &packed_reference,
+            ))
             .then_with(|| compare_message_bits_le(&left.message_bits, &right.message_bits))
     });
     Ok(sorted)
-}
-
-/// Sorts candidates by precomputed Hamming-distance keys on accelerated targets.
-///
-/// # Parameters
-/// - `candidates`: Candidate nodes to sort.
-/// - `reference_bits`: Reference bit vector used for distance ordering.
-///
-/// # Returns
-/// - `Option<Vec<AvalancheNode>>`: Candidates sorted by distance and then message bits.
-///
-/// # Expected Output
-/// - Returns a sorted candidate list; no stdout/stderr output.
-#[cfg(any(
-    all(feature = "aarch64-hamming-accel", target_arch = "aarch64"),
-    all(feature = "x86-hamming-accel", target_arch = "x86_64"),
-))]
-fn sort_candidates_by_hamming_distance_accelerated(
-    candidates: &[AvalancheNode],
-    reference_bits: &[bool],
-) -> Option<Vec<AvalancheNode>> {
-    let packed_reference = pack_bits_to_bytes(reference_bits);
-    let mut keyed_candidates: Vec<(usize, AvalancheNode)> = candidates
-        .iter()
-        .cloned()
-        .map(|candidate| {
-            let packed_message = pack_bits_to_bytes(&candidate.message_bits);
-            let distance = hamming_distance_packed_bytes(&packed_message, &packed_reference);
-            (distance, candidate)
-        })
-        .collect();
-
-    keyed_candidates.sort_by(|left, right| {
-        left.0
-            .cmp(&right.0)
-            .then_with(|| compare_message_bits_le(&left.1.message_bits, &right.1.message_bits))
-    });
-
-    Some(
-        keyed_candidates
-            .into_iter()
-            .map(|(_, candidate)| candidate)
-            .collect::<Vec<_>>(),
-    )
-}
-
-/// Sorts candidates by precomputed Hamming-distance keys on accelerated targets.
-///
-/// # Parameters
-/// - `candidates`: Candidate nodes to sort.
-/// - `reference_bits`: Reference bit vector used for distance ordering.
-///
-/// # Returns
-/// - `Option<Vec<AvalancheNode>>`: `None` when no accelerated backend is compiled in.
-///
-/// # Expected Output
-/// - Returns `None`; no stdout/stderr output.
-#[cfg(not(any(
-    all(feature = "aarch64-hamming-accel", target_arch = "aarch64"),
-    all(feature = "x86-hamming-accel", target_arch = "x86_64"),
-)))]
-fn sort_candidates_by_hamming_distance_accelerated(
-    _candidates: &[AvalancheNode],
-    _reference_bits: &[bool],
-) -> Option<Vec<AvalancheNode>> {
-    None
 }
 
 /// Mirrors candidates with their bitwise inversions.
@@ -321,11 +287,15 @@ fn validate_candidates(candidates: &[AvalancheNode]) -> Result<usize, AvalancheE
         return Err(AvalancheError::EmptyCandidates);
     }
     let bit_width = candidates[0].message_bits.len();
+    let packed_len = bit_width.div_ceil(8);
     if bit_width == 0 {
         return Err(AvalancheError::InconsistentBitWidth);
     }
     for candidate in candidates {
-        if candidate.message_bits.len() != bit_width || candidate.biases.len() != bit_width {
+        if candidate.message_bits.len() != bit_width
+            || candidate.biases.len() != bit_width
+            || candidate.packed_message_bits.len() != packed_len
+        {
             return Err(AvalancheError::InconsistentBitWidth);
         }
     }
@@ -461,10 +431,10 @@ fn search_avalanche_tree_with_scores_internal(
 /// # Expected Output
 /// - Returns the inverted node; no stdout/stderr output.
 fn invert_candidate(candidate: &AvalancheNode) -> AvalancheNode {
-    AvalancheNode {
-        biases: candidate.biases.clone(),
-        message_bits: candidate.message_bits.iter().map(|bit| !*bit).collect(),
-    }
+    AvalancheNode::new(
+        candidate.message_bits.iter().map(|bit| !*bit).collect(),
+        candidate.biases.clone(),
+    )
 }
 
 /// Compares little-endian bit vectors by their numeric value.
@@ -558,9 +528,9 @@ fn build_next_level_internal(
             .into_par_iter()
             .filter(|other| !used[*other])
             .map(|other| {
-                let distance = hamming_distance_bits(
-                    &candidates[idx].message_bits,
-                    &candidates[other].message_bits,
+                let distance = hamming_distance_packed_bytes(
+                    candidates[idx].packed_message_bits(),
+                    candidates[other].packed_message_bits(),
                 );
                 (distance, other)
             })
@@ -662,9 +632,9 @@ fn build_next_level_with_similarity_internal(
             .into_par_iter()
             .filter(|other| !used[*other])
             .map(|other| {
-                let distance = hamming_distance_bits(
-                    &candidates[idx].message_bits,
-                    &candidates[other].message_bits,
+                let distance = hamming_distance_packed_bytes(
+                    candidates[idx].packed_message_bits(),
+                    candidates[other].packed_message_bits(),
                 );
                 (distance, other)
             })
@@ -774,10 +744,7 @@ fn combine_candidates(
         biases.push(bias);
     }
 
-    Ok(AvalancheNode {
-        biases,
-        message_bits,
-    })
+    Ok(AvalancheNode::new(message_bits, biases))
 }
 
 #[cfg(test)]
@@ -790,10 +757,7 @@ mod tests {
     use serde_json::json;
 
     fn node(bits: &[bool], biases: &[f64]) -> AvalancheNode {
-        AvalancheNode {
-            biases: biases.to_vec(),
-            message_bits: bits.to_vec(),
-        }
+        AvalancheNode::new(bits.to_vec(), biases.to_vec())
     }
 
     #[test]
