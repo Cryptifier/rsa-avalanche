@@ -453,7 +453,7 @@ mod tests {
             .collect();
         search_avalanche_tree(nodes)
             .expect("avalanche search should succeed")
-            .message_bits
+            .message_bits_vec()
     }
 
     #[test]

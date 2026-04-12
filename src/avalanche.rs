@@ -1,6 +1,6 @@
 use rayon::prelude::*;
 
-use crate::helpers::{hamming_distance_packed_bytes, pack_bits_to_bytes};
+use crate::helpers::{PackedBits, hamming_distance_packed_bytes, pack_bits_to_bytes};
 
 /// Errors returned by avalanche tree search.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -27,9 +27,7 @@ impl std::error::Error for AvalancheError {}
 pub struct AvalancheNode {
     /// Per-bit accumulated bias values.
     pub biases: Vec<f64>,
-    /// Candidate message bits in little-endian order.
-    pub message_bits: Vec<bool>,
-    packed_message_bits: Vec<u8>,
+    packed_message_bits: PackedBits,
 }
 
 impl AvalancheNode {
@@ -45,10 +43,27 @@ impl AvalancheNode {
     /// # Expected Output
     /// - Returns the constructed node; no stdout/stderr output.
     pub fn new(message_bits: Vec<bool>, biases: Vec<f64>) -> Self {
-        let packed_message_bits = pack_bits_to_bytes(&message_bits);
+        let packed_message_bits = PackedBits::from_bools(&message_bits);
         Self {
             biases,
-            message_bits,
+            packed_message_bits,
+        }
+    }
+
+    /// Creates an avalanche node from pre-packed little-endian bit storage.
+    ///
+    /// # Parameters
+    /// - `packed_message_bits`: Packed message bits with the desired logical width.
+    /// - `biases`: Per-bit bias values aligned with the packed bit width.
+    ///
+    /// # Returns
+    /// - `AvalancheNode`: Node with cached packed bytes and aligned bias values.
+    ///
+    /// # Expected Output
+    /// - Returns the constructed node; no stdout/stderr output.
+    pub(crate) fn from_packed_bits(packed_message_bits: PackedBits, biases: Vec<f64>) -> Self {
+        Self {
+            biases,
             packed_message_bits,
         }
     }
@@ -63,8 +78,64 @@ impl AvalancheNode {
     ///
     /// # Expected Output
     /// - Returns the cached slice; no stdout/stderr output.
-    fn packed_message_bits(&self) -> &[u8] {
-        &self.packed_message_bits
+    pub(crate) fn packed_message_bits(&self) -> &[u8] {
+        self.packed_message_bits.bytes_le()
+    }
+
+    /// Returns the logical message-bit width.
+    ///
+    /// # Parameters
+    /// - None.
+    ///
+    /// # Returns
+    /// - `usize`: Logical bit width represented by this node.
+    ///
+    /// # Expected Output
+    /// - Returns the bit width; no stdout/stderr output.
+    pub(crate) fn bit_len(&self) -> usize {
+        self.packed_message_bits.len()
+    }
+
+    /// Reads one logical message bit by index.
+    ///
+    /// # Parameters
+    /// - `index`: Bit index with LSB at `0`.
+    ///
+    /// # Returns
+    /// - `bool`: Bit value, or `false` when out of range.
+    ///
+    /// # Expected Output
+    /// - Returns the requested bit; no stdout/stderr output.
+    pub(crate) fn bit(&self, index: usize) -> bool {
+        self.packed_message_bits.bit(index)
+    }
+
+    /// Returns the most-significant logical message bit when present.
+    ///
+    /// # Parameters
+    /// - None.
+    ///
+    /// # Returns
+    /// - `Option<bool>`: Highest-indexed bit, or `None` when empty.
+    ///
+    /// # Expected Output
+    /// - Returns the MSB when present; no stdout/stderr output.
+    pub(crate) fn msb(&self) -> Option<bool> {
+        self.bit_len().checked_sub(1).map(|idx| self.bit(idx))
+    }
+
+    /// Expands the packed message bits into a little-endian boolean vector.
+    ///
+    /// # Parameters
+    /// - None.
+    ///
+    /// # Returns
+    /// - `Vec<bool>`: Unpacked message bits in little-endian order.
+    ///
+    /// # Expected Output
+    /// - Returns unpacked bits for cold-path consumers; no stdout/stderr output.
+    pub(crate) fn message_bits_vec(&self) -> Vec<bool> {
+        self.packed_message_bits.to_bools()
     }
 }
 
@@ -176,7 +247,12 @@ pub fn sort_candidates_by_hamming_distance(
                 right.packed_message_bits(),
                 &packed_reference,
             ))
-            .then_with(|| compare_message_bits_le(&left.message_bits, &right.message_bits))
+            .then_with(|| {
+                compare_packed_message_bits_le(
+                    &left.packed_message_bits,
+                    &right.packed_message_bits,
+                )
+            })
     });
     Ok(sorted)
 }
@@ -286,16 +362,12 @@ fn validate_candidates(candidates: &[AvalancheNode]) -> Result<usize, AvalancheE
     if candidates.is_empty() {
         return Err(AvalancheError::EmptyCandidates);
     }
-    let bit_width = candidates[0].message_bits.len();
-    let packed_len = bit_width.div_ceil(8);
+    let bit_width = candidates[0].bit_len();
     if bit_width == 0 {
         return Err(AvalancheError::InconsistentBitWidth);
     }
     for candidate in candidates {
-        if candidate.message_bits.len() != bit_width
-            || candidate.biases.len() != bit_width
-            || candidate.packed_message_bits.len() != packed_len
-        {
+        if candidate.bit_len() != bit_width || candidate.biases.len() != bit_width {
             return Err(AvalancheError::InconsistentBitWidth);
         }
     }
@@ -431,26 +503,32 @@ fn search_avalanche_tree_with_scores_internal(
 /// # Expected Output
 /// - Returns the inverted node; no stdout/stderr output.
 fn invert_candidate(candidate: &AvalancheNode) -> AvalancheNode {
-    AvalancheNode::new(
-        candidate.message_bits.iter().map(|bit| !*bit).collect(),
+    AvalancheNode::from_packed_bits(
+        candidate.packed_message_bits.bitnot(),
         candidate.biases.clone(),
     )
 }
 
-/// Compares little-endian bit vectors by their numeric value.
+/// Compares packed little-endian bit vectors by their numeric value.
 ///
 /// # Parameters
-/// - `left`: Left-hand little-endian bit vector.
-/// - `right`: Right-hand little-endian bit vector.
+/// - `left`: Left-hand packed bit vector.
+/// - `right`: Right-hand packed bit vector.
 ///
 /// # Returns
 /// - `std::cmp::Ordering`: Ordering of the represented integer values.
 ///
 /// # Expected Output
 /// - Returns the numeric ordering; no stdout/stderr output.
-fn compare_message_bits_le(left: &[bool], right: &[bool]) -> std::cmp::Ordering {
-    for idx in (0..left.len()).rev() {
-        let ordering = left[idx].cmp(&right[idx]);
+fn compare_packed_message_bits_le(left: &PackedBits, right: &PackedBits) -> std::cmp::Ordering {
+    let byte_len = left.len().max(right.len()).div_ceil(8);
+    for byte_idx in (0..byte_len).rev() {
+        let ordering = left
+            .bytes_le()
+            .get(byte_idx)
+            .copied()
+            .unwrap_or(0)
+            .cmp(&right.bytes_le().get(byte_idx).copied().unwrap_or(0));
         if ordering != std::cmp::Ordering::Equal {
             return ordering;
         }
@@ -685,8 +763,8 @@ fn weighted_similarity(
     right: &AvalancheNode,
     bit_width: usize,
 ) -> Result<(f64, f64), AvalancheError> {
-    if left.message_bits.len() != bit_width
-        || right.message_bits.len() != bit_width
+    if left.bit_len() != bit_width
+        || right.bit_len() != bit_width
         || left.biases.len() != bit_width
         || right.biases.len() != bit_width
     {
@@ -698,7 +776,7 @@ fn weighted_similarity(
     for idx in 0..bit_width {
         let weight = 1.0 + left.biases[idx].abs() + right.biases[idx].abs();
         weight_sum += weight;
-        if left.message_bits[idx] == right.message_bits[idx] {
+        if left.bit(idx) == right.bit(idx) {
             match_weight += weight;
         }
     }
@@ -722,29 +800,28 @@ fn combine_candidates(
     right: &AvalancheNode,
     bit_width: usize,
 ) -> Result<AvalancheNode, AvalancheError> {
-    if left.message_bits.len() != bit_width
-        || right.message_bits.len() != bit_width
+    if left.bit_len() != bit_width
+        || right.bit_len() != bit_width
         || left.biases.len() != bit_width
         || right.biases.len() != bit_width
     {
         return Err(AvalancheError::InconsistentBitWidth);
     }
 
-    let mut message_bits = Vec::with_capacity(bit_width);
+    let combined_bits = left.packed_message_bits.bitand(&right.packed_message_bits);
     let mut biases = Vec::with_capacity(bit_width);
     for idx in 0..bit_width {
-        let and_bit = left.message_bits[idx] & right.message_bits[idx];
+        let and_bit = combined_bits.bit(idx);
         let bias = if and_bit {
             let sum = left.biases[idx] + right.biases[idx];
             if sum == 0.0 { 1.0 } else { sum }
         } else {
             (left.biases[idx] - right.biases[idx]).abs()
         };
-        message_bits.push(and_bit);
         biases.push(bias);
     }
 
-    Ok(AvalancheNode::new(message_bits, biases))
+    Ok(AvalancheNode::from_packed_bits(combined_bits, biases))
 }
 
 #[cfg(test)]
@@ -768,7 +845,7 @@ mod tests {
         ];
         let result = search_avalanche_tree(candidates).expect("avalanche tree failed");
         let snapshot = json!({
-            "message_bits": result.message_bits,
+            "message_bits": result.message_bits_vec(),
             "biases": result.biases,
         });
         assert_yaml_snapshot!(snapshot);
@@ -784,7 +861,7 @@ mod tests {
         ];
         let result = search_avalanche_tree(candidates).expect("avalanche tree failed");
         let snapshot = json!({
-            "message_bits": result.message_bits,
+            "message_bits": result.message_bits_vec(),
             "biases": result.biases,
         });
         assert_yaml_snapshot!(snapshot);
@@ -799,7 +876,7 @@ mod tests {
         ];
         let result = search_avalanche_tree(candidates).expect("avalanche tree failed");
         let snapshot = json!({
-            "message_bits": result.message_bits,
+            "message_bits": result.message_bits_vec(),
             "biases": result.biases,
         });
         assert_yaml_snapshot!(snapshot);
@@ -854,10 +931,7 @@ mod tests {
         let sorted = sort_candidates_by_hamming_distance(candidates, &[true, true])
             .expect("distance sort failed");
 
-        let bits: Vec<Vec<bool>> = sorted
-            .iter()
-            .map(|node| node.message_bits.clone())
-            .collect();
+        let bits: Vec<Vec<bool>> = sorted.iter().map(|node| node.message_bits_vec()).collect();
         let biases: Vec<Vec<f64>> = sorted.iter().map(|node| node.biases.clone()).collect();
 
         assert_eq!(bits, vec![vec![true, false], vec![false, false],]);
@@ -874,7 +948,7 @@ mod tests {
 
         let bits: Vec<Vec<bool>> = mirrored
             .iter()
-            .map(|node| node.message_bits.clone())
+            .map(|node| node.message_bits_vec())
             .collect();
         let biases: Vec<Vec<f64>> = mirrored.iter().map(|node| node.biases.clone()).collect();
 

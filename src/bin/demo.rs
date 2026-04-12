@@ -667,7 +667,7 @@ fn build_avalanche_nodes_unique_d_demo(
     if !collected_nodes.is_empty() {
         let mut nodes_with_value: Vec<(BigUint, AvalancheNode)> = collected_nodes
             .into_iter()
-            .map(|node| (bits_le_to_biguint(&node.message_bits), node))
+            .map(|node| (BigUint::from_bytes_le(node.packed_message_bits()), node))
             .collect();
         nodes_with_value.sort_by(|a, b| a.0.cmp(&b.0));
         collected_nodes = nodes_with_value.into_iter().map(|(_, node)| node).collect();
@@ -721,7 +721,7 @@ fn run_avalanche_beam_search(
     println!("Avalanche tree instances: {}", avalanche_nodes.len());
     let msb_one_count = avalanche_nodes
         .iter()
-        .filter(|node| node.message_bits.last().copied().unwrap_or(false))
+        .filter(|node| node.msb().unwrap_or(false))
         .count();
     let msb_zero_count = avalanche_nodes.len().saturating_sub(msb_one_count);
     let avalanche_result =

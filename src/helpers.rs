@@ -8,6 +8,172 @@ use core::arch::x86_64::{
     _mm512_popcnt_epi8, _mm512_popcnt_epi64, _mm512_storeu_si512, _mm512_xor_si512,
 };
 
+/// Packed little-endian bit storage used by hot-path bit scoring.
+///
+/// # Parameters
+/// - None.
+///
+/// # Returns
+/// - `PackedBits`: Bit vector stored as bytes plus an explicit logical bit length.
+///
+/// # Expected Output
+/// - Holds packed bit data in memory; no stdout/stderr output.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct PackedBits {
+    bytes_le: Vec<u8>,
+    bit_len: usize,
+}
+
+impl PackedBits {
+    /// Builds packed storage from a little-endian bit slice.
+    ///
+    /// # Parameters
+    /// - `bits`: Bit slice with LSB at index `0`.
+    ///
+    /// # Returns
+    /// - `PackedBits`: Packed bit representation with the same logical width.
+    ///
+    /// # Expected Output
+    /// - Returns packed storage; no stdout/stderr output.
+    pub(crate) fn from_bools(bits: &[bool]) -> Self {
+        Self {
+            bytes_le: pack_bits_to_bytes(bits),
+            bit_len: bits.len(),
+        }
+    }
+
+    /// Builds packed storage from a little-endian byte slice and logical width.
+    ///
+    /// # Parameters
+    /// - `bytes_le`: Source bytes in little-endian order.
+    /// - `bit_len`: Number of low-order bits that belong to the logical value.
+    ///
+    /// # Returns
+    /// - `PackedBits`: Packed storage masked to the requested width.
+    ///
+    /// # Expected Output
+    /// - Returns packed storage with masked tail bits; no stdout/stderr output.
+    pub(crate) fn from_bytes_le(bytes_le: &[u8], bit_len: usize) -> Self {
+        let byte_len = bit_len.div_ceil(8);
+        let mut packed = vec![0u8; byte_len];
+        let copied = packed.len().min(bytes_le.len());
+        packed[..copied].copy_from_slice(&bytes_le[..copied]);
+        if let Some(last) = packed.last_mut() {
+            let tail_bits = bit_len % 8;
+            if tail_bits != 0 {
+                *last &= ((1u16 << tail_bits) - 1) as u8;
+            }
+        }
+        Self {
+            bytes_le: packed,
+            bit_len,
+        }
+    }
+
+    /// Returns the logical bit length.
+    ///
+    /// # Parameters
+    /// - None.
+    ///
+    /// # Returns
+    /// - `usize`: Number of logical bits represented by this packed value.
+    ///
+    /// # Expected Output
+    /// - Returns the stored bit width; no stdout/stderr output.
+    pub(crate) fn len(&self) -> usize {
+        self.bit_len
+    }
+
+    /// Returns the packed byte slice.
+    ///
+    /// # Parameters
+    /// - None.
+    ///
+    /// # Returns
+    /// - `&[u8]`: Little-endian packed bytes.
+    ///
+    /// # Expected Output
+    /// - Returns the packed storage slice; no stdout/stderr output.
+    pub(crate) fn bytes_le(&self) -> &[u8] {
+        &self.bytes_le
+    }
+
+    /// Reads one logical bit by index.
+    ///
+    /// # Parameters
+    /// - `index`: Bit index with LSB at `0`.
+    ///
+    /// # Returns
+    /// - `bool`: Bit value, or `false` when out of range.
+    ///
+    /// # Expected Output
+    /// - Returns the bit value; no stdout/stderr output.
+    pub(crate) fn bit(&self, index: usize) -> bool {
+        if index >= self.bit_len {
+            return false;
+        }
+        let byte_idx = index / 8;
+        let bit_idx = index % 8;
+        self.bytes_le
+            .get(byte_idx)
+            .map(|byte| ((byte >> bit_idx) & 1) == 1)
+            .unwrap_or(false)
+    }
+
+    /// Expands the packed representation into a little-endian bit vector.
+    ///
+    /// # Parameters
+    /// - None.
+    ///
+    /// # Returns
+    /// - `Vec<bool>`: Unpacked bit vector with one boolean per logical bit.
+    ///
+    /// # Expected Output
+    /// - Returns unpacked bits; no stdout/stderr output.
+    pub(crate) fn to_bools(&self) -> Vec<bool> {
+        (0..self.bit_len).map(|idx| self.bit(idx)).collect()
+    }
+
+    /// Computes the packed bytewise AND of two equal-width bit vectors.
+    ///
+    /// # Parameters
+    /// - `other`: Right-hand packed bit vector.
+    ///
+    /// # Returns
+    /// - `PackedBits`: Packed logical AND of the shared bit width.
+    ///
+    /// # Expected Output
+    /// - Returns packed bit storage; no stdout/stderr output.
+    pub(crate) fn bitand(&self, other: &Self) -> Self {
+        debug_assert_eq!(self.bit_len, other.bit_len);
+        let bytes_le = self
+            .bytes_le
+            .iter()
+            .zip(other.bytes_le.iter())
+            .map(|(left, right)| left & right)
+            .collect();
+        Self {
+            bytes_le,
+            bit_len: self.bit_len.min(other.bit_len),
+        }
+    }
+
+    /// Computes the packed bitwise NOT of this bit vector.
+    ///
+    /// # Parameters
+    /// - None.
+    ///
+    /// # Returns
+    /// - `PackedBits`: Packed logical NOT with tail bits masked to the stored width.
+    ///
+    /// # Expected Output
+    /// - Returns packed bit storage; no stdout/stderr output.
+    pub(crate) fn bitnot(&self) -> Self {
+        let inverted = self.bytes_le.iter().map(|byte| !byte).collect::<Vec<_>>();
+        Self::from_bytes_le(&inverted, self.bit_len)
+    }
+}
+
 /// Computes the Hamming distance between two bit slices.
 ///
 /// # Parameters
@@ -66,28 +232,30 @@ pub(crate) fn matching_bit_counts_bytes_le(
     } else {
         ((1u16 << tail_bits) - 1) as u8
     };
-    let mut xor_bytes = vec![0u8; byte_len];
-
+    let mut differing = 0usize;
+    let mut matching_lsb = 0usize;
+    let mut lsb_done = false;
     for byte_idx in 0..byte_len {
         let left_byte = left.get(byte_idx).copied().unwrap_or(0);
         let right_byte = right.get(byte_idx).copied().unwrap_or(0);
+        let byte_limit = if byte_idx + 1 == byte_len {
+            if tail_bits == 0 { 8 } else { tail_bits }
+        } else {
+            8
+        };
         let mask = if byte_idx + 1 == byte_len {
             tail_mask
         } else {
             u8::MAX
         };
-        xor_bytes[byte_idx] = (left_byte ^ right_byte) & mask;
-    }
+        let diff = (left_byte ^ right_byte) & mask;
+        differing += diff.count_ones() as usize;
 
-    let differing = xor_bytes
-        .iter()
-        .map(|byte| byte.count_ones() as usize)
-        .sum::<usize>();
-    let matching_total = bit_len.saturating_sub(differing);
+        if lsb_done {
+            continue;
+        }
 
-    let mut matching_lsb = 0usize;
-    for (byte_idx, diff) in xor_bytes.iter().enumerate() {
-        if *diff == 0 {
+        if diff == 0 {
             let full_bits = if byte_idx + 1 == byte_len {
                 if tail_bits == 0 { 8 } else { tail_bits }
             } else {
@@ -97,16 +265,11 @@ pub(crate) fn matching_bit_counts_bytes_le(
             continue;
         }
 
-        let first_diff = diff.trailing_zeros() as usize;
-        let byte_limit = if byte_idx + 1 == byte_len {
-            if tail_bits == 0 { 8 } else { tail_bits }
-        } else {
-            8
-        };
-        matching_lsb += first_diff.min(byte_limit);
-        break;
+        matching_lsb += (diff.trailing_zeros() as usize).min(byte_limit);
+        lsb_done = true;
     }
 
+    let matching_total = bit_len.saturating_sub(differing);
     (matching_lsb.min(bit_len), matching_total)
 }
 

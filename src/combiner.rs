@@ -1,6 +1,7 @@
 use rand::{Rng, RngCore};
 use rayon::prelude::*;
 
+use crate::helpers::PackedBits;
 use crate::rng::RngChoice;
 
 #[derive(Debug, Clone)]
@@ -71,6 +72,30 @@ fn validate_oracles(oracles: &[Vec<bool>]) -> Result<usize, CombinerError> {
         return Err(CombinerError::EmptyMajorityBits);
     }
     if oracles.iter().any(|o| o.len() != bit_len) {
+        return Err(CombinerError::InconsistentLengths);
+    }
+    Ok(bit_len)
+}
+
+/// Validates packed oracle vectors for non-emptiness and consistent bit lengths.
+///
+/// # Parameters
+/// - `oracles`: Slice of packed oracle bit vectors to validate.
+///
+/// # Returns
+/// - `Result<usize, CombinerError>`: On success, the common bit length for all packed oracles.
+///
+/// # Expected Output
+/// - Returns the bit length when valid; otherwise a `CombinerError`.
+fn validate_packed_oracles(oracles: &[PackedBits]) -> Result<usize, CombinerError> {
+    if oracles.is_empty() {
+        return Err(CombinerError::EmptyOracles);
+    }
+    let bit_len = oracles[0].len();
+    if bit_len == 0 {
+        return Err(CombinerError::EmptyMajorityBits);
+    }
+    if oracles.iter().any(|oracle| oracle.len() != bit_len) {
         return Err(CombinerError::InconsistentLengths);
     }
     Ok(bit_len)
@@ -169,6 +194,82 @@ pub fn majority_vote_with_distribution(
         }
     }
 
+    Ok(build_majority_distribution(
+        ones_count,
+        total_oracles,
+        tie_breaker,
+    ))
+}
+
+/// Computes the majority bit per position and returns distribution stats from packed bit storage.
+///
+/// # Parameters
+/// - `oracles`: Collection of packed oracle bit vectors (must be non-empty and equal length).
+/// - `tie_breaker`: Bit value to use when a position has an equal number of 0s and 1s.
+///
+/// # Returns
+/// - `Result<MajorityDistribution, CombinerError>`: Majority bits plus counts/probabilities.
+///
+/// # Expected Output
+/// - Returns distribution information for each bit position; no stdout/stderr output.
+pub(crate) fn majority_vote_with_distribution_packed(
+    oracles: &[PackedBits],
+    tie_breaker: bool,
+) -> Result<MajorityDistribution, CombinerError> {
+    let bit_len = validate_packed_oracles(oracles)?;
+    let total_oracles = oracles.len();
+    let byte_len = bit_len.div_ceil(8);
+    let tail_bits = bit_len % 8;
+    let tail_mask = if tail_bits == 0 {
+        u8::MAX
+    } else {
+        ((1u16 << tail_bits) - 1) as u8
+    };
+    let mut ones_count = vec![0usize; bit_len];
+
+    for oracle in oracles {
+        for byte_idx in 0..byte_len {
+            let mask = if byte_idx + 1 == byte_len {
+                tail_mask
+            } else {
+                u8::MAX
+            };
+            let mut byte = oracle.bytes_le().get(byte_idx).copied().unwrap_or(0) & mask;
+            while byte != 0 {
+                let bit_offset = byte.trailing_zeros() as usize;
+                let bit_idx = byte_idx * 8 + bit_offset;
+                if bit_idx < bit_len {
+                    ones_count[bit_idx] += 1;
+                }
+                byte &= byte - 1;
+            }
+        }
+    }
+
+    Ok(build_majority_distribution(
+        ones_count,
+        total_oracles,
+        tie_breaker,
+    ))
+}
+
+/// Builds majority-vote distribution fields from per-bit one counts.
+///
+/// # Parameters
+/// - `ones_count`: Count of `1` bits observed at each position.
+/// - `total_oracles`: Number of oracle inputs contributing to `ones_count`.
+/// - `tie_breaker`: Bit value to use when ones and zeros tie.
+///
+/// # Returns
+/// - `MajorityDistribution`: Majority bits plus counts and probabilities.
+///
+/// # Expected Output
+/// - Returns a fully populated distribution record; no stdout/stderr output.
+fn build_majority_distribution(
+    ones_count: Vec<usize>,
+    total_oracles: usize,
+    tie_breaker: bool,
+) -> MajorityDistribution {
     let zeros_count: Vec<usize> = ones_count
         .iter()
         .map(|&ones| total_oracles - ones)
@@ -189,13 +290,13 @@ pub fn majority_vote_with_distribution(
         })
         .collect();
 
-    Ok(MajorityDistribution {
+    MajorityDistribution {
         majority_bits,
         ones_count,
         zeros_count,
         probability_one,
         total_oracles,
-    })
+    }
 }
 
 /// Runs a full combiner experiment by sampling oracles and voting against a target.

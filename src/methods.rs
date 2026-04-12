@@ -46,7 +46,7 @@ use crate::avalanche::{
 use crate::combiner::majority_vote_with_distribution;
 use crate::config::{Config, EngineConfig};
 use crate::helpers::{
-    format_beam_float, matching_bit_counts_bytes_le, normalize_avalanche_biases,
+    PackedBits, format_beam_float, matching_bit_counts_bytes_le, normalize_avalanche_biases,
     spread_normalized_avalanche_biases, stored_beam_value_is_one,
 };
 use crate::math::{
@@ -954,6 +954,21 @@ fn biguint_to_bits_le(value: &BigUint, width: usize) -> Vec<bool> {
         .collect()
 }
 
+/// Converts a `BigUint` to fixed-width packed little-endian bit storage.
+///
+/// # Parameters
+/// - `value`: Integer to convert.
+/// - `width`: Number of logical bits to keep.
+///
+/// # Returns
+/// - `PackedBits`: Packed little-endian bit storage of length `width`.
+///
+/// # Expected Output
+/// - Returns packed bits padded with zero bytes if needed; no side effects.
+fn biguint_to_packed_bits_le(value: &BigUint, width: usize) -> PackedBits {
+    PackedBits::from_bytes_le(&value.to_bytes_le(), width)
+}
+
 /// Converts a little-endian bit vector into a `BigUint`.
 ///
 /// # Parameters
@@ -997,9 +1012,9 @@ fn count_matching_bits_le(a: &[bool], b: &[bool]) -> (usize, usize) {
         return (0, 0);
     }
 
-    let packed_a = pack_bits_to_bytes_le(&a[..min_len]);
-    let packed_b = pack_bits_to_bytes_le(&b[..min_len]);
-    matching_bit_counts_bytes_le(&packed_a, &packed_b, min_len)
+    let packed_a = PackedBits::from_bools(&a[..min_len]);
+    let packed_b = PackedBits::from_bools(&b[..min_len]);
+    matching_bit_counts_bytes_le(packed_a.bytes_le(), packed_b.bytes_le(), min_len)
 }
 
 /// Resolves the fixed message (if configured) for analysis timelines.
@@ -1921,8 +1936,8 @@ fn build_avalanche_nodes_unique_d(
                     &candidate.r,
                     &d_new,
                 );
-                let message_bits = biguint_to_bits_le(&dm, bit_width);
-                let node = AvalancheNode::new(message_bits, vec![0.0; bit_width]);
+                let message_bits = biguint_to_packed_bits_le(&dm, bit_width);
+                let node = AvalancheNode::from_packed_bits(message_bits, vec![0.0; bit_width]);
                 nodes.push(CandidateInstanceNode {
                     candidate_idx,
                     d_new,
@@ -1960,7 +1975,7 @@ fn build_avalanche_nodes_unique_d(
     if !collected_nodes.is_empty() {
         let mut nodes_with_value: Vec<(BigUint, AvalancheNode)> = collected_nodes
             .into_iter()
-            .map(|node| (bits_le_to_biguint(&node.message_bits), node))
+            .map(|node| (BigUint::from_bytes_le(node.packed_message_bits()), node))
             .collect();
         nodes_with_value.sort_by(|a, b| a.0.cmp(&b.0));
         collected_nodes = nodes_with_value.into_iter().map(|(_, node)| node).collect();
@@ -2021,7 +2036,7 @@ fn run_avalanche_search(
     println!("Avalanche tree instances: {}", avalanche_nodes.len());
     let msb_one_count = avalanche_nodes
         .iter()
-        .filter(|node| node.message_bits.last().copied().unwrap_or(false))
+        .filter(|node| node.msb().unwrap_or(false))
         .count();
     let msb_zero_count = avalanche_nodes.len().saturating_sub(msb_one_count);
     let avalanche_count = avalanche_nodes.len();
@@ -2035,17 +2050,17 @@ fn run_avalanche_search(
             "avalanche_tree",
             json!({
                 "bit_order": "lsb0",
-                "bit_width": avalanche_result.message_bits.len(),
+                "bit_width": avalanche_result.bit_len(),
                 "unique_messages": avalanche_count,
                 "biases": avalanche_result.biases,
-                "message_bits": avalanche_result.message_bits,
+                "message_bits": avalanche_result.message_bits_vec(),
                 "level_similarity_pct": avalanche_search.level_similarity_pct,
                 "level_pair_counts": avalanche_search.level_pair_counts,
             }),
         );
     });
 
-    let bit_width = avalanche_result.message_bits.len().max(1);
+    let bit_width = avalanche_result.bit_len().max(1);
     let beam_bit_one_threshold = engine.beam_bit_one_threshold;
     let avalanche_beam_top_k = engine.avalanche_beam_top_k.max(1);
     let avalanche_probability_spread_exponent = engine.avalanche_probability_spread_exponent;
@@ -3158,26 +3173,6 @@ fn count_matching_bits(a: &BigUint, b: &BigUint) -> (usize, usize) {
     matching_bit_counts_bytes_le(&a_bytes, &b_bytes, min_len)
 }
 
-/// Packs a bit slice into bytes in little-endian order.
-///
-/// # Parameters
-/// - `bits`: Bit slice with LSB at index `0`.
-///
-/// # Returns
-/// - `Vec<u8>`: Packed bytes with one bit per source boolean.
-///
-/// # Expected Output
-/// - Returns packed storage; no stdout/stderr output.
-fn pack_bits_to_bytes_le(bits: &[bool]) -> Vec<u8> {
-    let mut packed = vec![0u8; bits.len().div_ceil(8)];
-    for (index, bit) in bits.iter().enumerate() {
-        if *bit {
-            packed[index / 8] |= 1u8 << (index % 8);
-        }
-    }
-    packed
-}
-
 /// Computes a derived value used in homomorphic base conversion flows.
 ///
 /// # Parameters
@@ -3449,7 +3444,7 @@ struct ScoredAvalancheInput {
     score_match_pct: f64,
     hbc_ciphertext_r: String,
     candidate_decryption: String,
-    message_bits: Vec<bool>,
+    message_bits: PackedBits,
 }
 
 #[derive(Clone, Debug)]
@@ -3679,7 +3674,7 @@ fn build_avalanche_nodes_from_scored_inputs(
     let mut nodes: Vec<AvalancheNode> = inputs
         .iter()
         .map(|input| {
-            AvalancheNode::new(
+            AvalancheNode::from_packed_bits(
                 input.message_bits.clone(),
                 vec![0.0; input.message_bits.len()],
             )
@@ -3698,7 +3693,7 @@ fn build_avalanche_nodes_from_scored_inputs(
 
     let mut nodes_with_value: Vec<(BigUint, AvalancheNode)> = nodes
         .drain(..)
-        .map(|node| (bits_le_to_biguint(&node.message_bits), node))
+        .map(|node| (BigUint::from_bytes_le(node.packed_message_bits()), node))
         .collect();
     nodes_with_value.sort_by(|a, b| a.0.cmp(&b.0));
     Ok(nodes_with_value.into_iter().map(|(_, node)| node).collect())
@@ -3764,9 +3759,11 @@ fn execute_sampled_avalanche_sample(
         .iter()
         .map(|input| input.message_bits.clone())
         .collect::<Vec<_>>();
-    let majority_distribution =
-        majority_vote_with_distribution(&selected_oracles, engine.combiner_tie_breaker)
-            .map_err(|err| err.to_string())?;
+    let majority_distribution = crate::combiner::majority_vote_with_distribution_packed(
+        &selected_oracles,
+        engine.combiner_tie_breaker,
+    )
+    .map_err(|err| err.to_string())?;
     let majority_probabilities = if engine.avalanche_combination_sample_smoothing {
         smooth_probability_one_jeffreys(
             &majority_distribution.ones_count,
@@ -3785,7 +3782,7 @@ fn execute_sampled_avalanche_sample(
         engine.avalanche_probability_spread_exponent,
     );
     let beam_bit_one_threshold = engine.beam_bit_one_threshold;
-    let bit_width = avalanche_search.node.message_bits.len().max(1);
+    let bit_width = avalanche_search.node.bit_len().max(1);
     let beam_result = beam_search_top_k(
         vec![Vec::new()],
         engine.avalanche_beam_top_k.max(1),
@@ -4290,7 +4287,7 @@ fn run_r_candidate_accuracy_batches(
                         score_match_pct: match_pct,
                         hbc_ciphertext_r: hbc_result.to_string(),
                         candidate_decryption: dm.to_string(),
-                        message_bits: biguint_to_bits_le(&dm, avalanche_bit_width),
+                        message_bits: biguint_to_packed_bits_le(&dm, avalanche_bit_width),
                     });
                     hbc_ciphertexts_r.push(hbc_result.to_string());
                     candidate_decryptions.push(dm.to_string());
@@ -4790,14 +4787,14 @@ mod tests {
             score_match_pct: 75.0,
             hbc_ciphertext_r: "1".to_string(),
             candidate_decryption: "1".to_string(),
-            message_bits: vec![true, false],
+            message_bits: PackedBits::from_bools(&[true, false]),
         }];
 
         let nodes =
             build_avalanche_nodes_from_scored_inputs(&inputs, &config.engine, &[true, true])
                 .expect("sampled avalanche nodes should build");
 
-        let bits: Vec<Vec<bool>> = nodes.iter().map(|node| node.message_bits.clone()).collect();
+        let bits: Vec<Vec<bool>> = nodes.iter().map(|node| node.message_bits_vec()).collect();
         assert_eq!(bits, vec![vec![true, false], vec![false, true]]);
     }
 
@@ -4814,7 +4811,7 @@ mod tests {
                 score_match_pct: 75.0,
                 hbc_ciphertext_r: "1".to_string(),
                 candidate_decryption: "1".to_string(),
-                message_bits: vec![true, false],
+                message_bits: PackedBits::from_bools(&[true, false]),
             },
             ScoredAvalancheInput {
                 batch_candidate_index: 0,
@@ -4826,7 +4823,7 @@ mod tests {
                 score_match_pct: 70.0,
                 hbc_ciphertext_r: "3".to_string(),
                 candidate_decryption: "3".to_string(),
-                message_bits: vec![false, true],
+                message_bits: PackedBits::from_bools(&[false, true]),
             },
             ScoredAvalancheInput {
                 batch_candidate_index: 1,
@@ -4838,7 +4835,7 @@ mod tests {
                 score_match_pct: 65.0,
                 hbc_ciphertext_r: "5".to_string(),
                 candidate_decryption: "5".to_string(),
-                message_bits: vec![true, true],
+                message_bits: PackedBits::from_bools(&[true, true]),
             },
             ScoredAvalancheInput {
                 batch_candidate_index: 1,
@@ -4850,7 +4847,7 @@ mod tests {
                 score_match_pct: 60.0,
                 hbc_ciphertext_r: "15".to_string(),
                 candidate_decryption: "15".to_string(),
-                message_bits: vec![false, false],
+                message_bits: PackedBits::from_bools(&[false, false]),
             },
         ];
 
