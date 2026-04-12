@@ -78,7 +78,7 @@ impl AvalancheNode {
     ///
     /// # Expected Output
     /// - Returns the cached slice; no stdout/stderr output.
-    pub(crate) fn packed_message_bits(&self) -> &[u8] {
+    pub fn packed_message_bits(&self) -> &[u8] {
         self.packed_message_bits.bytes_le()
     }
 
@@ -120,7 +120,7 @@ impl AvalancheNode {
     ///
     /// # Expected Output
     /// - Returns the MSB when present; no stdout/stderr output.
-    pub(crate) fn msb(&self) -> Option<bool> {
+    pub fn msb(&self) -> Option<bool> {
         self.bit_len().checked_sub(1).map(|idx| self.bit(idx))
     }
 
