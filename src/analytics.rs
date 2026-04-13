@@ -66,6 +66,8 @@ pub struct AnalyticsCliArgs {
     pub avalanche_combination_majority_vote_print: bool,
     /// Whether all sampled-avalanche combinations were retained in memory during the run.
     pub avalanche_combination_keep_all_samples_in_memory: bool,
+    /// Whether sampled avalanche used direct ChaCha20 input sampling instead of mixed-r combinations.
+    pub avalanche_random_chacha20_inputs: bool,
     /// Expected bit width for decryptions.
     pub bits_decrypt: Option<u32>,
     /// Optional CLI override for speculative r-candidate target exponent.
@@ -100,6 +102,7 @@ pub(crate) struct AnalyticsCliInfo {
     avalanche_combination_sample_smoothing: bool,
     avalanche_combination_majority_vote_print: bool,
     avalanche_combination_keep_all_samples_in_memory: bool,
+    avalanche_random_chacha20_inputs: bool,
     bits_decrypt: Option<u32>,
     r_candidate_target_exponent: Option<BigDecimal>,
     r_candidate_target_exponent_minimum: Option<BigDecimal>,
@@ -489,6 +492,7 @@ impl SessionAnalytics {
                 .avalanche_combination_majority_vote_print,
             avalanche_combination_keep_all_samples_in_memory: args
                 .avalanche_combination_keep_all_samples_in_memory,
+            avalanche_random_chacha20_inputs: args.avalanche_random_chacha20_inputs,
             bits_decrypt: args.bits_decrypt,
             r_candidate_target_exponent: args.r_candidate_target_exponent,
             r_candidate_target_exponent_minimum: args.r_candidate_target_exponent_minimum,

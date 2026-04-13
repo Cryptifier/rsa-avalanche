@@ -127,6 +127,9 @@ pub struct EngineConfig {
     /// Whether sampled avalanche retains every evaluated sample in memory for downstream consumers.
     #[serde(default = "default_avalanche_combination_keep_all_samples_in_memory")]
     pub avalanche_combination_keep_all_samples_in_memory: bool,
+    /// Whether sampled avalanche bypasses mixed-r combinations and samples raw scored inputs with ChaCha20.
+    #[serde(default = "default_avalanche_random_chacha20_inputs")]
+    pub avalanche_random_chacha20_inputs: bool,
     #[serde(default = "default_same_r_batch")]
     pub same_r_batch: bool,
     #[serde(default = "default_ciphertext_modify")]
@@ -286,6 +289,7 @@ impl Default for EngineConfig {
                 default_avalanche_combination_majority_vote_print(),
             avalanche_combination_keep_all_samples_in_memory:
                 default_avalanche_combination_keep_all_samples_in_memory(),
+            avalanche_random_chacha20_inputs: default_avalanche_random_chacha20_inputs(),
             same_r_batch: default_same_r_batch(),
             ciphertext_modify: default_ciphertext_modify(),
             oracle_accuracy_threshold: default_oracle_accuracy_threshold(),
@@ -858,6 +862,20 @@ fn default_avalanche_combination_mixed_r_candidates() -> usize {
 /// - Returns a constant default value; no side effects.
 fn default_avalanche_combination_pool_size() -> usize {
     100
+}
+
+/// Default flag for random ChaCha20 sampled avalanche inputs.
+///
+/// # Parameters
+/// - None.
+///
+/// # Returns
+/// - `bool`: `false` to keep mixed-r combination sampling enabled by default.
+///
+/// # Expected Output
+/// - Returns a constant default value; no side effects.
+fn default_avalanche_random_chacha20_inputs() -> bool {
+    false
 }
 
 /// Default flag for per-bit majority voting across sampled avalanche combinations.

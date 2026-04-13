@@ -54,6 +54,7 @@
         "entropy_report_threshold" : 0.99,
         "oracle_accuracy_threshold" : 51.0,
         "use_hamming_distance" : false,
+        "avalanche_random_chacha20_inputs" : false,
         "avalanche_beam_top_k" : 100,
         "reuse_r_candidates" : true,
         "reuse_r_candidates_path" : "data/rgen_output_256.csv",

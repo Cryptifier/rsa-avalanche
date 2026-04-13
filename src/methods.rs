@@ -3630,6 +3630,33 @@ fn sample_unique_indices(pool_size: usize, sample_size: usize, rng: &mut RngChoi
     indices
 }
 
+/// Selects raw scored avalanche inputs directly from the flattened pool.
+///
+/// # Parameters
+/// - `inputs`: Flattened scored avalanche inputs available for sampling.
+/// - `sample_size`: Maximum number of inputs to keep.
+/// - `rng`: Random number generator used for index sampling.
+///
+/// # Returns
+/// - `Vec<ScoredAvalancheInput>`: Randomly selected scored inputs without replacement.
+///
+/// # Expected Output
+/// - Returns up to `sample_size` unique scored inputs; no stdout/stderr output.
+fn select_random_scored_inputs(
+    inputs: &[ScoredAvalancheInput],
+    sample_size: usize,
+    rng: &mut RngChoice,
+) -> Vec<ScoredAvalancheInput> {
+    if sample_size == 0 || inputs.is_empty() {
+        return Vec::new();
+    }
+
+    sample_unique_indices(inputs.len(), sample_size, rng)
+        .into_iter()
+        .filter_map(|index| inputs.get(index).cloned())
+        .collect()
+}
+
 /// Groups scored avalanche inputs by their originating r candidate.
 ///
 /// # Parameters
@@ -3823,6 +3850,7 @@ fn build_avalanche_nodes_from_scored_inputs(
 fn execute_sampled_avalanche_sample(
     engine: &EngineConfig,
     message_bits: &[bool],
+    scored_inputs: &[ScoredAvalancheInput],
     grouped_inputs: &[ScoredAvalancheInputGroup],
     pool_size: usize,
     mixed_r_candidate_count: usize,
@@ -3830,12 +3858,16 @@ fn execute_sampled_avalanche_sample(
     rng: &mut RngChoice,
 ) -> Result<SampledAvalancheSampleOutcome, String> {
     let keep_all_samples = engine.avalanche_combination_keep_all_samples_in_memory;
-    let selected_inputs = select_scored_inputs_for_mixed_r_candidates(
-        grouped_inputs,
-        mixed_r_candidate_count,
-        engine.avalanche_combination_size,
-        rng,
-    );
+    let selected_inputs = if engine.avalanche_random_chacha20_inputs {
+        select_random_scored_inputs(scored_inputs, engine.avalanche_combination_size, rng)
+    } else {
+        select_scored_inputs_for_mixed_r_candidates(
+            grouped_inputs,
+            mixed_r_candidate_count,
+            engine.avalanche_combination_size,
+            rng,
+        )
+    };
     let selected_group_count = selected_inputs
         .iter()
         .map(|input| input.batch_candidate_index)
@@ -4034,7 +4066,9 @@ fn run_sampled_avalanche_beam_search(
     if engine.avalanche_combination_samples == 0 {
         return Err("avalanche_combination_samples must be >= 1".into());
     }
-    if engine.avalanche_combination_mixed_r_candidates == 0 {
+    if !engine.avalanche_random_chacha20_inputs
+        && engine.avalanche_combination_mixed_r_candidates == 0
+    {
         return Err("avalanche_combination_mixed_r_candidates must be >= 1".into());
     }
     if engine.avalanche_combination_size == 0 {
@@ -4050,22 +4084,32 @@ fn run_sampled_avalanche_beam_search(
     if r_candidate_pool_size == 0 {
         return Ok(SampledAvalancheBatchResult::default());
     }
-    let mixed_r_candidate_count = engine
-        .avalanche_combination_mixed_r_candidates
-        .min(engine.avalanche_combination_size)
-        .min(r_candidate_pool_size);
+    let mixed_r_candidate_count = if engine.avalanche_random_chacha20_inputs {
+        0
+    } else {
+        engine
+            .avalanche_combination_mixed_r_candidates
+            .min(engine.avalanche_combination_size)
+            .min(r_candidate_pool_size)
+    };
 
     let sample_count = engine.avalanche_combination_samples as usize;
     let majority_vote_enabled = engine.avalanche_combination_majority_vote;
     let sample_smoothing_enabled = engine.avalanche_combination_sample_smoothing;
     let majority_vote_print_enabled = engine.avalanche_combination_majority_vote_print;
+    let selection_mode = if engine.avalanche_random_chacha20_inputs {
+        "random-chacha20-inputs"
+    } else {
+        "mixed-r-combinations"
+    };
     let message_bits = biguint_to_bits_le(message, scored_inputs[0].message_bits.len());
 
     println!(
-        "Avalanche combination setup for batch {}: scored inputs {} r-candidate-pool {} configured-mixed-r-candidates {} effective-mixed-r-candidates {} samples {} majority-vote {} sample-smoothing {} majority-print {}",
+        "Avalanche combination setup for batch {}: scored inputs {} r-candidate-pool {} selection-mode {} configured-mixed-r-candidates {} effective-mixed-r-candidates {} samples {} majority-vote {} sample-smoothing {} majority-print {}",
         batch_number,
         scored_inputs.len(),
         r_candidate_pool_size,
+        selection_mode,
         engine.avalanche_combination_mixed_r_candidates,
         mixed_r_candidate_count,
         sample_count,
@@ -4081,7 +4125,9 @@ fn run_sampled_avalanche_beam_search(
             "off"
         }
     );
-    if mixed_r_candidate_count < engine.avalanche_combination_mixed_r_candidates {
+    if !engine.avalanche_random_chacha20_inputs
+        && mixed_r_candidate_count < engine.avalanche_combination_mixed_r_candidates
+    {
         println!(
             "Avalanche combination batch {} capped mixed r-candidates from {} to {} because only {} distinct r candidates were available in the batch",
             batch_number,
@@ -4091,7 +4137,11 @@ fn run_sampled_avalanche_beam_search(
         );
     }
 
-    let rng_mode = rng.mode();
+    let rng_mode = if engine.avalanche_random_chacha20_inputs {
+        RngMode::Crypto
+    } else {
+        rng.mode()
+    };
     let sample_label = format!("Avalanche sample batch {}", batch_number);
     let sample_done = AtomicU64::new(0);
     let sample_log_start = Instant::now();
@@ -4109,6 +4159,7 @@ fn run_sampled_avalanche_beam_search(
                 let outcome = execute_sampled_avalanche_sample(
                     engine,
                     &message_bits,
+                    scored_inputs,
                     &grouped_inputs,
                     pool_size,
                     mixed_r_candidate_count,
@@ -4956,5 +5007,92 @@ mod tests {
             .collect::<HashSet<_>>();
         assert_eq!(selected_double.len(), 3);
         assert_eq!(selected_double_candidates.len(), 2);
+    }
+
+    #[test]
+    fn test_select_random_scored_inputs_caps_sample_size_and_uniqueness() {
+        let inputs = vec![
+            ScoredAvalancheInput {
+                batch_candidate_index: 0,
+                message_index: 0,
+                r: BigUint::from(3u8),
+                x: BigUint::from(1u8),
+                score_match_pct: 75.0,
+                message_bits: PackedBits::from_bools(&[true, false]),
+                detail: None,
+            },
+            ScoredAvalancheInput {
+                batch_candidate_index: 0,
+                message_index: 1,
+                r: BigUint::from(3u8),
+                x: BigUint::from(3u8),
+                score_match_pct: 70.0,
+                message_bits: PackedBits::from_bools(&[false, true]),
+                detail: None,
+            },
+            ScoredAvalancheInput {
+                batch_candidate_index: 1,
+                message_index: 0,
+                r: BigUint::from(5u8),
+                x: BigUint::from(1u8),
+                score_match_pct: 65.0,
+                message_bits: PackedBits::from_bools(&[true, true]),
+                detail: None,
+            },
+        ];
+
+        let mut rng = RngChoice::from_seed(RngMode::Crypto, 7);
+        let selected = select_random_scored_inputs(&inputs, 10, &mut rng);
+        let selected_keys = selected
+            .iter()
+            .map(|input| (input.batch_candidate_index, input.message_index))
+            .collect::<HashSet<_>>();
+
+        assert_eq!(selected.len(), 3);
+        assert_eq!(selected_keys.len(), 3);
+    }
+
+    #[test]
+    fn test_run_sampled_avalanche_beam_search_allows_zero_mixed_r_in_chacha20_mode() {
+        let mut config = Config::default();
+        config.engine.avalanche_random_chacha20_inputs = true;
+        config.engine.avalanche_combination_samples = 1;
+        config.engine.avalanche_combination_size = 2;
+        config.engine.avalanche_combination_mixed_r_candidates = 0;
+
+        let scored_inputs = vec![
+            ScoredAvalancheInput {
+                batch_candidate_index: 0,
+                message_index: 0,
+                r: BigUint::from(3u8),
+                x: BigUint::from(1u8),
+                score_match_pct: 75.0,
+                message_bits: PackedBits::from_bools(&[true, false]),
+                detail: None,
+            },
+            ScoredAvalancheInput {
+                batch_candidate_index: 1,
+                message_index: 0,
+                r: BigUint::from(5u8),
+                x: BigUint::from(3u8),
+                score_match_pct: 65.0,
+                message_bits: PackedBits::from_bools(&[false, true]),
+                detail: None,
+            },
+        ];
+
+        let mut rng = RngChoice::from_seed(RngMode::Standard, 7);
+        let result = run_sampled_avalanche_beam_search(
+            &config.engine,
+            &BigUint::from(1u8),
+            &scored_inputs,
+            1,
+            &mut rng,
+        )
+        .expect("ChaCha20 direct-input mode should not require mixed-r combinations");
+
+        assert_eq!(result.sample_count, 1);
+        assert!(result.selected_sample.is_some());
+        assert!(result.retained_samples.is_empty());
     }
 }
