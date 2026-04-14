@@ -58,6 +58,12 @@ pub struct AnalyticsCliArgs {
     pub avalanche_combination_mixed_r_candidates: usize,
     /// Number of top scored candidates retained for avalanche combination sampling.
     pub avalanche_combination_pool_size: usize,
+    /// Whether sampled avalanche prunes the scored-input pool by Hamming-distance percentile before sampling.
+    pub avalanche_combination_hamming_distance_prune: bool,
+    /// Central percentile of Hamming distances retained when sampled-avalanche pruning is enabled.
+    pub avalanche_combination_hamming_distance_keep_percentile: f64,
+    /// Percentage of the retained inlier pool size to add back from Hamming-distance outlier tails.
+    pub avalanche_combination_hamming_distance_outlier_preference_pct: f64,
     /// Whether sampled avalanche uses per-bit majority-vote probabilities from the combination outputs.
     pub avalanche_combination_majority_vote: bool,
     /// Whether sampled avalanche smooths per-bit majority-vote probabilities before beam search.
@@ -98,6 +104,9 @@ pub(crate) struct AnalyticsCliInfo {
     avalanche_combination_size: usize,
     avalanche_combination_mixed_r_candidates: usize,
     avalanche_combination_pool_size: usize,
+    avalanche_combination_hamming_distance_prune: bool,
+    avalanche_combination_hamming_distance_keep_percentile: f64,
+    avalanche_combination_hamming_distance_outlier_preference_pct: f64,
     avalanche_combination_majority_vote: bool,
     avalanche_combination_sample_smoothing: bool,
     avalanche_combination_majority_vote_print: bool,
@@ -486,6 +495,12 @@ impl SessionAnalytics {
             avalanche_combination_size: args.avalanche_combination_size,
             avalanche_combination_mixed_r_candidates: args.avalanche_combination_mixed_r_candidates,
             avalanche_combination_pool_size: args.avalanche_combination_pool_size,
+            avalanche_combination_hamming_distance_prune: args
+                .avalanche_combination_hamming_distance_prune,
+            avalanche_combination_hamming_distance_keep_percentile: args
+                .avalanche_combination_hamming_distance_keep_percentile,
+            avalanche_combination_hamming_distance_outlier_preference_pct: args
+                .avalanche_combination_hamming_distance_outlier_preference_pct,
             avalanche_combination_majority_vote: args.avalanche_combination_majority_vote,
             avalanche_combination_sample_smoothing: args.avalanche_combination_sample_smoothing,
             avalanche_combination_majority_vote_print: args

@@ -65,8 +65,11 @@
     "analysis_batch_batches": 1, // Number of scored batches to run for the small-batch beam workflow.
     "avalanche_combination_mixed_r_candidates": 16,
     "avalanche_combination_samples": 100000, // N: number of sampled combinations evaluated by avalanche per batch.
-    "avalanche_combination_size": 100, // Number of scored items taken in each sampled combination.
+    "avalanche_combination_size": 200, // Number of scored items taken in each sampled combination.
     "avalanche_combination_pool_size": 100000, // Legacy compatibility field; runtime sampling now always uses the full batch-sized pool.
+    "avalanche_combination_hamming_distance_prune": true,
+    "avalanche_combination_hamming_distance_keep_percentile": 90.0,
+    "avalanche_combination_hamming_distance_outlier_preference_pct": 50.0,
     "avalanche_combination_majority_vote": true, // Use per-bit majority-vote probabilities from each sampled combination.
     "avalanche_combination_sample_smoothing": true, // Apply Jeffreys smoothing to the sampled majority-vote probabilities before beam search.
     "avalanche_combination_majority_vote_print": true, // Print a separate sampled-combination majority-vote summary alongside the beam output.

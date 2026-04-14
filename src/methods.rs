@@ -46,8 +46,8 @@ use crate::avalanche::{
 use crate::combiner::majority_vote_with_distribution;
 use crate::config::{Config, EngineConfig};
 use crate::helpers::{
-    PackedBits, format_beam_float, matching_bit_counts_bytes_le, normalize_avalanche_biases,
-    spread_normalized_avalanche_biases, stored_beam_value_is_one,
+    PackedBits, format_beam_float, hamming_distance_packed_bytes, matching_bit_counts_bytes_le,
+    normalize_avalanche_biases, spread_normalized_avalanche_biases, stored_beam_value_is_one,
 };
 use crate::math::{
     bit_length, choose_exponent, compute_totient, mod_inverse, random_biguint_bits,
@@ -3657,6 +3657,129 @@ fn select_random_scored_inputs(
         .collect()
 }
 
+#[derive(Clone, Debug)]
+struct HammingDistancePrunedPool {
+    selected_inputs: Vec<ScoredAvalancheInput>,
+    retained_inlier_count: usize,
+    available_outlier_count: usize,
+    preferred_outlier_count: usize,
+}
+
+/// Prunes scored avalanche inputs to a central Hamming-distance percentile band and optionally
+/// adds back preferred tail outliers.
+///
+/// # Parameters
+/// - `inputs`: Flattened scored avalanche inputs available for sampled-avalanche selection.
+/// - `reference_message_bits`: Original plaintext bits packed for Hamming-distance scoring.
+/// - `keep_percentile`: Central percentile of Hamming distances to retain.
+/// - `outlier_preference_pct`: Percentage of the retained inlier count to add back from the
+///   Hamming-distance outlier tails.
+///
+/// # Returns
+/// - `HammingDistancePrunedPool`: Filtered pool plus counts describing the retained inliers and
+///   preferred outliers.
+///
+/// # Expected Output
+/// - Returns the filtered inputs in their original order; falls back to the unpruned pool when
+///   pruning would remove every input or when the requested percentile does not trim any tails.
+fn prune_scored_inputs_by_hamming_distance_percentile(
+    inputs: &[ScoredAvalancheInput],
+    reference_message_bits: &PackedBits,
+    keep_percentile: f64,
+    outlier_preference_pct: f64,
+) -> HammingDistancePrunedPool {
+    let original_pool = HammingDistancePrunedPool {
+        selected_inputs: inputs.to_vec(),
+        retained_inlier_count: inputs.len(),
+        available_outlier_count: 0,
+        preferred_outlier_count: 0,
+    };
+    if inputs.len() < 2 || keep_percentile >= 100.0 {
+        return original_pool;
+    }
+
+    let tail_fraction = ((100.0 - keep_percentile).max(0.0) / 100.0) / 2.0;
+    if tail_fraction <= 0.0 {
+        return original_pool;
+    }
+
+    let distances = inputs
+        .iter()
+        .enumerate()
+        .map(|(index, input)| {
+            (
+                index,
+                hamming_distance_packed_bytes(
+                    input.message_bits.bytes_le(),
+                    reference_message_bits.bytes_le(),
+                ),
+            )
+        })
+        .collect::<Vec<_>>();
+    let mut sorted_distances = distances
+        .iter()
+        .map(|(_, distance)| *distance)
+        .collect::<Vec<_>>();
+    sorted_distances.sort_unstable();
+
+    let tail_count = ((inputs.len() as f64) * tail_fraction).round() as usize;
+    if tail_count == 0 || tail_count.saturating_mul(2) >= sorted_distances.len() {
+        return original_pool;
+    }
+
+    let lower_distance = sorted_distances[tail_count];
+    let upper_distance = sorted_distances[sorted_distances.len() - tail_count - 1];
+    let mut inlier_indices = Vec::new();
+    let mut outliers = Vec::new();
+    for (index, distance) in distances {
+        if distance >= lower_distance && distance <= upper_distance {
+            inlier_indices.push(index);
+        } else {
+            let deviation = if distance < lower_distance {
+                lower_distance - distance
+            } else {
+                distance - upper_distance
+            };
+            outliers.push((index, deviation));
+        }
+    }
+
+    if inlier_indices.is_empty() {
+        return original_pool;
+    }
+
+    let preferred_outlier_count =
+        (((inlier_indices.len() as f64) * outlier_preference_pct.max(0.0)) / 100.0).round()
+            as usize;
+    outliers.sort_by(|left, right| right.1.cmp(&left.1).then_with(|| left.0.cmp(&right.0)));
+    let inlier_index_set = inlier_indices.iter().copied().collect::<HashSet<_>>();
+    let preferred_outlier_indices = outliers
+        .iter()
+        .take(preferred_outlier_count.min(outliers.len()))
+        .map(|(index, _)| *index)
+        .collect::<HashSet<_>>();
+
+    let selected_inputs = inputs
+        .iter()
+        .enumerate()
+        .filter_map(|(index, input)| {
+            (inlier_index_set.contains(&index) || preferred_outlier_indices.contains(&index))
+                .then(|| input.clone())
+        })
+        .collect::<Vec<_>>();
+
+    if selected_inputs.is_empty() {
+        original_pool
+    } else {
+        HammingDistancePrunedPool {
+            selected_inputs,
+            retained_inlier_count: inlier_indices.len(),
+            available_outlier_count: outliers.len(),
+            preferred_outlier_count: preferred_outlier_indices.len(),
+        }
+    }
+}
+
 /// Groups scored avalanche inputs by their originating r candidate.
 ///
 /// # Parameters
@@ -4074,12 +4197,49 @@ fn run_sampled_avalanche_beam_search(
     if engine.avalanche_combination_size == 0 {
         return Err("avalanche_combination_size must be >= 1".into());
     }
+    if engine.avalanche_combination_hamming_distance_prune
+        && !(0.0 < engine.avalanche_combination_hamming_distance_keep_percentile
+            && engine.avalanche_combination_hamming_distance_keep_percentile <= 100.0)
+    {
+        return Err(
+            "avalanche_combination_hamming_distance_keep_percentile must be in (0, 100]".into(),
+        );
+    }
+    if !(0.0..=100.0)
+        .contains(&engine.avalanche_combination_hamming_distance_outlier_preference_pct)
+    {
+        return Err(
+            "avalanche_combination_hamming_distance_outlier_preference_pct must be in [0, 100]"
+                .into(),
+        );
+    }
     if scored_inputs.is_empty() {
         return Ok(SampledAvalancheBatchResult::default());
     }
 
-    let grouped_inputs = group_scored_inputs_by_r_candidate(scored_inputs);
-    let pool_size = scored_inputs.len();
+    let message_bits = biguint_to_bits_le(message, scored_inputs[0].message_bits.len());
+    let packed_message_bits = PackedBits::from_bools(&message_bits);
+    let pruned_pool = if engine.avalanche_combination_hamming_distance_prune {
+        prune_scored_inputs_by_hamming_distance_percentile(
+            scored_inputs,
+            &packed_message_bits,
+            engine.avalanche_combination_hamming_distance_keep_percentile,
+            engine.avalanche_combination_hamming_distance_outlier_preference_pct,
+        )
+    } else {
+        HammingDistancePrunedPool {
+            selected_inputs: scored_inputs.to_vec(),
+            retained_inlier_count: scored_inputs.len(),
+            available_outlier_count: 0,
+            preferred_outlier_count: 0,
+        }
+    };
+    let retained_inlier_count = pruned_pool.retained_inlier_count;
+    let available_outlier_count = pruned_pool.available_outlier_count;
+    let preferred_outlier_count = pruned_pool.preferred_outlier_count;
+    let pruned_scored_inputs = pruned_pool.selected_inputs;
+    let grouped_inputs = group_scored_inputs_by_r_candidate(&pruned_scored_inputs);
+    let pool_size = pruned_scored_inputs.len();
     let r_candidate_pool_size = grouped_inputs.len();
     if r_candidate_pool_size == 0 {
         return Ok(SampledAvalancheBatchResult::default());
@@ -4102,12 +4262,11 @@ fn run_sampled_avalanche_beam_search(
     } else {
         "mixed-r-combinations"
     };
-    let message_bits = biguint_to_bits_le(message, scored_inputs[0].message_bits.len());
 
     println!(
-        "Avalanche combination setup for batch {}: scored inputs {} r-candidate-pool {} selection-mode {} configured-mixed-r-candidates {} effective-mixed-r-candidates {} samples {} majority-vote {} sample-smoothing {} majority-print {}",
+        "Avalanche combination setup for batch {}: scored inputs {} r-candidate-pool {} selection-mode {} configured-mixed-r-candidates {} effective-mixed-r-candidates {} samples {} majority-vote {} sample-smoothing {} majority-print {} hamming-prune {} kept-percentile {} outlier-preference-pct {}",
         batch_number,
-        scored_inputs.len(),
+        pool_size,
         r_candidate_pool_size,
         selection_mode,
         engine.avalanche_combination_mixed_r_candidates,
@@ -4123,8 +4282,26 @@ fn run_sampled_avalanche_beam_search(
             "on"
         } else {
             "off"
-        }
+        },
+        if engine.avalanche_combination_hamming_distance_prune {
+            "on"
+        } else {
+            "off"
+        },
+        engine.avalanche_combination_hamming_distance_keep_percentile,
+        engine.avalanche_combination_hamming_distance_outlier_preference_pct
     );
+    if engine.avalanche_combination_hamming_distance_prune && pool_size < scored_inputs.len() {
+        println!(
+            "Avalanche combination batch {} pruned scored inputs by Hamming distance from {} to {} before sampling (retained-inliers {} available-outliers {} preferred-outliers {})",
+            batch_number,
+            scored_inputs.len(),
+            pool_size,
+            retained_inlier_count,
+            available_outlier_count,
+            preferred_outlier_count
+        );
+    }
     if !engine.avalanche_random_chacha20_inputs
         && mixed_r_candidate_count < engine.avalanche_combination_mixed_r_candidates
     {
@@ -4159,7 +4336,7 @@ fn run_sampled_avalanche_beam_search(
                 let outcome = execute_sampled_avalanche_sample(
                     engine,
                     &message_bits,
-                    scored_inputs,
+                    &pruned_scored_inputs,
                     &grouped_inputs,
                     pool_size,
                     mixed_r_candidate_count,
@@ -5050,6 +5227,156 @@ mod tests {
 
         assert_eq!(selected.len(), 3);
         assert_eq!(selected_keys.len(), 3);
+    }
+
+    #[test]
+    fn test_prune_scored_inputs_by_hamming_distance_percentile_keeps_central_band() {
+        let reference_bits = PackedBits::from_bools(&[false; 10]);
+        let inputs = (0usize..10)
+            .map(|distance| {
+                let mut bits = vec![false; 10];
+                for bit in bits.iter_mut().take(distance) {
+                    *bit = true;
+                }
+                ScoredAvalancheInput {
+                    batch_candidate_index: distance,
+                    message_index: 0,
+                    r: BigUint::from(distance + 3),
+                    x: BigUint::from(1u8),
+                    score_match_pct: 100.0 - (distance as f64 * 10.0),
+                    message_bits: PackedBits::from_bools(&bits),
+                    detail: None,
+                }
+            })
+            .collect::<Vec<_>>();
+
+        let pruned =
+            prune_scored_inputs_by_hamming_distance_percentile(&inputs, &reference_bits, 60.0, 0.0);
+        let retained = pruned
+            .selected_inputs
+            .iter()
+            .map(|input| input.batch_candidate_index)
+            .collect::<Vec<_>>();
+
+        assert_eq!(retained, vec![2, 3, 4, 5, 6, 7]);
+        assert_eq!(pruned.retained_inlier_count, 6);
+        assert_eq!(pruned.available_outlier_count, 4);
+        assert_eq!(pruned.preferred_outlier_count, 0);
+    }
+
+    #[test]
+    fn test_prune_scored_inputs_by_hamming_distance_percentile_adds_preferred_outliers() {
+        let reference_bits = PackedBits::from_bools(&[false; 10]);
+        let inputs = (0usize..10)
+            .map(|distance| {
+                let mut bits = vec![false; 10];
+                for bit in bits.iter_mut().take(distance) {
+                    *bit = true;
+                }
+                ScoredAvalancheInput {
+                    batch_candidate_index: distance,
+                    message_index: 0,
+                    r: BigUint::from(distance + 3),
+                    x: BigUint::from(1u8),
+                    score_match_pct: 100.0 - (distance as f64 * 10.0),
+                    message_bits: PackedBits::from_bools(&bits),
+                    detail: None,
+                }
+            })
+            .collect::<Vec<_>>();
+
+        let pruned = prune_scored_inputs_by_hamming_distance_percentile(
+            &inputs,
+            &reference_bits,
+            60.0,
+            50.0,
+        );
+        let retained = pruned
+            .selected_inputs
+            .iter()
+            .map(|input| input.batch_candidate_index)
+            .collect::<Vec<_>>();
+
+        assert_eq!(retained, vec![0, 1, 2, 3, 4, 5, 6, 7, 9]);
+        assert_eq!(pruned.retained_inlier_count, 6);
+        assert_eq!(pruned.available_outlier_count, 4);
+        assert_eq!(pruned.preferred_outlier_count, 3);
+    }
+
+    #[test]
+    fn test_run_sampled_avalanche_beam_search_rejects_invalid_hamming_prune_percentile() {
+        let mut config = Config::default();
+        config.engine.avalanche_combination_hamming_distance_prune = true;
+        config
+            .engine
+            .avalanche_combination_hamming_distance_keep_percentile = 0.0;
+        config.engine.avalanche_combination_samples = 1;
+        config.engine.avalanche_combination_size = 1;
+        config.engine.avalanche_combination_mixed_r_candidates = 1;
+
+        let scored_inputs = vec![ScoredAvalancheInput {
+            batch_candidate_index: 0,
+            message_index: 0,
+            r: BigUint::from(3u8),
+            x: BigUint::from(1u8),
+            score_match_pct: 75.0,
+            message_bits: PackedBits::from_bools(&[true, false]),
+            detail: None,
+        }];
+
+        let mut rng = RngChoice::from_seed(RngMode::Standard, 7);
+        let error = run_sampled_avalanche_beam_search(
+            &config.engine,
+            &BigUint::from(1u8),
+            &scored_inputs,
+            1,
+            &mut rng,
+        )
+        .expect_err("invalid percentile should be rejected");
+
+        assert!(
+            error
+                .to_string()
+                .contains("avalanche_combination_hamming_distance_keep_percentile")
+        );
+    }
+
+    #[test]
+    fn test_run_sampled_avalanche_beam_search_rejects_invalid_outlier_preference_pct() {
+        let mut config = Config::default();
+        config.engine.avalanche_combination_hamming_distance_prune = true;
+        config
+            .engine
+            .avalanche_combination_hamming_distance_outlier_preference_pct = 150.0;
+        config.engine.avalanche_combination_samples = 1;
+        config.engine.avalanche_combination_size = 1;
+        config.engine.avalanche_combination_mixed_r_candidates = 1;
+
+        let scored_inputs = vec![ScoredAvalancheInput {
+            batch_candidate_index: 0,
+            message_index: 0,
+            r: BigUint::from(3u8),
+            x: BigUint::from(1u8),
+            score_match_pct: 75.0,
+            message_bits: PackedBits::from_bools(&[true, false]),
+            detail: None,
+        }];
+
+        let mut rng = RngChoice::from_seed(RngMode::Standard, 7);
+        let error = run_sampled_avalanche_beam_search(
+            &config.engine,
+            &BigUint::from(1u8),
+            &scored_inputs,
+            1,
+            &mut rng,
+        )
+        .expect_err("invalid outlier preference percentage should be rejected");
+
+        assert!(
+            error
+                .to_string()
+                .contains("avalanche_combination_hamming_distance_outlier_preference_pct")
+        );
     }
 
     #[test]

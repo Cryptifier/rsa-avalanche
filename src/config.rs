@@ -115,6 +115,15 @@ pub struct EngineConfig {
     /// Legacy pool-size setting retained for compatibility; sampled pools now use the full batch.
     #[serde(default = "default_avalanche_combination_pool_size")]
     pub avalanche_combination_pool_size: usize,
+    /// Whether sampled avalanche prunes scored inputs to a central Hamming-distance percentile band before sampling.
+    #[serde(default = "default_avalanche_combination_hamming_distance_prune")]
+    pub avalanche_combination_hamming_distance_prune: bool,
+    /// Central percentile of Hamming distances retained when sampled-avalanche pruning is enabled.
+    #[serde(default = "default_avalanche_combination_hamming_distance_keep_percentile")]
+    pub avalanche_combination_hamming_distance_keep_percentile: f64,
+    /// Percentage of the retained inlier pool size to add back from the Hamming-distance outlier tails.
+    #[serde(default = "default_avalanche_combination_hamming_distance_outlier_preference_pct")]
+    pub avalanche_combination_hamming_distance_outlier_preference_pct: f64,
     /// Whether sampled avalanche uses per-bit majority-vote probabilities from the combination outputs.
     #[serde(default = "default_avalanche_combination_majority_vote")]
     pub avalanche_combination_majority_vote: bool,
@@ -282,6 +291,12 @@ impl Default for EngineConfig {
             avalanche_combination_mixed_r_candidates:
                 default_avalanche_combination_mixed_r_candidates(),
             avalanche_combination_pool_size: default_avalanche_combination_pool_size(),
+            avalanche_combination_hamming_distance_prune:
+                default_avalanche_combination_hamming_distance_prune(),
+            avalanche_combination_hamming_distance_keep_percentile:
+                default_avalanche_combination_hamming_distance_keep_percentile(),
+            avalanche_combination_hamming_distance_outlier_preference_pct:
+                default_avalanche_combination_hamming_distance_outlier_preference_pct(),
             avalanche_combination_majority_vote: default_avalanche_combination_majority_vote(),
             avalanche_combination_sample_smoothing: default_avalanche_combination_sample_smoothing(
             ),
@@ -864,6 +879,48 @@ fn default_avalanche_combination_pool_size() -> usize {
     100
 }
 
+/// Default flag for pruning sampled-avalanche inputs by Hamming-distance percentiles.
+///
+/// # Parameters
+/// - None.
+///
+/// # Returns
+/// - `bool`: `false` so sampled avalanche keeps the full scored pool unless explicitly enabled.
+///
+/// # Expected Output
+/// - Returns a constant default value; no side effects.
+fn default_avalanche_combination_hamming_distance_prune() -> bool {
+    false
+}
+
+/// Default central percentile retained when pruning sampled-avalanche Hamming-distance outliers.
+///
+/// # Parameters
+/// - None.
+///
+/// # Returns
+/// - `f64`: Default retained percentile, keeping the middle 95% of Hamming distances.
+///
+/// # Expected Output
+/// - Returns a constant default value; no side effects.
+fn default_avalanche_combination_hamming_distance_keep_percentile() -> f64 {
+    95.0
+}
+
+/// Default percentage of retained inliers to add back from Hamming-distance outlier tails.
+///
+/// # Parameters
+/// - None.
+///
+/// # Returns
+/// - `f64`: `0.0` so no outliers are reintroduced unless explicitly requested.
+///
+/// # Expected Output
+/// - Returns a constant default value; no side effects.
+fn default_avalanche_combination_hamming_distance_outlier_preference_pct() -> f64 {
+    0.0
+}
+
 /// Default flag for random ChaCha20 sampled avalanche inputs.
 ///
 /// # Parameters
@@ -1241,4 +1298,24 @@ fn default_combiner_k_oracles() -> usize {
 /// - Returns a constant default value; no side effects.
 fn default_combiner_tie_breaker() -> bool {
     true
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_engine_config_defaults_disable_avalanche_hamming_distance_pruning() {
+        let engine = EngineConfig::default();
+
+        assert!(!engine.avalanche_combination_hamming_distance_prune);
+        assert_eq!(
+            engine.avalanche_combination_hamming_distance_keep_percentile,
+            95.0
+        );
+        assert_eq!(
+            engine.avalanche_combination_hamming_distance_outlier_preference_pct,
+            0.0
+        );
+    }
 }

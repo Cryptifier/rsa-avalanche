@@ -89,6 +89,18 @@ struct Args {
     #[arg(long = "avalanche-combination-pool-size", value_parser = clap::value_parser!(u64).range(1..))]
     avalanche_combination_pool_size: Option<u64>,
 
+    /// Whether sampled avalanche prunes the scored-input pool by central Hamming-distance percentile before sampling
+    #[arg(long = "avalanche-combination-hamming-distance-prune")]
+    avalanche_combination_hamming_distance_prune: Option<bool>,
+
+    /// Central percentile of Hamming distances retained when sampled-avalanche pruning is enabled
+    #[arg(long = "avalanche-combination-hamming-distance-keep-percentile")]
+    avalanche_combination_hamming_distance_keep_percentile: Option<f64>,
+
+    /// Percentage of the retained inlier pool size to add back from Hamming-distance outlier tails
+    #[arg(long = "avalanche-combination-hamming-distance-outlier-preference-pct")]
+    avalanche_combination_hamming_distance_outlier_preference_pct: Option<f64>,
+
     /// Whether sampled avalanche uses per-bit majority-vote probabilities from the combination outputs
     #[arg(long = "avalanche-combination-majority-vote")]
     avalanche_combination_majority_vote: Option<bool>,
@@ -159,6 +171,21 @@ fn main() -> Result<(), Box<dyn Error>> {
         config.engine.avalanche_combination_pool_size = usize::try_from(pool_size)
             .map_err(|_| "avalanche combination pool size exceeds usize range")?;
     }
+    if let Some(prune_hamming_distance) = args.avalanche_combination_hamming_distance_prune {
+        config.engine.avalanche_combination_hamming_distance_prune = prune_hamming_distance;
+    }
+    if let Some(keep_percentile) = args.avalanche_combination_hamming_distance_keep_percentile {
+        config
+            .engine
+            .avalanche_combination_hamming_distance_keep_percentile = keep_percentile;
+    }
+    if let Some(outlier_preference_pct) =
+        args.avalanche_combination_hamming_distance_outlier_preference_pct
+    {
+        config
+            .engine
+            .avalanche_combination_hamming_distance_outlier_preference_pct = outlier_preference_pct;
+    }
     if let Some(majority_vote) = args.avalanche_combination_majority_vote {
         config.engine.avalanche_combination_majority_vote = majority_vote;
     }
@@ -210,6 +237,15 @@ fn main() -> Result<(), Box<dyn Error>> {
             .engine
             .avalanche_combination_mixed_r_candidates,
         avalanche_combination_pool_size: config.engine.avalanche_combination_pool_size,
+        avalanche_combination_hamming_distance_prune: config
+            .engine
+            .avalanche_combination_hamming_distance_prune,
+        avalanche_combination_hamming_distance_keep_percentile: config
+            .engine
+            .avalanche_combination_hamming_distance_keep_percentile,
+        avalanche_combination_hamming_distance_outlier_preference_pct: config
+            .engine
+            .avalanche_combination_hamming_distance_outlier_preference_pct,
         avalanche_combination_majority_vote: config.engine.avalanche_combination_majority_vote,
         avalanche_combination_sample_smoothing: config
             .engine
