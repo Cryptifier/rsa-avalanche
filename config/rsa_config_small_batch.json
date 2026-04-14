@@ -1,4 +1,6 @@
 {
+  // Small-batch beam config for replaying a precomputed r-candidate grid and
+  // then sampling large avalanche combinations from the scored batch.
   "rsa_keypair": {
     "generate": false,
     "e": 65537,
@@ -6,6 +8,8 @@
     "q": "4262327550688715209573"
   },
   "polynomial_fields": {
+    // Coordinate-generation fields shared with the other small/medium configs so
+    // batch outputs stay comparable across runs.
     "fields": [
       { "prime": 4099, "seed": 1 },
       { "prime": 4111, "seed": 2 },
@@ -39,9 +43,13 @@
     "oracle_accuracy_threshold": 51.0,
     "use_hamming_distance": true,
     "avalanche_random_chacha20_inputs": true,
+    // Reuse a precomputed grid of scored r candidates so this config measures
+    // the small-batch avalanche pipeline instead of live r generation.
     "reuse_r_candidates": true,
     "reuse_r_candidates_path": "data/rgen_grid/rgen_grid_pct_5.csv",
     "reuse_r_candidates_append_only": false,
+    // Build speculative r values from products of these small primes, then
+    // retarget the product with the exponent window below.
     "r_candidate_mode": "small_primes",
     "r_candidate_small_primes": [117, 1009, 1103, 1913],
     "r_candidate_small_prime_factors": 3,
@@ -50,6 +58,8 @@
     "r_candidate_target_exponent": 1.300, // Upper bound for sampled retarget exponents.
     "r_candidate_retarget_partition_count": 2,
     "r_candidate_retarget_minimum_exponent": 0.20,
+    // Beam search keeps a short candidate list and interprets per-bit
+    // probabilities above the threshold as bit 1.
     "beam_bit_one_threshold": 0.5,
     "avalanche_beam_top_k": 6,
     "avalanche_probability_spread_exponent": 0.50, //0.45
@@ -59,23 +69,35 @@
     "invert_bits": false,
     "use_rs_decrypt": true,
     "mirror_invert_candidates": true,
+    // Small-batch feature: score a large pool once, then draw many avalanche
+    // combinations from that scored batch to estimate per-bit agreement.
     "analysis_batch_enable": true,
     "analysis_batch_messages": 5000, // Number of ciphertext variants scored per batch before avalanche sampling.
     "analysis_batch_candidates": 3000, // Number of r candidates scored in each batch before sampling combinations.
     "analysis_batch_batches": 1, // Number of scored batches to run for the small-batch beam workflow.
-    "avalanche_combination_mixed_r_candidates": 16,
+    // Cap how many distinct r values can appear in one sampled avalanche input;
+    // each selected r still contributes all of its sampled c^x variants.
+    "avalanche_combination_mixed_r_candidates": 64,
     "avalanche_combination_samples": 100000, // N: number of sampled combinations evaluated by avalanche per batch.
-    "avalanche_combination_size": 200, // Number of scored items taken in each sampled combination.
+    "avalanche_combination_size": 1200, // Number of scored items taken in each sampled combination.
     "avalanche_combination_pool_size": 100000, // Legacy compatibility field; runtime sampling now always uses the full batch-sized pool.
+    // Hamming-distance pruning keeps a central percentile band of scored items
+    // before sampling, then optionally adds some tail outliers back in.
     "avalanche_combination_hamming_distance_prune": true,
-    "avalanche_combination_hamming_distance_keep_percentile": 90.0,
-    "avalanche_combination_hamming_distance_outlier_preference_pct": 50.0,
+    "avalanche_combination_hamming_distance_keep_percentile": 92.0,
+    "avalanche_combination_hamming_distance_outlier_preference_pct": 25.0,
+    // Majority-vote mode turns each sampled combination into per-bit frequencies
+    // for the beam, then smooths them before ranking plaintext hypotheses.
     "avalanche_combination_majority_vote": true, // Use per-bit majority-vote probabilities from each sampled combination.
     "avalanche_combination_sample_smoothing": true, // Apply Jeffreys smoothing to the sampled majority-vote probabilities before beam search.
     "avalanche_combination_majority_vote_print": true, // Print a separate sampled-combination majority-vote summary alongside the beam output.
+    // Allow batches to mix different r values while still perturbing the
+    // ciphertext for each sampled message variant.
     "same_r_batch": false,
     "ciphertext_modify": true,
     "message": {
+      // Random 128-bit plaintexts are used for scoring; fixed_message only
+      // matters when is_random is set to false.
       "is_random": true,
       "bits": 128,
       "fixed_message": "HeloWrld12345678"
