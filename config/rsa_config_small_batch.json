@@ -54,15 +54,15 @@
     "r_candidate_small_primes": [117, 1009, 1103, 1913],
     "r_candidate_small_prime_factors": 3,
     "r_candidate_random_power_window": true,
-    "r_candidate_target_exponent_minimum": 0.8500, // Lower bound for sampled retarget exponents.
-    "r_candidate_target_exponent": 0.9500, // Upper bound for sampled retarget exponents.
+    "r_candidate_target_exponent_minimum": 0.7500, // Lower bound for sampled retarget exponents.
+    "r_candidate_target_exponent": 0.8500, // Upper bound for sampled retarget exponents.
     "r_candidate_retarget_partition_count": 2,
     "r_candidate_retarget_minimum_exponent": 0.20,
     // Beam search keeps a short candidate list and interprets per-bit
     // probabilities above the threshold as bit 1.
     "beam_bit_one_threshold": 0.5,
     "avalanche_beam_top_k": 6,
-    "avalanche_probability_spread_exponent": 0.99, //0.45
+    "avalanche_probability_spread_exponent": 0.45, //0.45
     "combiner_k_oracles": 100,
     "combiner_tie_breaker": true,
     "base_convert": false,
@@ -72,8 +72,8 @@
     // Small-batch feature: score a large pool once, then draw many avalanche
     // combinations from that scored batch to estimate per-bit agreement.
     "analysis_batch_enable": true,
-    "analysis_batch_messages": 5, // Number of ciphertext variants scored per batch before avalanche sampling.
-    "analysis_batch_candidates": 10000, // Number of r candidates scored in each batch before sampling combinations.
+    "analysis_batch_messages": 2, // Number of ciphertext variants scored per batch before avalanche sampling.
+    "analysis_batch_candidates": 20000, // Number of r candidates scored in each batch before sampling combinations.
     "analysis_batch_batches": 1, // Number of scored batches to run for the small-batch beam workflow.
     // Cap how many distinct r values can appear in one sampled avalanche input;
     // each selected r still contributes all of its sampled c^x variants.
@@ -84,8 +84,8 @@
     // Hamming-distance pruning keeps a central percentile band of scored items
     // before sampling, then optionally adds some tail outliers back in.
     "avalanche_combination_hamming_distance_prune": true,
-    "avalanche_combination_hamming_distance_keep_percentile": 92.0,
-    "avalanche_combination_hamming_distance_outlier_preference_pct": 40.0,
+    "avalanche_combination_hamming_distance_keep_percentile": 50.0,
+    "avalanche_combination_hamming_distance_outlier_preference_pct": 25.0,
     // Majority-vote mode turns each sampled combination into per-bit frequencies
     // for the beam, then smooths them before ranking plaintext hypotheses.
     "avalanche_combination_majority_vote": true, // Use per-bit majority-vote probabilities from each sampled combination.
