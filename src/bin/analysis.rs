@@ -97,6 +97,10 @@ struct Args {
     #[arg(long = "avalanche-combination-recursive-group-size", value_parser = clap::value_parser!(u64).range(1..))]
     avalanche_combination_recursive_group_size: Option<u64>,
 
+    /// Number of recursive samples to produce per subsequent Avalanche tier; 0 preserves one-pass regrouping
+    #[arg(long = "avalanche-combination-recursive-resample-count", value_parser = clap::value_parser!(u64))]
+    avalanche_combination_recursive_resample_count: Option<u64>,
+
     /// Whether sampled avalanche prunes the scored-input pool by central Hamming-distance percentile before sampling
     #[arg(long = "avalanche-combination-hamming-distance-prune")]
     avalanche_combination_hamming_distance_prune: Option<bool>,
@@ -187,6 +191,12 @@ fn main() -> Result<(), Box<dyn Error>> {
         config.engine.avalanche_combination_recursive_group_size = usize::try_from(group_size)
             .map_err(|_| "avalanche combination recursive group size exceeds usize range")?;
     }
+    if let Some(resample_count) = args.avalanche_combination_recursive_resample_count {
+        config.engine.avalanche_combination_recursive_resample_count = usize::try_from(
+            resample_count,
+        )
+        .map_err(|_| "avalanche combination recursive resample count exceeds usize range")?;
+    }
     if let Some(prune_hamming_distance) = args.avalanche_combination_hamming_distance_prune {
         config.engine.avalanche_combination_hamming_distance_prune = prune_hamming_distance;
     }
@@ -257,6 +267,9 @@ fn main() -> Result<(), Box<dyn Error>> {
         avalanche_combination_recursive_group_size: config
             .engine
             .avalanche_combination_recursive_group_size,
+        avalanche_combination_recursive_resample_count: config
+            .engine
+            .avalanche_combination_recursive_resample_count,
         avalanche_combination_hamming_distance_prune: config
             .engine
             .avalanche_combination_hamming_distance_prune,

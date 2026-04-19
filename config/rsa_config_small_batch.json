@@ -82,7 +82,8 @@
     "avalanche_combination_size": 150, // Number of scored items taken in each sampled combination.
     "avalanche_combination_pool_size": 100000, // Legacy compatibility field; runtime sampling now always uses the full batch-sized pool.
     "avalanche_combination_recursion_depth": 2, // Run one recursive Avalanche tier on top of the sampled-input tier.
-    "avalanche_combination_recursive_group_size": 32, // Number of prior-tier sample outputs grouped into each recursive Avalanche call.
+    "avalanche_combination_recursive_group_size": 100, // Number of prior-tier sample outputs grouped into each recursive Avalanche call.
+    "avalanche_combination_recursive_resample_count": 0, // 0 preserves one-pass regrouping; set >0 to resample prior-tier outputs to a target count.
     // Hamming-distance pruning keeps a central percentile band of scored items
     // before sampling, then optionally adds some tail outliers back in.
     "avalanche_combination_hamming_distance_prune": true,

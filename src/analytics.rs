@@ -62,6 +62,8 @@ pub struct AnalyticsCliArgs {
     pub avalanche_combination_recursion_depth: usize,
     /// Number of prior-tier samples grouped into each recursive Avalanche call.
     pub avalanche_combination_recursive_group_size: usize,
+    /// Number of recursive samples produced per subsequent Avalanche tier; `0` preserves one-pass grouping.
+    pub avalanche_combination_recursive_resample_count: usize,
     /// Whether sampled avalanche prunes the scored-input pool by Hamming-distance percentile before sampling.
     pub avalanche_combination_hamming_distance_prune: bool,
     /// Central percentile of Hamming distances retained when sampled-avalanche pruning is enabled.
@@ -110,6 +112,7 @@ pub(crate) struct AnalyticsCliInfo {
     avalanche_combination_pool_size: usize,
     avalanche_combination_recursion_depth: usize,
     avalanche_combination_recursive_group_size: usize,
+    avalanche_combination_recursive_resample_count: usize,
     avalanche_combination_hamming_distance_prune: bool,
     avalanche_combination_hamming_distance_keep_percentile: f64,
     avalanche_combination_hamming_distance_outlier_preference_pct: f64,
@@ -543,6 +546,8 @@ impl SessionAnalytics {
             avalanche_combination_recursion_depth: args.avalanche_combination_recursion_depth,
             avalanche_combination_recursive_group_size: args
                 .avalanche_combination_recursive_group_size,
+            avalanche_combination_recursive_resample_count: args
+                .avalanche_combination_recursive_resample_count,
             avalanche_combination_hamming_distance_prune: args
                 .avalanche_combination_hamming_distance_prune,
             avalanche_combination_hamming_distance_keep_percentile: args

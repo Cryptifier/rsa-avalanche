@@ -121,6 +121,9 @@ pub struct EngineConfig {
     /// Number of sample outputs grouped into each subsequent recursive Avalanche call.
     #[serde(default = "default_avalanche_combination_recursive_group_size")]
     pub avalanche_combination_recursive_group_size: usize,
+    /// Number of recursive samples to produce per subsequent Avalanche tier; `0` preserves one-pass grouping.
+    #[serde(default = "default_avalanche_combination_recursive_resample_count")]
+    pub avalanche_combination_recursive_resample_count: usize,
     /// Whether sampled avalanche prunes scored inputs to a central Hamming-distance percentile band before sampling.
     #[serde(default = "default_avalanche_combination_hamming_distance_prune")]
     pub avalanche_combination_hamming_distance_prune: bool,
@@ -300,6 +303,8 @@ impl Default for EngineConfig {
             avalanche_combination_recursion_depth: default_avalanche_combination_recursion_depth(),
             avalanche_combination_recursive_group_size:
                 default_avalanche_combination_recursive_group_size(),
+            avalanche_combination_recursive_resample_count:
+                default_avalanche_combination_recursive_resample_count(),
             avalanche_combination_hamming_distance_prune:
                 default_avalanche_combination_hamming_distance_prune(),
             avalanche_combination_hamming_distance_keep_percentile:
@@ -916,6 +921,20 @@ fn default_avalanche_combination_recursive_group_size() -> usize {
     8
 }
 
+/// Default recursive resample count for sampled Avalanche tiers.
+///
+/// # Parameters
+/// - None.
+///
+/// # Returns
+/// - `usize`: `0` so recursive tiers preserve legacy one-pass regrouping unless explicitly enabled.
+///
+/// # Expected Output
+/// - Returns a constant default value; no side effects.
+fn default_avalanche_combination_recursive_resample_count() -> usize {
+    0
+}
+
 /// Default flag for pruning sampled-avalanche inputs by Hamming-distance percentiles.
 ///
 /// # Parameters
@@ -1345,6 +1364,7 @@ mod tests {
     fn test_engine_config_defaults_disable_avalanche_hamming_distance_pruning() {
         let engine = EngineConfig::default();
 
+        assert_eq!(engine.avalanche_combination_recursive_resample_count, 0);
         assert!(!engine.avalanche_combination_hamming_distance_prune);
         assert_eq!(
             engine.avalanche_combination_hamming_distance_keep_percentile,
