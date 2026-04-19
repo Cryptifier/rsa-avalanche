@@ -127,8 +127,34 @@ enum Tab {
     BitSimilarity,
     BitTrueTimeline,
     Avalanche,
+    AvalancheTiers,
     BeamVsR,
     Bitflow,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AvalancheTierMetric {
+    Best,
+    Beam,
+    Majority,
+}
+
+impl AvalancheTierMetric {
+    fn label(&self) -> &'static str {
+        match self {
+            AvalancheTierMetric::Best => "Best Match %",
+            AvalancheTierMetric::Beam => "Beam Match %",
+            AvalancheTierMetric::Majority => "Majority Match %",
+        }
+    }
+
+    fn all() -> [AvalancheTierMetric; 3] {
+        [
+            AvalancheTierMetric::Best,
+            AvalancheTierMetric::Beam,
+            AvalancheTierMetric::Majority,
+        ]
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -228,6 +254,8 @@ struct ViewerApp {
     bit_similarity_hide_shifted: bool,
     bit_similarity_start: usize,
     bit_similarity_rows: usize,
+    avalanche_tier_metric: AvalancheTierMetric,
+    avalanche_tier_columns: usize,
     pending: Rc<RefCell<PendingUpdates>>,
     #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
     log_request_in_flight: Rc<Cell<bool>>,
@@ -280,6 +308,8 @@ impl ViewerApp {
             bit_similarity_hide_shifted: true,
             bit_similarity_start: 0,
             bit_similarity_rows: 50,
+            avalanche_tier_metric: AvalancheTierMetric::Best,
+            avalanche_tier_columns: 256,
             pending,
             log_request_in_flight,
             session_request_in_flight,
@@ -1268,6 +1298,43 @@ impl ViewerApp {
         }
     }
 
+    fn draw_avalanche_tiers(&mut self, ui: &mut egui::Ui) {
+        ui.heading("Avalanche Tier Accuracy");
+        let rows = build_avalanche_tier_rows(&self.session, self.avalanche_tier_metric);
+        if rows.is_empty() {
+            ui.label("Recursive Avalanche tier statistics not found.");
+            return;
+        }
+
+        let max_samples = rows.iter().map(|row| row.sample_count).max().unwrap_or(0);
+        ui.horizontal(|ui| {
+            ui.label("Metric:");
+            egui::ComboBox::from_id_source("avalanche_tier_metric")
+                .selected_text(self.avalanche_tier_metric.label())
+                .show_ui(ui, |ui| {
+                    for metric in AvalancheTierMetric::all() {
+                        ui.selectable_value(
+                            &mut self.avalanche_tier_metric,
+                            metric,
+                            metric.label(),
+                        );
+                    }
+                });
+            ui.label("Render columns:");
+            ui.add(
+                egui::Slider::new(&mut self.avalanche_tier_columns, 16..=1024)
+                    .logarithmic(true),
+            );
+        });
+        ui.label(format!(
+            "Rows: {} | Max samples in a row: {} | Values are compressed into fixed-width bins for efficient rendering.",
+            rows.len(),
+            max_samples
+        ));
+        ui.add_space(8.0);
+        draw_avalanche_tier_heatmap(ui, &rows, self.avalanche_tier_columns.max(16));
+    }
+
     fn draw_bitflow(&mut self, ui: &mut egui::Ui) {
         ui.heading("Bitflow");
         if self.session.bitflow_runs.is_empty() && self.session.bitflow_candidates.is_empty() {
@@ -1405,6 +1472,7 @@ impl eframe::App for ViewerApp {
                 tab_button(ui, "Bit Similarity", Tab::BitSimilarity, &mut self.tab);
                 tab_button(ui, "Bit True Timeline", Tab::BitTrueTimeline, &mut self.tab);
                 tab_button(ui, "Avalanche", Tab::Avalanche, &mut self.tab);
+                tab_button(ui, "Avalanche Tiers", Tab::AvalancheTiers, &mut self.tab);
                 tab_button(ui, "Beam vs R", Tab::BeamVsR, &mut self.tab);
                 tab_button(ui, "Bitflow", Tab::Bitflow, &mut self.tab);
             });
@@ -1445,6 +1513,7 @@ impl eframe::App for ViewerApp {
             Tab::BitSimilarity => self.draw_bit_similarity(ui),
             Tab::BitTrueTimeline => self.draw_bit_true_timeline(ui),
             Tab::Avalanche => self.draw_avalanche(ui),
+            Tab::AvalancheTiers => self.draw_avalanche_tiers(ui),
             Tab::BeamVsR => self.draw_beam_vs_r(ui),
             Tab::Bitflow => self.draw_bitflow(ui),
         });
@@ -1612,8 +1681,32 @@ struct RCandidateAccuracyBatch {
     candidates: Vec<RCandidateAccuracyEntry>,
     beam_match_pct: Option<f64>,
     beam_ones_match_pct: Option<f64>,
+    majority_vote_match_pct: Option<f64>,
+    majority_vote_ones_match_pct: Option<f64>,
     beam_score: Option<f64>,
     beam_bit_width: Option<u64>,
+    avalanche_tier_statistics: Vec<AvalancheTierStatistics>,
+}
+
+#[derive(Debug, Default, Clone)]
+#[allow(dead_code)]
+struct AvalancheTierStatistics {
+    tier_index: u64,
+    sample_count: u64,
+    group_size: u64,
+    source_kind: String,
+    sample_stats: Vec<AvalancheTierSampleStat>,
+}
+
+#[derive(Debug, Default, Clone)]
+#[allow(dead_code)]
+struct AvalancheTierSampleStat {
+    sample_index: u64,
+    input_count: u64,
+    average_score_pct: f64,
+    beam_match_pct: Option<f64>,
+    majority_vote_match_pct: Option<f64>,
+    best_match_pct: f64,
 }
 
 #[derive(Debug, Default, Clone)]
@@ -1688,6 +1781,14 @@ struct BeamRow {
     r_min: Option<f64>,
     r_stddev: Option<f64>,
     candidate_count: usize,
+}
+
+#[derive(Debug, Clone)]
+struct AvalancheTierRow {
+    label: String,
+    sample_count: usize,
+    values: Vec<f64>,
+    tier_index: usize,
 }
 
 #[derive(Debug)]
@@ -2323,9 +2424,48 @@ fn parse_r_candidate_accuracy_batch(map: &Map<String, Value>) -> RCandidateAccur
         candidates,
         beam_match_pct: value_as_opt_f64(map.get("beam_match_pct")),
         beam_ones_match_pct: value_as_opt_f64(map.get("beam_ones_match_pct")),
+        majority_vote_match_pct: value_as_opt_f64(map.get("majority_vote_match_pct")),
+        majority_vote_ones_match_pct: value_as_opt_f64(map.get("majority_vote_ones_match_pct")),
         beam_score: value_as_opt_f64(map.get("beam_score")),
         beam_bit_width: value_as_opt_u64(map.get("beam_bit_width")),
+        avalanche_tier_statistics: value_as_avalanche_tier_statistics(
+            map.get("avalanche_tier_statistics"),
+        ),
     }
+}
+
+fn value_as_avalanche_tier_statistics(value: Option<&Value>) -> Vec<AvalancheTierStatistics> {
+    let Some(Value::Array(list)) = value else {
+        return Vec::new();
+    };
+    list.iter()
+        .filter_map(|item| item.as_object())
+        .map(|map| AvalancheTierStatistics {
+            tier_index: value_as_u64(map.get("tier_index")),
+            sample_count: value_as_u64(map.get("sample_count")),
+            group_size: value_as_u64(map.get("group_size")),
+            source_kind: value_as_string(map.get("source_kind")),
+            sample_stats: map
+                .get("sample_stats")
+                .and_then(|value| value.as_array())
+                .map(|stats| {
+                    stats.iter()
+                        .filter_map(|stat| stat.as_object())
+                        .map(|stat| AvalancheTierSampleStat {
+                            sample_index: value_as_u64(stat.get("sample_index")),
+                            input_count: value_as_u64(stat.get("input_count")),
+                            average_score_pct: value_as_f64(stat.get("average_score_pct")),
+                            beam_match_pct: value_as_opt_f64(stat.get("beam_match_pct")),
+                            majority_vote_match_pct: value_as_opt_f64(
+                                stat.get("majority_vote_match_pct"),
+                            ),
+                            best_match_pct: value_as_f64(stat.get("best_match_pct")),
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default(),
+        })
+        .collect()
 }
 
 fn parse_r_candidate_accuracy_entry(map: &Map<String, Value>) -> RCandidateAccuracyEntry {
@@ -2642,6 +2782,136 @@ fn flatten_candidate_batches(session: &Session) -> Vec<CandidateRow> {
 
 fn format_opt_f64(value: Option<f64>) -> String {
     value.map_or_else(|| "".to_string(), |val| format!("{val:.2}"))
+}
+
+fn build_avalanche_tier_rows(
+    session: &Session,
+    metric: AvalancheTierMetric,
+) -> Vec<AvalancheTierRow> {
+    let mut rows = Vec::new();
+    for (batch_idx, batch) in session.r_candidate_accuracy_batches.iter().enumerate() {
+        let batch_label = batch
+            .context
+            .clone()
+            .unwrap_or_else(|| format!("batch_{}", batch_idx + 1));
+        for tier in &batch.avalanche_tier_statistics {
+            let values = tier
+                .sample_stats
+                .iter()
+                .map(|sample| match metric {
+                    AvalancheTierMetric::Best => sample.best_match_pct,
+                    AvalancheTierMetric::Beam => {
+                        sample.beam_match_pct.unwrap_or(sample.best_match_pct)
+                    }
+                    AvalancheTierMetric::Majority => sample
+                        .majority_vote_match_pct
+                        .unwrap_or(sample.best_match_pct),
+                })
+                .collect::<Vec<_>>();
+            rows.push(AvalancheTierRow {
+                label: format!(
+                    "{} | tier {} | source {} | group {}",
+                    batch_label, tier.tier_index, tier.source_kind, tier.group_size
+                ),
+                sample_count: values.len(),
+                values,
+                tier_index: tier.tier_index as usize,
+            });
+        }
+    }
+    rows.sort_by(|left, right| {
+        left.tier_index
+            .cmp(&right.tier_index)
+            .then_with(|| left.label.cmp(&right.label))
+    });
+    rows
+}
+
+fn draw_avalanche_tier_heatmap(
+    ui: &mut egui::Ui,
+    rows: &[AvalancheTierRow],
+    render_columns: usize,
+) {
+    let label_width = 280.0;
+    let cell_width = 3.0;
+    let cell_height = 16.0;
+    let row_gap = 4.0;
+    let margin = 8.0;
+    let columns = render_columns.max(1);
+    let width = label_width + columns as f32 * cell_width + margin * 2.0;
+    let height = rows.len() as f32 * (cell_height + row_gap) + 48.0;
+
+    egui::ScrollArea::both()
+        .id_source("avalanche_tier_heatmap")
+        .auto_shrink([false, false])
+        .show(ui, |ui| {
+            let (rect, _) =
+                ui.allocate_exact_size(egui::vec2(width, height), egui::Sense::hover());
+            let painter = ui.painter_at(rect);
+            let title_y = rect.min.y + margin;
+            painter.text(
+                egui::pos2(rect.min.x + margin, title_y),
+                egui::Align2::LEFT_TOP,
+                "0%",
+                egui::FontId::proportional(11.0),
+                ui.visuals().text_color(),
+            );
+            painter.text(
+                egui::pos2(rect.min.x + margin + label_width + columns as f32 * cell_width, title_y),
+                egui::Align2::RIGHT_TOP,
+                "100%",
+                egui::FontId::proportional(11.0),
+                ui.visuals().text_color(),
+            );
+
+            for (row_idx, row) in rows.iter().enumerate() {
+                let y = rect.min.y + 28.0 + row_idx as f32 * (cell_height + row_gap);
+                painter.text(
+                    egui::pos2(rect.min.x + margin, y),
+                    egui::Align2::LEFT_TOP,
+                    format!("{} | samples {}", row.label, row.sample_count),
+                    egui::FontId::proportional(11.0),
+                    ui.visuals().text_color(),
+                );
+
+                let values = &row.values;
+                if values.is_empty() {
+                    continue;
+                }
+                let bin_count = values.len().min(columns).max(1);
+                let bin_size = values.len().div_ceil(bin_count).max(1);
+                for col in 0..bin_count {
+                    let start = col * bin_size;
+                    let end = (start + bin_size).min(values.len());
+                    if start >= end {
+                        continue;
+                    }
+                    let avg = values[start..end].iter().sum::<f64>() / (end - start) as f64;
+                    let color = avalanche_tier_heatmap_color(avg);
+                    let x = rect.min.x + margin + label_width + col as f32 * cell_width;
+                    let cell = egui::Rect::from_min_size(
+                        egui::pos2(x, y),
+                        egui::vec2(cell_width, cell_height),
+                    );
+                    painter.rect_filled(cell, 0.0, color);
+                }
+            }
+        });
+}
+
+fn avalanche_tier_heatmap_color(value: f64) -> egui::Color32 {
+    let clamped = (value / 100.0).clamp(0.0, 1.0);
+    let red = if clamped < 0.5 {
+        255.0
+    } else {
+        255.0 * (1.0 - ((clamped - 0.5) * 2.0))
+    };
+    let green = if clamped < 0.5 {
+        255.0 * (clamped * 2.0)
+    } else {
+        255.0
+    };
+    egui::Color32::from_rgb(red as u8, green as u8, 64)
 }
 
 fn bits_preview(bits: &[u8], max_len: usize) -> String {
@@ -3413,6 +3683,51 @@ mod tests {
         assert_eq!(session.steps.len(), 1);
         assert_eq!(session.steps[0].duration_ms, 9);
         assert_eq!(session.errors, vec!["done".to_string()]);
+    }
+
+    #[test]
+    fn parse_session_from_str_reads_avalanche_tier_statistics() {
+        let raw = r#"{
+            "r_candidate_accuracy_batches": [
+                {
+                    "context": "analysis_batch_accuracy_1",
+                    "beam_match_pct": 88.5,
+                    "majority_vote_match_pct": 86.0,
+                    "avalanche_tier_statistics": [
+                        {
+                            "tier_index": 1,
+                            "sample_count": 3,
+                            "group_size": 2,
+                            "source_kind": "mixed-r-combinations",
+                            "sample_stats": [
+                                {
+                                    "sample_index": 1,
+                                    "input_count": 2,
+                                    "average_score_pct": 71.0,
+                                    "beam_match_pct": 88.5,
+                                    "majority_vote_match_pct": 86.0,
+                                    "best_match_pct": 88.5
+                                }
+                            ]
+                        }
+                    ]
+                }
+            ]
+        }"#;
+
+        let (session, ndjson) =
+            parse_session_from_str(raw).expect("session JSON with tier stats should parse");
+
+        assert!(!ndjson);
+        assert_eq!(session.r_candidate_accuracy_batches.len(), 1);
+        let batch = &session.r_candidate_accuracy_batches[0];
+        assert_eq!(batch.avalanche_tier_statistics.len(), 1);
+        assert_eq!(batch.avalanche_tier_statistics[0].tier_index, 1);
+        assert_eq!(batch.avalanche_tier_statistics[0].sample_stats.len(), 1);
+        assert_eq!(
+            batch.avalanche_tier_statistics[0].sample_stats[0].best_match_pct,
+            88.5
+        );
     }
 
     #[cfg(not(target_arch = "wasm32"))]

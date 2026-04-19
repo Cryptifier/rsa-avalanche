@@ -89,6 +89,14 @@ struct Args {
     #[arg(long = "avalanche-combination-pool-size", value_parser = clap::value_parser!(u64).range(1..))]
     avalanche_combination_pool_size: Option<u64>,
 
+    /// Number of Avalanche tiers to execute, including the initial sampled-input tier
+    #[arg(long = "avalanche-combination-recursion-depth", value_parser = clap::value_parser!(u64).range(1..))]
+    avalanche_combination_recursion_depth: Option<u64>,
+
+    /// Number of prior-tier samples grouped into each recursive Avalanche call
+    #[arg(long = "avalanche-combination-recursive-group-size", value_parser = clap::value_parser!(u64).range(1..))]
+    avalanche_combination_recursive_group_size: Option<u64>,
+
     /// Whether sampled avalanche prunes the scored-input pool by central Hamming-distance percentile before sampling
     #[arg(long = "avalanche-combination-hamming-distance-prune")]
     avalanche_combination_hamming_distance_prune: Option<bool>,
@@ -171,6 +179,14 @@ fn main() -> Result<(), Box<dyn Error>> {
         config.engine.avalanche_combination_pool_size = usize::try_from(pool_size)
             .map_err(|_| "avalanche combination pool size exceeds usize range")?;
     }
+    if let Some(recursion_depth) = args.avalanche_combination_recursion_depth {
+        config.engine.avalanche_combination_recursion_depth = usize::try_from(recursion_depth)
+            .map_err(|_| "avalanche combination recursion depth exceeds usize range")?;
+    }
+    if let Some(group_size) = args.avalanche_combination_recursive_group_size {
+        config.engine.avalanche_combination_recursive_group_size = usize::try_from(group_size)
+            .map_err(|_| "avalanche combination recursive group size exceeds usize range")?;
+    }
     if let Some(prune_hamming_distance) = args.avalanche_combination_hamming_distance_prune {
         config.engine.avalanche_combination_hamming_distance_prune = prune_hamming_distance;
     }
@@ -237,6 +253,10 @@ fn main() -> Result<(), Box<dyn Error>> {
             .engine
             .avalanche_combination_mixed_r_candidates,
         avalanche_combination_pool_size: config.engine.avalanche_combination_pool_size,
+        avalanche_combination_recursion_depth: config.engine.avalanche_combination_recursion_depth,
+        avalanche_combination_recursive_group_size: config
+            .engine
+            .avalanche_combination_recursive_group_size,
         avalanche_combination_hamming_distance_prune: config
             .engine
             .avalanche_combination_hamming_distance_prune,

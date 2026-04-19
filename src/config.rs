@@ -115,6 +115,12 @@ pub struct EngineConfig {
     /// Legacy pool-size setting retained for compatibility; sampled pools now use the full batch.
     #[serde(default = "default_avalanche_combination_pool_size")]
     pub avalanche_combination_pool_size: usize,
+    /// Number of Avalanche tiers to execute, including the initial sampled-input tier.
+    #[serde(default = "default_avalanche_combination_recursion_depth")]
+    pub avalanche_combination_recursion_depth: usize,
+    /// Number of sample outputs grouped into each subsequent recursive Avalanche call.
+    #[serde(default = "default_avalanche_combination_recursive_group_size")]
+    pub avalanche_combination_recursive_group_size: usize,
     /// Whether sampled avalanche prunes scored inputs to a central Hamming-distance percentile band before sampling.
     #[serde(default = "default_avalanche_combination_hamming_distance_prune")]
     pub avalanche_combination_hamming_distance_prune: bool,
@@ -291,6 +297,10 @@ impl Default for EngineConfig {
             avalanche_combination_mixed_r_candidates:
                 default_avalanche_combination_mixed_r_candidates(),
             avalanche_combination_pool_size: default_avalanche_combination_pool_size(),
+            avalanche_combination_recursion_depth:
+                default_avalanche_combination_recursion_depth(),
+            avalanche_combination_recursive_group_size:
+                default_avalanche_combination_recursive_group_size(),
             avalanche_combination_hamming_distance_prune:
                 default_avalanche_combination_hamming_distance_prune(),
             avalanche_combination_hamming_distance_keep_percentile:
@@ -877,6 +887,34 @@ fn default_avalanche_combination_mixed_r_candidates() -> usize {
 /// - Returns a constant default value; no side effects.
 fn default_avalanche_combination_pool_size() -> usize {
     100
+}
+
+/// Default recursion depth for sampled Avalanche.
+///
+/// # Parameters
+/// - None.
+///
+/// # Returns
+/// - `usize`: `1` so sampled Avalanche preserves the existing single-tier behavior by default.
+///
+/// # Expected Output
+/// - Returns a constant default value; no side effects.
+fn default_avalanche_combination_recursion_depth() -> usize {
+    1
+}
+
+/// Default group size for recursive sampled Avalanche tiers.
+///
+/// # Parameters
+/// - None.
+///
+/// # Returns
+/// - `usize`: Number of prior-tier samples grouped into each subsequent recursive call.
+///
+/// # Expected Output
+/// - Returns a constant default value; no side effects.
+fn default_avalanche_combination_recursive_group_size() -> usize {
+    8
 }
 
 /// Default flag for pruning sampled-avalanche inputs by Hamming-distance percentiles.

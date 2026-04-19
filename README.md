@@ -39,6 +39,8 @@ cargo run --bin analysis -- --config config/rsa_config.json
 - `--avalanche-combination-samples <u64>`: Number of sampled combinations evaluated by avalanche per batch. Default `100`.
 - `--avalanche-combination-size <u64>`: Number of scored items taken in each sampled combination. Default `50`.
 - `--avalanche-combination-pool-size <u64>`: Legacy compatibility override recorded in session metadata; runtime sampling now uses the full batch-sized pool.
+- `--avalanche-combination-recursion-depth <u64>`: Number of Avalanche tiers to execute, including the initial sampled-input tier. Default `1`.
+- `--avalanche-combination-recursive-group-size <u64>`: Number of prior-tier sample outputs grouped into each recursive Avalanche call. Default `8`.
 - `--avalanche-combination-majority-vote <bool>`: Use per-bit majority-vote probabilities from each sampled combination. Default `true`.
 - `--avalanche-combination-sample-smoothing <bool>`: Apply Jeffreys smoothing to sampled majority-vote probabilities before beam search. Default `false`.
 - `--avalanche-combination-majority-vote-print <bool>`: Print a separate sampled-combination majority-vote summary for the selected sample. Default `true`.
@@ -111,6 +113,8 @@ Notes:
 | `engine.avalanche_combination_size` | usize | `50` | Legacy compatibility field retained from the older scored-item sampler. |
 | `engine.avalanche_combination_mixed_r_candidates` | usize | `1` | Number of distinct `r` candidates mixed into each avalanche sample; each selected `r` contributes all of its scored `c^x` inputs. |
 | `engine.avalanche_combination_pool_size` | usize | `100` | Legacy compatibility field; runtime sampling now uses the full batch-sized pool. |
+| `engine.avalanche_combination_recursion_depth` | usize | `1` | Number of Avalanche tiers to execute, including the initial sampled-input tier. |
+| `engine.avalanche_combination_recursive_group_size` | usize | `8` | Number of prior-tier sample outputs grouped into each recursive Avalanche call. |
 | `engine.avalanche_combination_majority_vote` | bool | `true` | Use per-bit majority-vote probabilities from each sampled combination. |
 | `engine.avalanche_combination_sample_smoothing` | bool | `false` | Apply Jeffreys smoothing to sampled majority-vote probabilities before beam search. |
 | `engine.avalanche_combination_majority_vote_print` | bool | `true` | Print a separate sampled-combination majority-vote summary for the selected sample. |
@@ -161,7 +165,7 @@ Notes:
 | `engine.message.bits` | u32 | `128` | Random message bit length. |
 | `engine.message.fixed_message` | string | `HeloWrld1234` | Fixed message when `is_random` is `false`. |
 
-For `config/rsa_config_small_batch.json`, sampled avalanche now draws every combination from the full scored batch-sized pool rather than truncating to a separate top-pool limit. `engine.avalanche_combination_mixed_r_candidates` controls how many distinct `r` candidates are allowed into a sampled avalanche input set, and each chosen `r` contributes all of its configured `c^x` message variants. When `engine.avalanche_combination_majority_vote` is enabled, which is the default, the beam probabilities come from per-bit majority-vote frequencies across each sampled combination. Enable `engine.avalanche_combination_sample_smoothing` or `--avalanche-combination-sample-smoothing true` to apply Jeffreys smoothing to those frequencies before beam search. `engine.avalanche_combination_majority_vote_print` controls the separate console summary for the sampled-combination majority vote and defaults to `true`.
+For `config/rsa_config_small_batch.json`, sampled avalanche now draws every combination from the full scored batch-sized pool rather than truncating to a separate top-pool limit. `engine.avalanche_combination_mixed_r_candidates` controls how many distinct `r` candidates are allowed into a sampled avalanche input set, and each chosen `r` contributes all of its configured `c^x` message variants. `engine.avalanche_combination_recursion_depth` and `engine.avalanche_combination_recursive_group_size` enable tiered Avalanche runs where prior-tier Avalanche outputs are grouped into subsequent recursive calls. When `engine.avalanche_combination_majority_vote` is enabled, which is the default, the beam probabilities come from per-bit majority-vote frequencies across each sampled combination. Enable `engine.avalanche_combination_sample_smoothing` or `--avalanche-combination-sample-smoothing true` to apply Jeffreys smoothing to those frequencies before beam search. `engine.avalanche_combination_majority_vote_print` controls the separate console summary for the sampled-combination majority vote and defaults to `true`. Recursive per-tier sample accuracies are persisted in the session JSON and rendered in the viewer's `Avalanche Tiers` tab.
 
 # Configuration (demo verification inputs)
 These optional keys are used by `demo` when `--ciphertext` is not provided.

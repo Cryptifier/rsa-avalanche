@@ -147,6 +147,233 @@ pub struct AvalancheSearchResult {
     pub level_pair_counts: Vec<usize>,
 }
 
+/// Shared interface for values that can be reduced by Avalanche.
+pub trait AvalancheInput {
+    /// Converts the value into an Avalanche node.
+    ///
+    /// # Parameters
+    /// - None.
+    ///
+    /// # Returns
+    /// - `Result<AvalancheNode, AvalancheError>`: Node representation ready for reduction.
+    ///
+    /// # Expected Output
+    /// - Returns an in-memory node; no stdout/stderr output.
+    fn avalanche_node(&self) -> Result<AvalancheNode, AvalancheError>;
+}
+
+impl AvalancheInput for AvalancheNode {
+    fn avalanche_node(&self) -> Result<AvalancheNode, AvalancheError> {
+        Ok(self.clone())
+    }
+}
+
+/// Configuration for a prepared Avalanche run.
+#[derive(Debug, Clone, Default)]
+pub struct AvalancheConfig {
+    /// Whether to mirror candidates with bitwise inversions before reduction.
+    pub mirror_invert_candidates: bool,
+    /// Optional reference bits used to sort candidates by Hamming distance before reduction.
+    pub reference_bits: Option<Vec<bool>>,
+    /// Whether per-level similarity scores should be recorded.
+    pub collect_scores: bool,
+    /// Optional stdout progress label for long-running reductions.
+    pub progress_label: Option<String>,
+}
+
+/// Prepared Avalanche reducer built from a shared configuration and candidate set.
+#[derive(Debug, Clone)]
+pub struct Avalanche {
+    candidates: Vec<AvalancheNode>,
+    config: AvalancheConfig,
+}
+
+impl Avalanche {
+    /// Executes the prepared Avalanche reduction.
+    ///
+    /// # Parameters
+    /// - None.
+    ///
+    /// # Returns
+    /// - `Result<AvalancheSearchResult, AvalancheError>`: Reduced node plus optional per-level scores.
+    ///
+    /// # Expected Output
+    /// - Optionally prints progress updates to stdout and returns the reduction result.
+    pub fn execute(&self) -> Result<AvalancheSearchResult, AvalancheError> {
+        if self.config.collect_scores {
+            search_avalanche_tree_with_scores_internal(
+                self.candidates.clone(),
+                self.config.progress_label.as_deref(),
+            )
+        } else {
+            search_avalanche_tree_internal(
+                self.candidates.clone(),
+                self.config.progress_label.as_deref(),
+            )
+        }
+    }
+
+    /// Returns the prepared candidate list.
+    ///
+    /// # Parameters
+    /// - None.
+    ///
+    /// # Returns
+    /// - `&[AvalancheNode]`: Prepared nodes in execution order.
+    ///
+    /// # Expected Output
+    /// - Returns a shared slice; no stdout/stderr output.
+    pub fn candidates(&self) -> &[AvalancheNode] {
+        &self.candidates
+    }
+
+    /// Returns the configuration used to prepare this run.
+    ///
+    /// # Parameters
+    /// - None.
+    ///
+    /// # Returns
+    /// - `&AvalancheConfig`: Prepared Avalanche configuration.
+    ///
+    /// # Expected Output
+    /// - Returns a shared configuration reference; no stdout/stderr output.
+    pub fn config(&self) -> &AvalancheConfig {
+        &self.config
+    }
+}
+
+/// Builder for a prepared Avalanche reducer.
+#[derive(Debug, Clone, Default)]
+pub struct AvalancheBuilder {
+    config: AvalancheConfig,
+    candidates: Vec<AvalancheNode>,
+}
+
+impl AvalancheBuilder {
+    /// Creates an empty Avalanche builder.
+    ///
+    /// # Parameters
+    /// - None.
+    ///
+    /// # Returns
+    /// - `AvalancheBuilder`: Empty builder with default configuration.
+    ///
+    /// # Expected Output
+    /// - Returns the builder; no stdout/stderr output.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Enables or disables mirrored inverted candidates.
+    ///
+    /// # Parameters
+    /// - `enabled`: Whether inverted mirrors should be included.
+    ///
+    /// # Returns
+    /// - `AvalancheBuilder`: Updated builder.
+    ///
+    /// # Expected Output
+    /// - Returns the updated builder; no stdout/stderr output.
+    pub fn mirror_invert_candidates(mut self, enabled: bool) -> Self {
+        self.config.mirror_invert_candidates = enabled;
+        self
+    }
+
+    /// Configures optional Hamming-distance ordering.
+    ///
+    /// # Parameters
+    /// - `reference_bits`: Reference bits used to order candidates by Hamming distance.
+    ///
+    /// # Returns
+    /// - `AvalancheBuilder`: Updated builder.
+    ///
+    /// # Expected Output
+    /// - Returns the updated builder; no stdout/stderr output.
+    pub fn reference_bits(mut self, reference_bits: Option<Vec<bool>>) -> Self {
+        self.config.reference_bits = reference_bits;
+        self
+    }
+
+    /// Enables or disables per-level similarity score collection.
+    ///
+    /// # Parameters
+    /// - `enabled`: Whether to record per-level similarity percentages.
+    ///
+    /// # Returns
+    /// - `AvalancheBuilder`: Updated builder.
+    ///
+    /// # Expected Output
+    /// - Returns the updated builder; no stdout/stderr output.
+    pub fn collect_scores(mut self, enabled: bool) -> Self {
+        self.config.collect_scores = enabled;
+        self
+    }
+
+    /// Sets the optional progress label used during execution.
+    ///
+    /// # Parameters
+    /// - `label`: Optional human-readable progress label.
+    ///
+    /// # Returns
+    /// - `AvalancheBuilder`: Updated builder.
+    ///
+    /// # Expected Output
+    /// - Returns the updated builder; no stdout/stderr output.
+    pub fn progress_label(mut self, label: Option<String>) -> Self {
+        self.config.progress_label = label;
+        self
+    }
+
+    /// Replaces the builder's candidate list from a shared Avalanche input interface.
+    ///
+    /// # Parameters
+    /// - `inputs`: Values that can be converted into Avalanche nodes.
+    ///
+    /// # Returns
+    /// - `Result<AvalancheBuilder, AvalancheError>`: Updated builder or the first conversion error.
+    ///
+    /// # Expected Output
+    /// - Returns the updated builder; no stdout/stderr output.
+    pub fn candidates<I, T>(mut self, inputs: I) -> Result<Self, AvalancheError>
+    where
+        I: IntoIterator<Item = T>,
+        T: AvalancheInput,
+    {
+        self.candidates = inputs
+            .into_iter()
+            .map(|input| input.avalanche_node())
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(self)
+    }
+
+    /// Builds the prepared Avalanche reducer after applying configured preprocessing.
+    ///
+    /// # Parameters
+    /// - None.
+    ///
+    /// # Returns
+    /// - `Result<Avalanche, AvalancheError>`: Prepared reducer ready to execute.
+    ///
+    /// # Expected Output
+    /// - Returns the prepared reducer; no stdout/stderr output.
+    pub fn build(self) -> Result<Avalanche, AvalancheError> {
+        let mut candidates = self.candidates;
+        validate_candidates(&candidates)?;
+
+        if self.config.mirror_invert_candidates {
+            candidates = mirror_inverted_candidates(candidates)?;
+        }
+        if let Some(reference_bits) = self.config.reference_bits.as_deref() {
+            candidates = sort_candidates_by_hamming_distance(candidates, reference_bits)?;
+        }
+
+        Ok(Avalanche {
+            candidates,
+            config: self.config,
+        })
+    }
+}
+
 /// Counts the number of reduction levels needed to collapse an avalanche tree.
 ///
 /// # Parameters
@@ -293,7 +520,11 @@ pub fn mirror_inverted_candidates(
 pub fn search_avalanche_tree(
     candidates: Vec<AvalancheNode>,
 ) -> Result<AvalancheNode, AvalancheError> {
-    search_avalanche_tree_internal(candidates, None).map(|result| result.node)
+    AvalancheBuilder::new()
+        .candidates(candidates)?
+        .build()?
+        .execute()
+        .map(|result| result.node)
 }
 
 /// Recursively reduces candidates by bitwise AND with bias accumulation while printing progress.
@@ -311,7 +542,12 @@ pub fn search_avalanche_tree_with_progress(
     candidates: Vec<AvalancheNode>,
     progress_label: &str,
 ) -> Result<AvalancheNode, AvalancheError> {
-    search_avalanche_tree_internal(candidates, Some(progress_label)).map(|result| result.node)
+    AvalancheBuilder::new()
+        .candidates(candidates)?
+        .progress_label(Some(progress_label.to_string()))
+        .build()?
+        .execute()
+        .map(|result| result.node)
 }
 
 /// Recursively reduces candidates while computing per-level similarity scores.
@@ -327,7 +563,11 @@ pub fn search_avalanche_tree_with_progress(
 pub fn search_avalanche_tree_with_scores(
     candidates: Vec<AvalancheNode>,
 ) -> Result<AvalancheSearchResult, AvalancheError> {
-    search_avalanche_tree_with_scores_internal(candidates, None)
+    AvalancheBuilder::new()
+        .candidates(candidates)?
+        .collect_scores(true)
+        .build()?
+        .execute()
 }
 
 /// Recursively reduces candidates while computing per-level similarity scores and printing progress.
@@ -345,7 +585,12 @@ pub fn search_avalanche_tree_with_scores_progress(
     candidates: Vec<AvalancheNode>,
     progress_label: &str,
 ) -> Result<AvalancheSearchResult, AvalancheError> {
-    search_avalanche_tree_with_scores_internal(candidates, Some(progress_label))
+    AvalancheBuilder::new()
+        .candidates(candidates)?
+        .collect_scores(true)
+        .progress_label(Some(progress_label.to_string()))
+        .build()?
+        .execute()
 }
 
 /// Validates that candidates are non-empty and consistent in bit width.

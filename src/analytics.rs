@@ -58,6 +58,10 @@ pub struct AnalyticsCliArgs {
     pub avalanche_combination_mixed_r_candidates: usize,
     /// Number of top scored candidates retained for avalanche combination sampling.
     pub avalanche_combination_pool_size: usize,
+    /// Number of Avalanche tiers to execute, including the initial sampled-input tier.
+    pub avalanche_combination_recursion_depth: usize,
+    /// Number of prior-tier samples grouped into each recursive Avalanche call.
+    pub avalanche_combination_recursive_group_size: usize,
     /// Whether sampled avalanche prunes the scored-input pool by Hamming-distance percentile before sampling.
     pub avalanche_combination_hamming_distance_prune: bool,
     /// Central percentile of Hamming distances retained when sampled-avalanche pruning is enabled.
@@ -104,6 +108,8 @@ pub(crate) struct AnalyticsCliInfo {
     avalanche_combination_size: usize,
     avalanche_combination_mixed_r_candidates: usize,
     avalanche_combination_pool_size: usize,
+    avalanche_combination_recursion_depth: usize,
+    avalanche_combination_recursive_group_size: usize,
     avalanche_combination_hamming_distance_prune: bool,
     avalanche_combination_hamming_distance_keep_percentile: f64,
     avalanche_combination_hamming_distance_outlier_preference_pct: f64,
@@ -271,6 +277,10 @@ pub struct RCandidateAccuracyBatch {
     pub beam_match_pct: Option<f64>,
     /// Beam search ones-match percentage for the batch.
     pub beam_ones_match_pct: Option<f64>,
+    /// Majority-vote match percentage for the selected or best final-tier sample.
+    pub majority_vote_match_pct: Option<f64>,
+    /// Majority-vote ones-match percentage for the selected or best final-tier sample.
+    pub majority_vote_ones_match_pct: Option<f64>,
     /// Beam search score for the top candidate.
     pub beam_score: Option<f64>,
     /// Bit width of the beam search candidate.
@@ -283,9 +293,44 @@ pub struct RCandidateAccuracyBatch {
     pub avalanche_sampled_candidates_evaluated: usize,
     /// Number of avalanche combination samples retained for the batch.
     pub avalanche_combination_sample_count: usize,
+    /// Per-tier sample-accuracy statistics for recursive Avalanche execution.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub avalanche_tier_statistics: Vec<AvalancheTierStatistics>,
     /// Detailed avalanche combination sample results for the batch.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub avalanche_combination_samples: Vec<AvalancheCombinationSample>,
+}
+
+/// Accuracy summary for one sample within an Avalanche tier.
+#[derive(Debug, Serialize, Clone)]
+pub struct AvalancheTierSampleStat {
+    /// One-based sample index within the tier.
+    pub sample_index: usize,
+    /// Number of source items used to produce the sample.
+    pub input_count: usize,
+    /// Mean score percentage of the sample inputs.
+    pub average_score_pct: f64,
+    /// Beam-search match percentage for the top beam candidate when available.
+    pub beam_match_pct: Option<f64>,
+    /// Majority-vote match percentage for the sample when available.
+    pub majority_vote_match_pct: Option<f64>,
+    /// Best match percentage across the beam and majority-vote outputs for the sample.
+    pub best_match_pct: f64,
+}
+
+/// Accuracy distribution captured for an Avalanche tier.
+#[derive(Debug, Serialize, Clone)]
+pub struct AvalancheTierStatistics {
+    /// One-based tier index with `1` representing the initial sampled-input tier.
+    pub tier_index: usize,
+    /// Number of samples produced in the tier.
+    pub sample_count: usize,
+    /// Number of inputs grouped into each sample for this tier.
+    pub group_size: usize,
+    /// Human-readable description of the sample source for this tier.
+    pub source_kind: String,
+    /// Per-sample accuracy statistics across the full tier.
+    pub sample_stats: Vec<AvalancheTierSampleStat>,
 }
 
 /// Source candidate included in an avalanche combination sample.
@@ -495,6 +540,9 @@ impl SessionAnalytics {
             avalanche_combination_size: args.avalanche_combination_size,
             avalanche_combination_mixed_r_candidates: args.avalanche_combination_mixed_r_candidates,
             avalanche_combination_pool_size: args.avalanche_combination_pool_size,
+            avalanche_combination_recursion_depth: args.avalanche_combination_recursion_depth,
+            avalanche_combination_recursive_group_size: args
+                .avalanche_combination_recursive_group_size,
             avalanche_combination_hamming_distance_prune: args
                 .avalanche_combination_hamming_distance_prune,
             avalanche_combination_hamming_distance_keep_percentile: args
