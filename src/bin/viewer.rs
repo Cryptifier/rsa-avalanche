@@ -1322,8 +1322,7 @@ impl ViewerApp {
                 });
             ui.label("Render columns:");
             ui.add(
-                egui::Slider::new(&mut self.avalanche_tier_columns, 16..=1024)
-                    .logarithmic(true),
+                egui::Slider::new(&mut self.avalanche_tier_columns, 16..=1024).logarithmic(true),
             );
         });
         ui.label(format!(
@@ -2449,7 +2448,8 @@ fn value_as_avalanche_tier_statistics(value: Option<&Value>) -> Vec<AvalancheTie
                 .get("sample_stats")
                 .and_then(|value| value.as_array())
                 .map(|stats| {
-                    stats.iter()
+                    stats
+                        .iter()
                         .filter_map(|stat| stat.as_object())
                         .map(|stat| AvalancheTierSampleStat {
                             sample_index: value_as_u64(stat.get("sample_index")),
@@ -2845,8 +2845,7 @@ fn draw_avalanche_tier_heatmap(
         .id_source("avalanche_tier_heatmap")
         .auto_shrink([false, false])
         .show(ui, |ui| {
-            let (rect, _) =
-                ui.allocate_exact_size(egui::vec2(width, height), egui::Sense::hover());
+            let (rect, _) = ui.allocate_exact_size(egui::vec2(width, height), egui::Sense::hover());
             let painter = ui.painter_at(rect);
             let title_y = rect.min.y + margin;
             painter.text(
@@ -2857,7 +2856,10 @@ fn draw_avalanche_tier_heatmap(
                 ui.visuals().text_color(),
             );
             painter.text(
-                egui::pos2(rect.min.x + margin + label_width + columns as f32 * cell_width, title_y),
+                egui::pos2(
+                    rect.min.x + margin + label_width + columns as f32 * cell_width,
+                    title_y,
+                ),
                 egui::Align2::RIGHT_TOP,
                 "100%",
                 egui::FontId::proportional(11.0),

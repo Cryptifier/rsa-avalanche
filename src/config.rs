@@ -297,8 +297,7 @@ impl Default for EngineConfig {
             avalanche_combination_mixed_r_candidates:
                 default_avalanche_combination_mixed_r_candidates(),
             avalanche_combination_pool_size: default_avalanche_combination_pool_size(),
-            avalanche_combination_recursion_depth:
-                default_avalanche_combination_recursion_depth(),
+            avalanche_combination_recursion_depth: default_avalanche_combination_recursion_depth(),
             avalanche_combination_recursive_group_size:
                 default_avalanche_combination_recursive_group_size(),
             avalanche_combination_hamming_distance_prune:

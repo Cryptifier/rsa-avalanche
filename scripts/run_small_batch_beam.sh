@@ -221,12 +221,6 @@ for i in $(seq 1 "${RUNS}"); do
     echo "Run ${i} summary: ${RED}FAILED (exit ${status})${RESET}, c^x max match ${match_color}${cx_match_pct:-N/A}%${RESET}, beam run max ${match_color}${beam_run_max_match_pct:-N/A}%${RESET}, majority vote match ${match_color}${majority_vote_match_pct:-N/A}%${RESET}, top avalanche output match ${top_output_match_color}${top_output_match_pct:-N/A}%${RESET}, c^x candidates ${cx_candidates_total:-N/A}, avalanche candidates ${avalanche_candidates_total:-N/A}, verdict ${verdict_color}${verdict}${RESET}, duration ${duration_s}s"
   fi
   echo "Session JSON: ${session_path}"
-  batch_output_lines=$(grep -E '^Avalanche batch [0-9]+ tier [0-9]+ sample [0-9]+ (beam|majority vote match)' "${run_output}" || true)
-  if [[ -n "${batch_output_lines}" ]]; then
-    echo "${batch_output_lines}"
-  else
-    echo "Avalanche batch outputs: N/A"
-  fi
   if [[ -n "${beam_run_max_line}" ]]; then
     echo "${beam_run_max_line}"
   fi
