@@ -4695,19 +4695,43 @@ fn run_sampled_avalanche_beam_search(
         let mut recursive_rng = RngChoice::from_seed(rng_mode, recursive_seed);
         let (recursive_groups, source_kind): (Vec<Vec<SelectedAvalancheSample>>, &str) =
             if recursive_resample_count > 0 {
-                (
-                    (0..recursive_resample_count)
-                        .map(|_| {
-                            select_recursive_tier_sample_group(
-                                &current_tier_samples,
-                                recursive_group_size,
-                                &mut recursive_rng,
-                            )
-                        })
-                        .filter(|group| !group.is_empty())
-                        .collect(),
-                    "recursive-resampled-samples",
-                )
+                println!(
+                    "Avalanche recursive tier {} group preparation for batch {}: source-samples {} group-size {} target-groups {} mode recursive-resampled-samples",
+                    next_tier_index,
+                    batch_number,
+                    current_tier_samples.len(),
+                    recursive_group_size,
+                    recursive_resample_count
+                );
+                let prepare_log_start = Instant::now();
+                let prepare_log_interval = Duration::from_secs(5);
+                let prepare_next_log_at_ms = AtomicU64::new(
+                    prepare_log_interval.as_millis().min(u128::from(u64::MAX)) as u64,
+                );
+                let prepare_progress_label = format!(
+                    "Avalanche recursive tier {} group preparation batch {}",
+                    next_tier_index, batch_number
+                );
+                let mut recursive_groups = Vec::with_capacity(recursive_resample_count);
+                for group_index in 0..recursive_resample_count {
+                    let group = select_recursive_tier_sample_group(
+                        &current_tier_samples,
+                        recursive_group_size,
+                        &mut recursive_rng,
+                    );
+                    if !group.is_empty() {
+                        recursive_groups.push(group);
+                    }
+                    log_parallel_progress_every_interval(
+                        (group_index + 1) as u64,
+                        recursive_resample_count as u64,
+                        &prepare_log_start,
+                        &prepare_next_log_at_ms,
+                        &prepare_progress_label,
+                        prepare_log_interval,
+                    );
+                }
+                (recursive_groups, "recursive-resampled-samples")
             } else {
                 let shuffled_samples =
                     shuffle_recursive_tier_samples(&current_tier_samples, &mut recursive_rng);
