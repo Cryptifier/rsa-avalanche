@@ -96,6 +96,8 @@ for i in $(seq 1 "${RUNS}"); do
   match_pct=$(echo "${match_line}" | sed -n 's/.*(\([0-9.]*\)%).*/\1/p')
   cx_match_line=$(grep -F -m1 "Avalanche c^x run max:" "${run_output}" || true)
   cx_match_pct=$(echo "${cx_match_line}" | sed -n 's/.*match \([0-9.]*\)%.*/\1/p')
+  beam_run_max_line=$(grep -F -m1 "Avalanche beam run max:" "${run_output}" || true)
+  beam_run_max_match_pct=$(echo "${beam_run_max_line}" | sed -n 's/.*match \([0-9.]*\)%.*/\1/p')
   majority_vote_line=$(grep -F -m1 "Avalanche majority vote run max:" "${run_output}" || true)
   majority_vote_match_pct=$(echo "${majority_vote_line}" | sed -n 's/.*match \([0-9.]*\)%.*/\1/p')
   cx_total_line=$(grep -F -m1 "Avalanche c^x evaluated total:" "${run_output}" || true)
@@ -164,6 +166,16 @@ for i in $(seq 1 "${RUNS}"); do
     cx_match_color="${YELLOW}"
   fi
 
+  if [[ -n "${beam_run_max_match_pct}" ]]; then
+    if awk -v v="${beam_run_max_match_pct}" 'BEGIN { exit (v >= 50.0) ? 0 : 1 }'; then
+      beam_match_color="${GREEN}"
+    else
+      beam_match_color="${RED}"
+    fi
+  else
+    beam_match_color="${YELLOW}"
+  fi
+
   if [[ -n "${majority_vote_match_pct}" ]]; then
     if awk -v v="${majority_vote_match_pct}" 'BEGIN { exit (v >= 50.0) ? 0 : 1 }'; then
       majority_match_color="${GREEN}"
@@ -180,34 +192,37 @@ for i in $(seq 1 "${RUNS}"); do
   fi
 
   if [[ ${status} -eq 0 ]]; then
-    echo "Run ${i} summary: match ${match_color}${match_pct:-N/A}%${RESET}, c^x max match ${cx_match_color}${cx_match_pct:-N/A}%${RESET}, majority vote match ${majority_match_color}${majority_vote_match_pct:-N/A}%${RESET}, c^x candidates ${cx_candidates_total:-N/A}, avalanche candidates ${avalanche_candidates_total:-N/A}, verdict ${verdict_color}${verdict:-UNKNOWN}${RESET}, duration ${duration_s}s"
+    echo "Run ${i} summary: match ${match_color}${match_pct:-N/A}%${RESET}, c^x max match ${cx_match_color}${cx_match_pct:-N/A}%${RESET}, beam run max ${beam_match_color}${beam_run_max_match_pct:-N/A}%${RESET}, majority vote match ${majority_match_color}${majority_vote_match_pct:-N/A}%${RESET}, c^x candidates ${cx_candidates_total:-N/A}, avalanche candidates ${avalanche_candidates_total:-N/A}, verdict ${verdict_color}${verdict:-UNKNOWN}${RESET}, duration ${duration_s}s"
   else
-    echo "Run ${i} summary: ${RED}FAILED (exit ${status})${RESET}, match ${match_color}${match_pct:-N/A}%${RESET}, c^x max match ${cx_match_color}${cx_match_pct:-N/A}%${RESET}, majority vote match ${majority_match_color}${majority_vote_match_pct:-N/A}%${RESET}, c^x candidates ${cx_candidates_total:-N/A}, avalanche candidates ${avalanche_candidates_total:-N/A}, verdict ${verdict_color}${verdict:-UNKNOWN}${RESET}, duration ${duration_s}s"
+    echo "Run ${i} summary: ${RED}FAILED (exit ${status})${RESET}, match ${match_color}${match_pct:-N/A}%${RESET}, c^x max match ${cx_match_color}${cx_match_pct:-N/A}%${RESET}, beam run max ${beam_match_color}${beam_run_max_match_pct:-N/A}%${RESET}, majority vote match ${majority_match_color}${majority_vote_match_pct:-N/A}%${RESET}, c^x candidates ${cx_candidates_total:-N/A}, avalanche candidates ${avalanche_candidates_total:-N/A}, verdict ${verdict_color}${verdict:-UNKNOWN}${RESET}, duration ${duration_s}s"
   fi
   echo "Session JSON: ${session_path}"
+  if [[ -n "${beam_run_max_line}" ]]; then
+    echo "${beam_run_max_line}"
+  fi
   if [[ -n "${majority_vote_line}" ]]; then
     echo "${majority_vote_line}"
   fi
-
-  majority_block=$(awk '
+  beam_comparison_block=$(awk '
+    /Avalanche beam colored hex/ {print; capture=1; next}
+    capture {print; if (/^Hex match key:/) exit}
+  ' "${run_output}")
+  majority_comparison_block=$(awk '
     /Avalanche majority vote colored hex/ {print; capture=1; next}
     capture {print; if (/^Hex match key:/) exit}
   ' "${run_output}")
-  if [[ -n "${majority_block}" ]]; then
-    echo "${majority_block}"
-  else
-    echo "Avalanche majority vote results: N/A"
-  fi
-
-  beam_block=$(awk '
-    /Avalanche beam search top/ {print; capture=1; next}
-    capture && /^Beam [0-9]+/ {print; next}
-    capture {exit}
-  ' "${run_output}")
-  if [[ -n "${beam_block}" ]]; then
-    echo "${beam_block}"
-  else
-    echo "Avalanche beam search results: N/A"
+  if [[ -n "${beam_comparison_block}" || -n "${majority_comparison_block}" ]]; then
+    if [[ -n "${beam_comparison_block}" ]]; then
+      echo "${beam_comparison_block}"
+    else
+      echo "Avalanche beam colored comparison: N/A"
+    fi
+    echo "-----"
+    if [[ -n "${majority_comparison_block}" ]]; then
+      echo "${majority_comparison_block}"
+    else
+      echo "Avalanche majority vote colored comparison: N/A"
+    fi
   fi
   progress_bar "${i}" "${RUNS}"
   rm -f "${run_output}"

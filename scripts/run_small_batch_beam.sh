@@ -198,6 +198,26 @@ for i in $(seq 1 "${RUNS}"); do
     match_color="${YELLOW}"
   fi
 
+  if [[ -n "${beam_run_max_match_pct}" ]]; then
+    if awk -v v="${beam_run_max_match_pct}" 'BEGIN { exit (v >= 50.0) ? 0 : 1 }'; then
+      beam_match_color="${GREEN}"
+    else
+      beam_match_color="${RED}"
+    fi
+  else
+    beam_match_color="${YELLOW}"
+  fi
+
+  if [[ -n "${majority_vote_match_pct}" ]]; then
+    if awk -v v="${majority_vote_match_pct}" 'BEGIN { exit (v >= 50.0) ? 0 : 1 }'; then
+      majority_match_color="${GREEN}"
+    else
+      majority_match_color="${RED}"
+    fi
+  else
+    majority_match_color="${YELLOW}"
+  fi
+
   if [[ -n "${top_output_match_pct}" ]]; then
     if awk -v v="${top_output_match_pct}" -v threshold="${VERDICT_MATCH_THRESHOLD_PCT}" 'BEGIN { exit (v >= threshold) ? 0 : 1 }'; then
       top_output_match_color="${GREEN}"
@@ -216,9 +236,9 @@ for i in $(seq 1 "${RUNS}"); do
   fi
 
   if [[ ${status} -eq 0 ]]; then
-    echo "Run ${i} summary: c^x max match ${match_color}${cx_match_pct:-N/A}%${RESET}, beam run max ${match_color}${beam_run_max_match_pct:-N/A}%${RESET}, majority vote match ${match_color}${majority_vote_match_pct:-N/A}%${RESET}, top avalanche output match ${top_output_match_color}${top_output_match_pct:-N/A}%${RESET}, c^x candidates ${cx_candidates_total:-N/A}, avalanche candidates ${avalanche_candidates_total:-N/A}, verdict ${verdict_color}${verdict}${RESET}, duration ${duration_s}s"
+    echo "Run ${i} summary: c^x max match ${match_color}${cx_match_pct:-N/A}%${RESET}, beam run max ${beam_match_color}${beam_run_max_match_pct:-N/A}%${RESET}, majority vote match ${majority_match_color}${majority_vote_match_pct:-N/A}%${RESET}, top avalanche output match ${top_output_match_color}${top_output_match_pct:-N/A}%${RESET}, c^x candidates ${cx_candidates_total:-N/A}, avalanche candidates ${avalanche_candidates_total:-N/A}, verdict ${verdict_color}${verdict}${RESET}, duration ${duration_s}s"
   else
-    echo "Run ${i} summary: ${RED}FAILED (exit ${status})${RESET}, c^x max match ${match_color}${cx_match_pct:-N/A}%${RESET}, beam run max ${match_color}${beam_run_max_match_pct:-N/A}%${RESET}, majority vote match ${match_color}${majority_vote_match_pct:-N/A}%${RESET}, top avalanche output match ${top_output_match_color}${top_output_match_pct:-N/A}%${RESET}, c^x candidates ${cx_candidates_total:-N/A}, avalanche candidates ${avalanche_candidates_total:-N/A}, verdict ${verdict_color}${verdict}${RESET}, duration ${duration_s}s"
+    echo "Run ${i} summary: ${RED}FAILED (exit ${status})${RESET}, c^x max match ${match_color}${cx_match_pct:-N/A}%${RESET}, beam run max ${beam_match_color}${beam_run_max_match_pct:-N/A}%${RESET}, majority vote match ${majority_match_color}${majority_vote_match_pct:-N/A}%${RESET}, top avalanche output match ${top_output_match_color}${top_output_match_pct:-N/A}%${RESET}, c^x candidates ${cx_candidates_total:-N/A}, avalanche candidates ${avalanche_candidates_total:-N/A}, verdict ${verdict_color}${verdict}${RESET}, duration ${duration_s}s"
   fi
   echo "Session JSON: ${session_path}"
   if [[ -n "${beam_run_max_line}" ]]; then
@@ -226,6 +246,27 @@ for i in $(seq 1 "${RUNS}"); do
   fi
   if [[ -n "${majority_vote_line}" ]]; then
     echo "${majority_vote_line}"
+  fi
+  beam_comparison_block=$(awk '
+    /Avalanche beam colored hex/ {print; capture=1; next}
+    capture {print; if (/^Hex match key:/) exit}
+  ' "${run_output}")
+  majority_comparison_block=$(awk '
+    /Avalanche majority vote colored hex/ {print; capture=1; next}
+    capture {print; if (/^Hex match key:/) exit}
+  ' "${run_output}")
+  if [[ -n "${beam_comparison_block}" || -n "${majority_comparison_block}" ]]; then
+    if [[ -n "${beam_comparison_block}" ]]; then
+      echo "${beam_comparison_block}"
+    else
+      echo "Avalanche beam colored comparison: N/A"
+    fi
+    echo "-----"
+    if [[ -n "${majority_comparison_block}" ]]; then
+      echo "${majority_comparison_block}"
+    else
+      echo "Avalanche majority vote colored comparison: N/A"
+    fi
   fi
   if [[ -n "${batch_match_percentages}" ]]; then
     echo "Match percentages: [${batch_match_percentages}]"

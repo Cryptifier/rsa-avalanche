@@ -295,6 +295,27 @@ run_current_config() {
     if [[ -n "${majority_vote_line}" ]]; then
       echo "${majority_vote_line}"
     fi
+    beam_comparison_block=$(awk '
+      /Avalanche beam colored hex/ {print; capture=1; next}
+      capture {print; if (/^Hex match key:/) exit}
+    ' "${run_output}")
+    majority_comparison_block=$(awk '
+      /Avalanche majority vote colored hex/ {print; capture=1; next}
+      capture {print; if (/^Hex match key:/) exit}
+    ' "${run_output}")
+    if [[ -n "${beam_comparison_block}" || -n "${majority_comparison_block}" ]]; then
+      if [[ -n "${beam_comparison_block}" ]]; then
+        echo "${beam_comparison_block}"
+      else
+        echo "Avalanche beam colored comparison: N/A"
+      fi
+      echo "-----"
+      if [[ -n "${majority_comparison_block}" ]]; then
+        echo "${majority_comparison_block}"
+      else
+        echo "Avalanche majority vote colored comparison: N/A"
+      fi
+    fi
     progress_bar "${i}" "${RUNS_PER_CONFIG}"
     rm -f "${run_output}"
   done

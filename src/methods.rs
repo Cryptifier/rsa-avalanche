@@ -3435,6 +3435,7 @@ struct BeamMaxCandidate {
     top_beam_score: f64,
     beam_results: Vec<AvalancheCombinationBeamResult>,
     best_bits: Vec<bool>,
+    message_bits: Vec<bool>,
     batch_number: usize,
     sample_index: usize,
     tier_index: usize,
@@ -5082,6 +5083,7 @@ fn run_r_candidate_accuracy_batches(
                         top_beam_score: selected_sample.top_beam_score,
                         beam_results: selected_sample.beam_results.clone(),
                         best_bits: selected_sample.best_bits.clone(),
+                        message_bits: message_bits.clone(),
                         batch_number,
                         sample_index: selected_sample.sample_index,
                         tier_index: selected_sample.tier_index,
@@ -5190,6 +5192,19 @@ fn run_r_candidate_accuracy_batches(
                 );
                 let msb = max.best_bits.last().copied().unwrap_or(false);
                 println!("Avalanche beam max MSB: {}", if msb { 1 } else { 0 });
+                println!(
+                    "Avalanche beam colored hex (best sample avg {}%, batch {}, tier {}, sample {}, lsb0 order):",
+                    format_beam_float(max.average_score_pct, BEAM_PCT_DECIMALS),
+                    max.batch_number,
+                    max.tier_index,
+                    max.sample_index
+                );
+                print_colored_hex_comparison(
+                    "Original message",
+                    &max.message_bits,
+                    "Beam-search message",
+                    &max.best_bits,
+                );
             } else {
                 println!("Avalanche beam run max: N/A");
                 println!("Avalanche beam max after {} batches: N/A", batch_count);
