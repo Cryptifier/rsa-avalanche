@@ -4731,7 +4731,10 @@ fn run_sampled_avalanche_beam_search(
         );
 
         let mut next_samples = Vec::with_capacity(group_count);
-        let mut next_pct = 10u64;
+        let recursive_log_start = Instant::now();
+        let recursive_log_interval = Duration::from_secs(5);
+        let recursive_next_log_at_ms =
+            AtomicU64::new(recursive_log_interval.as_millis().min(u128::from(u64::MAX)) as u64);
         let progress_label = format!(
             "Avalanche recursive tier {} batch {}",
             next_tier_index, batch_number
@@ -4747,11 +4750,13 @@ fn run_sampled_avalanche_beam_search(
             .map_err(|err| -> Box<dyn Error> { err.into() })?;
             reduced.evaluated_candidates += chunk.len();
             next_samples.push(sample);
-            log_progress_every_ten_percent(
+            log_parallel_progress_every_interval(
                 (group_index + 1) as u64,
                 group_count as u64,
-                &mut next_pct,
+                &recursive_log_start,
+                &recursive_next_log_at_ms,
                 &progress_label,
+                recursive_log_interval,
             );
         }
 
