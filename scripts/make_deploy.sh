@@ -52,6 +52,7 @@ rsync -a --prune-empty-dirs \
   --include '/Makefile' \
   --include '/config/' \
   --include '/config/rsa_config_demo.json' \
+  --include '/config/rsa_config_small_batch.json' \
   --include '/data/rgen_output_256.csv' \
   --include '/*.md' \
   --include '/LICENSE' \
