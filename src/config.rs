@@ -142,6 +142,9 @@ pub struct EngineConfig {
     /// Whether sampled avalanche prints a separate majority-vote summary for the selected sample.
     #[serde(default = "default_avalanche_combination_majority_vote_print")]
     pub avalanche_combination_majority_vote_print: bool,
+    /// Whether recursive Avalanche tiers carry forward the top beam-search bits instead of majority-vote bits.
+    #[serde(default = "default_avalanche_use_top_beam")]
+    pub avalanche_use_top_beam: bool,
     /// Whether sampled avalanche retains every evaluated sample in memory for downstream consumers.
     #[serde(default = "default_avalanche_combination_keep_all_samples_in_memory")]
     pub avalanche_combination_keep_all_samples_in_memory: bool,
@@ -319,6 +322,7 @@ impl Default for EngineConfig {
             ),
             avalanche_combination_majority_vote_print:
                 default_avalanche_combination_majority_vote_print(),
+            avalanche_use_top_beam: default_avalanche_use_top_beam(),
             avalanche_combination_keep_all_samples_in_memory:
                 default_avalanche_combination_keep_all_samples_in_memory(),
             avalanche_statistics_collection: default_avalanche_statistics_collection(),
@@ -1037,6 +1041,20 @@ fn default_avalanche_combination_majority_vote_print() -> bool {
     true
 }
 
+/// Default flag for carrying forward the top beam-search result between recursive avalanche tiers.
+///
+/// # Parameters
+/// - None.
+///
+/// # Returns
+/// - `bool`: `true` so recursive tiers use the prior tier's top beam-search bits by default.
+///
+/// # Expected Output
+/// - Returns the default configuration value; no side effects.
+fn default_avalanche_use_top_beam() -> bool {
+    true
+}
+
 /// Returns the default in-memory sampled-avalanche retention mode.
 ///
 /// # Parameters
@@ -1382,6 +1400,7 @@ mod tests {
     fn test_engine_config_defaults_disable_avalanche_hamming_distance_pruning() {
         let engine = EngineConfig::default();
 
+        assert!(engine.avalanche_use_top_beam);
         assert!(engine.avalanche_statistics_collection);
         assert_eq!(engine.avalanche_combination_recursive_resample_count, 0);
         assert!(!engine.avalanche_combination_hamming_distance_prune);

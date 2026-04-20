@@ -60,6 +60,7 @@
         "entropy_report_threshold" : 0.99,
         "oracle_accuracy_threshold" : 51.0,
         "use_hamming_distance" : false,
+        "avalanche_use_top_beam" : true,
         "avalanche_statistics_collection" : true,
         "avalanche_random_chacha20_inputs" : false,
         "avalanche_beam_top_k" : 100,

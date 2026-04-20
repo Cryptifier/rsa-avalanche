@@ -125,6 +125,10 @@ struct Args {
     #[arg(long = "avalanche-combination-majority-vote-print")]
     avalanche_combination_majority_vote_print: Option<bool>,
 
+    /// Whether recursive Avalanche tiers carry forward the top beam-search bits instead of majority-vote bits
+    #[arg(long = "avalanche-use-top-beam")]
+    avalanche_use_top_beam: Option<bool>,
+
     /// Raise ciphertext to a monotonically increasing exponent per batch
     #[arg(long)]
     ciphertext_modify: bool,
@@ -221,6 +225,9 @@ fn main() -> Result<(), Box<dyn Error>> {
     if let Some(majority_vote_print) = args.avalanche_combination_majority_vote_print {
         config.engine.avalanche_combination_majority_vote_print = majority_vote_print;
     }
+    if let Some(use_top_beam) = args.avalanche_use_top_beam {
+        config.engine.avalanche_use_top_beam = use_top_beam;
+    }
     config.engine.analysis_batch_enable = batch_enable;
     if args.ciphertext_modify {
         config.engine.ciphertext_modify = true;
@@ -286,6 +293,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         avalanche_combination_majority_vote_print: config
             .engine
             .avalanche_combination_majority_vote_print,
+        avalanche_use_top_beam: config.engine.avalanche_use_top_beam,
         avalanche_combination_keep_all_samples_in_memory: config
             .engine
             .avalanche_combination_keep_all_samples_in_memory,

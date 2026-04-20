@@ -76,6 +76,8 @@ pub struct AnalyticsCliArgs {
     pub avalanche_combination_sample_smoothing: bool,
     /// Whether sampled avalanche prints a separate majority-vote summary for the selected sample.
     pub avalanche_combination_majority_vote_print: bool,
+    /// Whether recursive Avalanche tiers carry forward the top beam-search bits instead of majority-vote bits.
+    pub avalanche_use_top_beam: bool,
     /// Whether all sampled-avalanche combinations were retained in memory during the run.
     pub avalanche_combination_keep_all_samples_in_memory: bool,
     /// Whether avalanche runs collected per-level and per-sample statistics.
@@ -121,6 +123,7 @@ pub(crate) struct AnalyticsCliInfo {
     avalanche_combination_majority_vote: bool,
     avalanche_combination_sample_smoothing: bool,
     avalanche_combination_majority_vote_print: bool,
+    avalanche_use_top_beam: bool,
     avalanche_combination_keep_all_samples_in_memory: bool,
     avalanche_statistics_collection: bool,
     avalanche_random_chacha20_inputs: bool,
@@ -561,6 +564,7 @@ impl SessionAnalytics {
             avalanche_combination_sample_smoothing: args.avalanche_combination_sample_smoothing,
             avalanche_combination_majority_vote_print: args
                 .avalanche_combination_majority_vote_print,
+            avalanche_use_top_beam: args.avalanche_use_top_beam,
             avalanche_combination_keep_all_samples_in_memory: args
                 .avalanche_combination_keep_all_samples_in_memory,
             avalanche_statistics_collection: args.avalanche_statistics_collection,

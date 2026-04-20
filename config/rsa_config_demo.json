@@ -94,6 +94,7 @@
     "avalanche_combination_majority_vote": true, // Use per-bit majority-vote probabilities from each sampled combination.
     "avalanche_combination_sample_smoothing": true, // Apply Jeffreys smoothing to the sampled majority-vote probabilities before beam search.
     "avalanche_combination_majority_vote_print": true, // Print a separate sampled-combination majority-vote summary alongside the beam output.
+    "avalanche_use_top_beam": true, // Carry forward the prior tier's top beam-search bits between recursive Avalanche tiers.
     "avalanche_statistics_collection": true, // Collect recursive Avalanche tier statistics and other heavy analytics payloads.
     // Allow batches to mix different r values while still perturbing the
     // ciphertext for each sampled message variant.

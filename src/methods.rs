@@ -3477,19 +3477,63 @@ struct SelectedAvalancheSample {
     node: AvalancheNode,
 }
 
-impl AvalancheInput for SelectedAvalancheSample {
+#[derive(Clone, Debug)]
+struct RecursiveAvalancheInput {
+    message_bits: PackedBits,
+}
+
+impl AvalancheInput for RecursiveAvalancheInput {
     fn avalanche_node(&self) -> Result<AvalancheNode, crate::avalanche::AvalancheError> {
         Ok(AvalancheNode::from_packed_bits(
-            PackedBits::from_bools(&self.node.message_bits_vec()),
-            vec![0.0; self.node.bit_len()],
+            self.message_bits.clone(),
+            vec![0.0; self.message_bits.len()],
         ))
     }
 }
 
-impl AvalancheInput for &SelectedAvalancheSample {
-    fn avalanche_node(&self) -> Result<AvalancheNode, crate::avalanche::AvalancheError> {
-        (*self).avalanche_node()
+/// Selects which finalized sample bits should feed the next recursive Avalanche tier.
+///
+/// # Parameters
+/// - `sample`: Prior-tier selected sample being forwarded into the next recursive tier.
+/// - `engine`: Engine configuration controlling whether recursion uses top-beam or majority-vote outputs.
+///
+/// # Returns
+/// - `&[bool]`: Borrowed bit slice forwarded into the next recursive tier.
+///
+/// # Expected Output
+/// - Returns a borrowed bit slice; no stdout/stderr output.
+fn recursive_tier_bits<'a>(
+    sample: &'a SelectedAvalancheSample,
+    engine: &EngineConfig,
+) -> &'a [bool] {
+    if engine.avalanche_use_top_beam {
+        &sample.best_bits
+    } else {
+        &sample.majority_vote_bits
     }
+}
+
+/// Builds the recursive Avalanche inputs for a next-tier run from prior-tier selected samples.
+///
+/// # Parameters
+/// - `samples`: Prior-tier selected samples chosen for one recursive Avalanche execution.
+/// - `engine`: Engine configuration controlling which prior-tier bit representation is carried forward.
+///
+/// # Returns
+/// - `Vec<RecursiveAvalancheInput>`: Recursive-tier inputs containing only the selected bit vectors.
+///
+/// # Expected Output
+/// - Returns compact recursive-tier inputs; no stdout/stderr output.
+fn build_recursive_avalanche_inputs(
+    samples: &[&SelectedAvalancheSample],
+    engine: &EngineConfig,
+) -> Vec<RecursiveAvalancheInput> {
+    samples
+        .iter()
+        .map(|sample| RecursiveAvalancheInput {
+            message_bits: PackedBits::from_bools(recursive_tier_bits(sample, engine)),
+        })
+        .collect()
 }
 
 #[derive(Debug)]
@@ -3524,7 +3568,7 @@ impl Default for SampledAvalancheBatchResult {
 }
 
 impl SampledAvalancheBatchResult {
-    fn update_selected_sample(&mut self, candidate: SelectedAvalancheSample) {
+    fn update_selected_sample_ref(&mut self, candidate: &SelectedAvalancheSample) {
         let replace = match self.selected_sample.as_ref() {
             Some(current) => {
                 candidate.best_match_pct > current.best_match_pct
@@ -3537,7 +3581,7 @@ impl SampledAvalancheBatchResult {
             None => true,
         };
         if replace {
-            self.selected_sample = Some(candidate);
+            self.selected_sample = Some(candidate.clone());
         }
     }
 }
@@ -4480,8 +4524,9 @@ fn execute_recursive_avalanche_sample_from_indices(
             .map(|sample| sample.best_match_pct)
             .collect::<Vec<_>>(),
     );
+    let recursive_inputs = build_recursive_avalanche_inputs(&selected_samples, engine);
     let avalanche_search = build_prepared_avalanche(
-        &selected_samples,
+        &recursive_inputs,
         engine,
         message_bits,
         engine.avalanche_statistics_collection,
@@ -4490,9 +4535,9 @@ fn execute_recursive_avalanche_sample_from_indices(
     .map_err(|err| err.to_string())?
     .execute()
     .map_err(|err| err.to_string())?;
-    let selected_oracles = selected_samples
+    let selected_oracles = recursive_inputs
         .iter()
-        .map(|sample| PackedBits::from_bools(&sample.majority_vote_bits))
+        .map(|input| input.message_bits.clone())
         .collect::<Vec<_>>();
     finalize_avalanche_sample(
         engine,
@@ -4602,6 +4647,11 @@ fn run_sampled_avalanche_beam_search(
     let majority_vote_enabled = engine.avalanche_combination_majority_vote;
     let sample_smoothing_enabled = engine.avalanche_combination_sample_smoothing;
     let majority_vote_print_enabled = engine.avalanche_combination_majority_vote_print;
+    let recursive_input_mode = if engine.avalanche_use_top_beam {
+        "top-beam"
+    } else {
+        "majority-vote"
+    };
     let statistics_collection_enabled = engine.avalanche_statistics_collection;
     let keep_all_samples_enabled =
         statistics_collection_enabled && engine.avalanche_combination_keep_all_samples_in_memory;
@@ -4612,7 +4662,7 @@ fn run_sampled_avalanche_beam_search(
     };
 
     println!(
-        "Avalanche combination setup for batch {}: scored inputs {} r-candidate-pool {} selection-mode {} configured-mixed-r-candidates {} effective-mixed-r-candidates {} samples {} recursion-depth {} recursive-group-size {} recursive-resample-count {} majority-vote {} sample-smoothing {} majority-print {} statistics-collection {} keep-all-samples {} hamming-prune {} kept-percentile {} outlier-preference-pct {}",
+        "Avalanche combination setup for batch {}: scored inputs {} r-candidate-pool {} selection-mode {} configured-mixed-r-candidates {} effective-mixed-r-candidates {} samples {} recursion-depth {} recursive-group-size {} recursive-resample-count {} majority-vote {} sample-smoothing {} majority-print {} recursive-input {} statistics-collection {} keep-all-samples {} hamming-prune {} kept-percentile {} outlier-preference-pct {}",
         batch_number,
         pool_size,
         r_candidate_pool_size,
@@ -4634,6 +4684,7 @@ fn run_sampled_avalanche_beam_search(
         } else {
             "off"
         },
+        recursive_input_mode,
         if statistics_collection_enabled {
             "on"
         } else {
@@ -4758,7 +4809,9 @@ fn run_sampled_avalanche_beam_search(
         let next_tier_index = tier_index + 1;
         let recursive_seed = rng.next_u64();
         let mut recursive_rng = RngChoice::from_seed(rng_mode, recursive_seed);
+        let source_samples = std::mem::take(&mut current_tier_samples);
         let recursive_done = AtomicU64::new(0);
+        let recursive_evaluated_candidates = AtomicU64::new(0);
         let recursive_log_start = Instant::now();
         let recursive_log_interval = Duration::from_secs(5);
         let recursive_next_log_at_ms =
@@ -4767,134 +4820,125 @@ fn run_sampled_avalanche_beam_search(
             "Avalanche recursive tier {} batch {}",
             next_tier_index, batch_number
         );
-        let (next_samples_with_counts, source_kind, group_count): (
-            Vec<(SelectedAvalancheSample, usize)>,
-            &str,
-            usize,
-        ) = if recursive_resample_count > 0 {
-            let recursive_group_seeds: Vec<u64> = (0..recursive_resample_count)
-                .map(|_| recursive_rng.next_u64())
-                .collect();
-            println!(
-                "Avalanche recursive tier {} group preparation for batch {}: source-samples {} group-size {} target-groups {} mode recursive-resampled-samples",
-                next_tier_index,
-                batch_number,
-                current_tier_samples.len(),
-                recursive_group_size,
-                recursive_resample_count
-            );
-            let prepare_done = AtomicU64::new(0);
-            let prepare_log_start = Instant::now();
-            let prepare_log_interval = Duration::from_secs(5);
-            let prepare_next_log_at_ms =
-                AtomicU64::new(prepare_log_interval.as_millis().min(u128::from(u64::MAX)) as u64);
-            let prepare_progress_label = format!(
-                "Avalanche recursive tier {} group preparation batch {}",
-                next_tier_index, batch_number
-            );
-            let group_count = recursive_group_seeds.len();
-            println!(
-                "Avalanche recursive tier {} for batch {}: source-samples {} group-size {} groups {} mode recursive-resampled-samples",
-                next_tier_index,
-                batch_number,
-                current_tier_samples.len(),
-                recursive_group_size,
-                group_count
-            );
-            let next_samples_with_counts = recursive_group_seeds
-                .into_par_iter()
-                .enumerate()
-                .map(|(group_index, seed)| {
-                    let mut local_rng = RngChoice::from_seed(rng_mode, seed);
-                    let source_sample_indices = select_recursive_tier_sample_group_indices(
-                        &current_tier_samples,
-                        recursive_group_size,
-                        &mut local_rng,
-                    );
-                    let prepared = prepare_done.fetch_add(1, Ordering::Relaxed) + 1;
-                    log_parallel_progress_every_interval(
-                        prepared,
-                        group_count as u64,
-                        &prepare_log_start,
-                        &prepare_next_log_at_ms,
-                        &prepare_progress_label,
-                        prepare_log_interval,
-                    );
-                    let evaluated_candidates = source_sample_indices.len();
-                    let sample = execute_recursive_avalanche_sample_from_indices(
-                        engine,
-                        &message_bits,
-                        &current_tier_samples,
-                        &source_sample_indices,
-                        next_tier_index,
-                        group_index,
-                    )?;
-                    let done = recursive_done.fetch_add(1, Ordering::Relaxed) + 1;
-                    log_parallel_progress_every_interval(
-                        done,
-                        group_count as u64,
-                        &recursive_log_start,
-                        &recursive_next_log_at_ms,
-                        &progress_label,
-                        recursive_log_interval,
-                    );
-                    Ok::<_, String>((sample, evaluated_candidates))
-                })
-                .collect::<Result<Vec<_>, _>>()
-                .map_err(|err| -> Box<dyn Error> { err.into() })?;
-            (
-                next_samples_with_counts,
-                "recursive-resampled-samples",
-                group_count,
-            )
-        } else {
-            let shuffled_sample_indices =
-                shuffle_recursive_tier_sample_indices(&current_tier_samples, &mut recursive_rng);
-            let group_count = shuffled_sample_indices.len().div_ceil(recursive_group_size);
-            println!(
-                "Avalanche recursive tier {} for batch {}: source-samples {} group-size {} groups {} mode recursive-samples",
-                next_tier_index,
-                batch_number,
-                current_tier_samples.len(),
-                recursive_group_size,
-                group_count
-            );
-            let next_samples_with_counts = shuffled_sample_indices
-                .par_chunks(recursive_group_size)
-                .enumerate()
-                .map(|(group_index, source_sample_indices)| {
-                    let evaluated_candidates = source_sample_indices.len();
-                    let sample = execute_recursive_avalanche_sample_from_indices(
-                        engine,
-                        &message_bits,
-                        &current_tier_samples,
-                        source_sample_indices,
-                        next_tier_index,
-                        group_index,
-                    )?;
-                    let done = recursive_done.fetch_add(1, Ordering::Relaxed) + 1;
-                    log_parallel_progress_every_interval(
-                        done,
-                        group_count as u64,
-                        &recursive_log_start,
-                        &recursive_next_log_at_ms,
-                        &progress_label,
-                        recursive_log_interval,
-                    );
-                    Ok::<_, String>((sample, evaluated_candidates))
-                })
-                .collect::<Result<Vec<_>, _>>()
-                .map_err(|err| -> Box<dyn Error> { err.into() })?;
-            (next_samples_with_counts, "recursive-samples", group_count)
-        };
-        reduced.evaluated_candidates += next_samples_with_counts
-            .iter()
-            .map(|(_, evaluated_candidates)| *evaluated_candidates)
-            .sum::<usize>();
-        let next_samples = next_samples_with_counts
-            .into_iter()
-            .map(|(sample, _)| sample)
-            .collect::<Vec<_>>();
+        let (next_samples, source_kind, group_count): (Vec<SelectedAvalancheSample>, &str, usize) =
+            if recursive_resample_count > 0 {
+                let recursive_group_seeds: Vec<u64> = (0..recursive_resample_count)
+                    .map(|_| recursive_rng.next_u64())
+                    .collect();
+                println!(
+                    "Avalanche recursive tier {} group preparation for batch {}: source-samples {} group-size {} target-groups {} mode recursive-resampled-samples",
+                    next_tier_index,
+                    batch_number,
+                    source_samples.len(),
+                    recursive_group_size,
+                    recursive_resample_count
+                );
+                let prepare_done = AtomicU64::new(0);
+                let prepare_log_start = Instant::now();
+                let prepare_log_interval = Duration::from_secs(5);
+                let prepare_next_log_at_ms = AtomicU64::new(
+                    prepare_log_interval.as_millis().min(u128::from(u64::MAX)) as u64,
+                );
+                let prepare_progress_label = format!(
+                    "Avalanche recursive tier {} group preparation batch {}",
+                    next_tier_index, batch_number
+                );
+                let group_count = recursive_group_seeds.len();
+                println!(
+                    "Avalanche recursive tier {} for batch {}: source-samples {} group-size {} groups {} mode recursive-resampled-samples",
+                    next_tier_index,
+                    batch_number,
+                    source_samples.len(),
+                    recursive_group_size,
+                    group_count
+                );
+                let next_samples = recursive_group_seeds
+                    .into_par_iter()
+                    .enumerate()
+                    .map(|(group_index, seed)| {
+                        let mut local_rng = RngChoice::from_seed(rng_mode, seed);
+                        let source_sample_indices = select_recursive_tier_sample_group_indices(
+                            &source_samples,
+                            recursive_group_size,
+                            &mut local_rng,
+                        );
+                        let prepared = prepare_done.fetch_add(1, Ordering::Relaxed) + 1;
+                        log_parallel_progress_every_interval(
+                            prepared,
+                            group_count as u64,
+                            &prepare_log_start,
+                            &prepare_next_log_at_ms,
+                            &prepare_progress_label,
+                            prepare_log_interval,
+                        );
+                        recursive_evaluated_candidates
+                            .fetch_add(source_sample_indices.len() as u64, Ordering::Relaxed);
+                        let sample = execute_recursive_avalanche_sample_from_indices(
+                            engine,
+                            &message_bits,
+                            &source_samples,
+                            &source_sample_indices,
+                            next_tier_index,
+                            group_index,
+                        )?;
+                        let done = recursive_done.fetch_add(1, Ordering::Relaxed) + 1;
+                        log_parallel_progress_every_interval(
+                            done,
+                            group_count as u64,
+                            &recursive_log_start,
+                            &recursive_next_log_at_ms,
+                            &progress_label,
+                            recursive_log_interval,
+                        );
+                        Ok::<_, String>(sample)
+                    })
+                    .collect::<Result<Vec<_>, _>>()
+                    .map_err(|err| -> Box<dyn Error> { err.into() })?;
+                (next_samples, "recursive-resampled-samples", group_count)
+            } else {
+                let shuffled_sample_indices =
+                    shuffle_recursive_tier_sample_indices(&source_samples, &mut recursive_rng);
+                let group_count = shuffled_sample_indices.len().div_ceil(recursive_group_size);
+                println!(
+                    "Avalanche recursive tier {} for batch {}: source-samples {} group-size {} groups {} mode recursive-samples",
+                    next_tier_index,
+                    batch_number,
+                    source_samples.len(),
+                    recursive_group_size,
+                    group_count
+                );
+                let next_samples = shuffled_sample_indices
+                    .par_chunks(recursive_group_size)
+                    .enumerate()
+                    .map(|(group_index, source_sample_indices)| {
+                        recursive_evaluated_candidates
+                            .fetch_add(source_sample_indices.len() as u64, Ordering::Relaxed);
+                        let sample = execute_recursive_avalanche_sample_from_indices(
+                            engine,
+                            &message_bits,
+                            &source_samples,
+                            source_sample_indices,
+                            next_tier_index,
+                            group_index,
+                        )?;
+                        let done = recursive_done.fetch_add(1, Ordering::Relaxed) + 1;
+                        log_parallel_progress_every_interval(
+                            done,
+                            group_count as u64,
+                            &recursive_log_start,
+                            &recursive_next_log_at_ms,
+                            &progress_label,
+                            recursive_log_interval,
+                        );
+                        Ok::<_, String>(sample)
+                    })
+                    .collect::<Result<Vec<_>, _>>()
+                    .map_err(|err| -> Box<dyn Error> { err.into() })?;
+                (next_samples, "recursive-samples", group_count)
+            };
+        reduced.evaluated_candidates +=
+            recursive_evaluated_candidates.load(Ordering::Relaxed) as usize;
+        drop(source_samples);
 
         if statistics_collection_enabled {
             reduced
@@ -4911,10 +4955,10 @@ fn run_sampled_avalanche_beam_search(
         tier_index = next_tier_index;
     }
 
-    reduced.final_tier_samples = current_tier_samples.clone();
-    for sample in current_tier_samples {
-        reduced.update_selected_sample(sample);
+    for sample in &current_tier_samples {
+        reduced.update_selected_sample_ref(sample);
     }
+    reduced.final_tier_samples = current_tier_samples;
     Ok(reduced)
 }
 
@@ -6265,7 +6309,8 @@ mod tests {
     }
 
     #[test]
-    fn test_selected_avalanche_sample_recursive_input_uses_bits_only() {
+    fn test_recursive_tier_bits_use_top_beam_when_enabled() {
+        let config = Config::default();
         let sample = SelectedAvalancheSample {
             sample_index: 1,
             tier_index: 2,
@@ -6279,15 +6324,39 @@ mod tests {
             top_beam_score: 0.0,
             top_beam_match_pct: None,
             best_match_pct: 75.0,
-            node: AvalancheNode::new(vec![true, false, true], vec![2.5, -1.0, 4.0]),
+            node: AvalancheNode::new(vec![false, false, false], vec![2.5, -1.0, 4.0]),
         };
 
-        let recursive_input = sample
-            .avalanche_node()
-            .expect("selected sample should convert to recursive avalanche input");
+        assert_eq!(
+            recursive_tier_bits(&sample, &config.engine),
+            &[true, false, true]
+        );
+    }
 
-        assert_eq!(recursive_input.message_bits_vec(), vec![true, false, true]);
-        assert_eq!(recursive_input.biases, vec![0.0, 0.0, 0.0]);
+    #[test]
+    fn test_recursive_tier_bits_use_majority_vote_when_top_beam_disabled() {
+        let mut config = Config::default();
+        config.engine.avalanche_use_top_beam = false;
+        let sample = SelectedAvalancheSample {
+            sample_index: 1,
+            tier_index: 2,
+            input_count: 2,
+            average_score_pct: 75.0,
+            beam_results: Vec::new(),
+            majority_vote_bits: vec![false, true, false],
+            majority_vote_match_pct: 75.0,
+            majority_vote_ones_match_pct: 100.0,
+            best_bits: vec![true, false, true],
+            top_beam_score: 0.0,
+            top_beam_match_pct: None,
+            best_match_pct: 75.0,
+            node: AvalancheNode::new(vec![true, true, true], vec![2.5, -1.0, 4.0]),
+        };
+
+        assert_eq!(
+            recursive_tier_bits(&sample, &config.engine),
+            &[false, true, false]
+        );
     }
 
     #[test]
@@ -6401,7 +6470,7 @@ mod tests {
     }
 
     #[test]
-    fn test_recursive_avalanche_sample_from_indices_votes_over_prior_tier_majority_bits() {
+    fn test_recursive_avalanche_sample_from_indices_uses_prior_tier_best_bits_when_enabled() {
         let mut config = Config::default();
         config.engine.avalanche_combination_majority_vote = true;
         config.engine.avalanche_beam_top_k = 1;
@@ -6413,7 +6482,7 @@ mod tests {
                 input_count: 1,
                 average_score_pct: 60.0,
                 beam_results: Vec::new(),
-                majority_vote_bits: vec![true, true, true],
+                majority_vote_bits: vec![false, false, false],
                 majority_vote_match_pct: 100.0,
                 majority_vote_ones_match_pct: 100.0,
                 best_bits: vec![true, true, true],
@@ -6428,10 +6497,63 @@ mod tests {
                 input_count: 1,
                 average_score_pct: 60.0,
                 beam_results: Vec::new(),
-                majority_vote_bits: vec![true, true, true],
+                majority_vote_bits: vec![false, false, false],
                 majority_vote_match_pct: 100.0,
                 majority_vote_ones_match_pct: 100.0,
                 best_bits: vec![true, true, true],
+                top_beam_score: 0.0,
+                top_beam_match_pct: None,
+                best_match_pct: 100.0,
+                node: AvalancheNode::new(vec![false, false, false], vec![0.0, 0.0, 0.0]),
+            },
+        ];
+
+        let recursive = execute_recursive_avalanche_sample_from_indices(
+            &config.engine,
+            &[true, true, true],
+            &source_samples,
+            &[1, 0],
+            2,
+            0,
+        )
+        .expect("recursive avalanche sample from indices should succeed");
+
+        assert_eq!(recursive.majority_vote_bits, vec![true, true, true]);
+    }
+
+    #[test]
+    fn test_recursive_avalanche_sample_from_indices_uses_prior_tier_majority_bits_when_disabled() {
+        let mut config = Config::default();
+        config.engine.avalanche_combination_majority_vote = true;
+        config.engine.avalanche_beam_top_k = 1;
+        config.engine.avalanche_use_top_beam = false;
+
+        let source_samples = vec![
+            SelectedAvalancheSample {
+                sample_index: 1,
+                tier_index: 1,
+                input_count: 1,
+                average_score_pct: 60.0,
+                beam_results: Vec::new(),
+                majority_vote_bits: vec![true, true, true],
+                majority_vote_match_pct: 100.0,
+                majority_vote_ones_match_pct: 100.0,
+                best_bits: vec![false, false, false],
+                top_beam_score: 0.0,
+                top_beam_match_pct: None,
+                best_match_pct: 100.0,
+                node: AvalancheNode::new(vec![false, false, false], vec![0.0, 0.0, 0.0]),
+            },
+            SelectedAvalancheSample {
+                sample_index: 2,
+                tier_index: 1,
+                input_count: 1,
+                average_score_pct: 60.0,
+                beam_results: Vec::new(),
+                majority_vote_bits: vec![true, true, true],
+                majority_vote_match_pct: 100.0,
+                majority_vote_ones_match_pct: 100.0,
+                best_bits: vec![false, false, false],
                 top_beam_score: 0.0,
                 top_beam_match_pct: None,
                 best_match_pct: 100.0,
