@@ -4292,6 +4292,22 @@ fn build_avalanche_tier_statistics(
     }
 }
 
+/// Removes original sampled `c^x`/`r` inputs from retained tier-one sample payloads before recursion.
+///
+/// # Parameters
+/// - `samples`: Retained sampled-avalanche records that may still own original tier-one inputs.
+///
+/// # Returns
+/// - `()`: This function returns nothing.
+///
+/// # Expected Output
+/// - Clears retained source-input payloads in place while preserving sample-level summary fields.
+fn compact_retained_avalanche_sample_inputs(samples: &mut [AvalancheCombinationSample]) {
+    for sample in samples {
+        sample.inputs.clear();
+    }
+}
+
 /// Executes one sampled avalanche combination with a caller-provided RNG.
 ///
 /// # Parameters
@@ -4735,6 +4751,13 @@ fn run_sampled_avalanche_beam_search(
         .iter_mut()
         .filter_map(|outcome| outcome.sample.take())
         .collect::<Vec<_>>();
+    let will_recurse = recursion_depth > 1 && current_tier_samples.len() > 1;
+    if will_recurse {
+        compact_retained_avalanche_sample_inputs(&mut reduced.retained_samples);
+    }
+    drop(base_outcomes);
+    drop(grouped_inputs);
+    drop(pruned_scored_inputs);
     if statistics_collection_enabled {
         reduced
             .tier_statistics
@@ -6227,6 +6250,55 @@ mod tests {
         assert!(result.retained_samples.is_empty());
         assert_eq!(result.final_tier_samples.len(), 2);
         assert!(result.selected_sample.is_some());
+    }
+
+    #[test]
+    fn test_run_sampled_avalanche_beam_search_compacts_retained_inputs_before_recursion() {
+        let mut config = Config::default();
+        config
+            .engine
+            .avalanche_combination_keep_all_samples_in_memory = true;
+        config.engine.avalanche_random_chacha20_inputs = true;
+        config.engine.avalanche_combination_samples = 4;
+        config.engine.avalanche_combination_size = 1;
+        config.engine.avalanche_combination_mixed_r_candidates = 0;
+        config.engine.avalanche_combination_recursion_depth = 2;
+        config.engine.avalanche_combination_recursive_group_size = 2;
+
+        let scored_inputs = (0..4usize)
+            .map(|index| ScoredAvalancheInput {
+                batch_candidate_index: index,
+                message_index: 0,
+                r: BigUint::from((index + 3) as u32),
+                x: BigUint::from(1u8),
+                score_match_pct: 80.0 - (index as f64 * 5.0),
+                message_bits: PackedBits::from_bools(&[index % 2 == 0, index < 2]),
+                detail: Some(ScoredAvalancheInputDetail {
+                    target_exponent: BigDecimal::from(2u8),
+                    hbc_ciphertext_r: BigUint::from((index + 10) as u32),
+                    candidate_decryption: BigUint::from((index + 20) as u32),
+                }),
+            })
+            .collect::<Vec<_>>();
+
+        let mut rng = RngChoice::from_seed(RngMode::Standard, 41);
+        let result = run_sampled_avalanche_beam_search(
+            &config.engine,
+            &BigUint::from(1u8),
+            &scored_inputs,
+            1,
+            &mut rng,
+        )
+        .expect("recursive sampled avalanche with retained samples should succeed");
+
+        assert_eq!(result.retained_samples.len(), 4);
+        assert!(
+            result
+                .retained_samples
+                .iter()
+                .all(|sample| sample.inputs.is_empty())
+        );
+        assert_eq!(result.final_tier_samples.len(), 2);
     }
 
     #[test]
