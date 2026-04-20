@@ -289,6 +289,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         avalanche_combination_keep_all_samples_in_memory: config
             .engine
             .avalanche_combination_keep_all_samples_in_memory,
+        avalanche_statistics_collection: config.engine.avalanche_statistics_collection,
         avalanche_random_chacha20_inputs: config.engine.avalanche_random_chacha20_inputs,
         bits_decrypt: args.bits_decrypt,
         r_candidate_target_exponent: args

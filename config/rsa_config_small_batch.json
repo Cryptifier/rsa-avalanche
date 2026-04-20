@@ -82,8 +82,8 @@
     "avalanche_combination_size": 150, // Number of scored items taken in each sampled combination.
     "avalanche_combination_pool_size": 100000, // Legacy compatibility field; runtime sampling now always uses the full batch-sized pool.
     "avalanche_combination_recursion_depth": 2, // Run one recursive Avalanche tier on top of the sampled-input tier.
-    "avalanche_combination_recursive_group_size": 150, // Number of prior-tier sample outputs grouped into each recursive Avalanche call.
-    "avalanche_combination_recursive_resample_count": 500000, // 0 preserves one-pass regrouping; set >0 to resample prior-tier outputs to a target count.
+    "avalanche_combination_recursive_group_size": 20, // Number of prior-tier sample outputs grouped into each recursive Avalanche call.
+    "avalanche_combination_recursive_resample_count": 8000000, // 0 preserves one-pass regrouping; set >0 to resample prior-tier outputs to a target count.
     // Hamming-distance pruning keeps a central percentile band of scored items
     // before sampling, then optionally adds some tail outliers back in.
     "avalanche_combination_hamming_distance_prune": true,
@@ -94,6 +94,7 @@
     "avalanche_combination_majority_vote": true, // Use per-bit majority-vote probabilities from each sampled combination.
     "avalanche_combination_sample_smoothing": true, // Apply Jeffreys smoothing to the sampled majority-vote probabilities before beam search.
     "avalanche_combination_majority_vote_print": true, // Print a separate sampled-combination majority-vote summary alongside the beam output.
+    "avalanche_statistics_collection": false, // Collect recursive Avalanche tier statistics and other heavy analytics payloads.
     // Allow batches to mix different r values while still perturbing the
     // ciphertext for each sampled message variant.
     "same_r_batch": false,

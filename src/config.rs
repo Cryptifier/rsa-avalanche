@@ -145,6 +145,9 @@ pub struct EngineConfig {
     /// Whether sampled avalanche retains every evaluated sample in memory for downstream consumers.
     #[serde(default = "default_avalanche_combination_keep_all_samples_in_memory")]
     pub avalanche_combination_keep_all_samples_in_memory: bool,
+    /// Whether avalanche runs collect per-level and per-sample statistics for analytics output.
+    #[serde(default = "default_avalanche_statistics_collection")]
+    pub avalanche_statistics_collection: bool,
     /// Whether sampled avalanche bypasses mixed-r combinations and samples raw scored inputs with ChaCha20.
     #[serde(default = "default_avalanche_random_chacha20_inputs")]
     pub avalanche_random_chacha20_inputs: bool,
@@ -318,6 +321,7 @@ impl Default for EngineConfig {
                 default_avalanche_combination_majority_vote_print(),
             avalanche_combination_keep_all_samples_in_memory:
                 default_avalanche_combination_keep_all_samples_in_memory(),
+            avalanche_statistics_collection: default_avalanche_statistics_collection(),
             avalanche_random_chacha20_inputs: default_avalanche_random_chacha20_inputs(),
             same_r_batch: default_same_r_batch(),
             ciphertext_modify: default_ciphertext_modify(),
@@ -1047,6 +1051,20 @@ fn default_avalanche_combination_keep_all_samples_in_memory() -> bool {
     false
 }
 
+/// Returns the default avalanche statistics collection mode.
+///
+/// # Parameters
+/// - None.
+///
+/// # Returns
+/// - `bool`: `true` so avalanche analytics are collected unless explicitly disabled.
+///
+/// # Expected Output
+/// - Returns the default configuration value; no side effects.
+fn default_avalanche_statistics_collection() -> bool {
+    true
+}
+
 /// Default flag for using the same r candidate across a batch.
 ///
 /// # Parameters
@@ -1364,6 +1382,7 @@ mod tests {
     fn test_engine_config_defaults_disable_avalanche_hamming_distance_pruning() {
         let engine = EngineConfig::default();
 
+        assert!(engine.avalanche_statistics_collection);
         assert_eq!(engine.avalanche_combination_recursive_resample_count, 0);
         assert!(!engine.avalanche_combination_hamming_distance_prune);
         assert_eq!(
