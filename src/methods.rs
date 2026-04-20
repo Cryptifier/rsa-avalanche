@@ -3,7 +3,7 @@
 /// Copyright (c) 2025 Nicholas LaRoche <nlaroche@cryptifier.dev>
 use bigdecimal::BigDecimal;
 use std::{
-    collections::{BTreeMap, HashSet},
+    collections::{BTreeMap, HashMap, HashSet},
     error::Error,
     sync::{
         Arc, Mutex,
@@ -3637,22 +3637,30 @@ fn format_bits_hex_le(bits: &[bool]) -> String {
 /// # Parameters
 /// - `pool_size`: Number of candidate indices available.
 /// - `sample_size`: Number of indices to return.
-/// - `rng`: Random number generator used for the partial shuffle.
+/// - `rng`: Random number generator used for the partial shuffle state.
 ///
 /// # Returns
 /// - `Vec<usize>`: Unique sampled indices in shuffled order.
 ///
 /// # Expected Output
-/// - Returns sampled indices; no stdout/stderr output.
+/// - Returns sampled indices without allocating a full `0..pool_size` index vector; no stdout/stderr output.
 fn sample_unique_indices(pool_size: usize, sample_size: usize, rng: &mut RngChoice) -> Vec<usize> {
-    let mut indices: Vec<usize> = (0..pool_size).collect();
-    for offset in 0..sample_size.min(pool_size) {
+    let sample_len = sample_size.min(pool_size);
+    let mut swaps = HashMap::with_capacity(sample_len.saturating_mul(2));
+    let mut sampled = Vec::with_capacity(sample_len);
+    for offset in 0..sample_len {
         let remaining = pool_size - offset;
         let swap_offset = (rng.next_u64() as usize) % remaining;
-        indices.swap(offset, offset + swap_offset);
+        let swap_index = offset + swap_offset;
+        let chosen_index = *swaps.get(&swap_index).unwrap_or(&swap_index);
+        let offset_index = *swaps.get(&offset).unwrap_or(&offset);
+        sampled.push(chosen_index);
+        if swap_index != offset {
+            swaps.insert(swap_index, offset_index);
+        }
+        swaps.remove(&offset);
     }
-    indices.truncate(sample_size.min(pool_size));
-    indices
+    sampled
 }
 
 /// Selects raw scored avalanche inputs directly from the flattened pool.
@@ -3701,10 +3709,13 @@ fn shuffle_recursive_tier_samples(
         return samples.to_vec();
     }
 
-    sample_unique_indices(samples.len(), samples.len(), rng)
-        .into_iter()
-        .filter_map(|index| samples.get(index).cloned())
-        .collect()
+    let mut shuffled = samples.to_vec();
+    for offset in 0..(shuffled.len() - 1) {
+        let remaining = shuffled.len() - offset;
+        let swap_offset = (rng.next_u64() as usize) % remaining;
+        shuffled.swap(offset, offset + swap_offset);
+    }
+    shuffled
 }
 
 /// Selects one recursive-tier sample group from prior-tier finalized samples.
@@ -4693,74 +4704,6 @@ fn run_sampled_avalanche_beam_search(
         let next_tier_index = tier_index + 1;
         let recursive_seed = rng.next_u64();
         let mut recursive_rng = RngChoice::from_seed(rng_mode, recursive_seed);
-        let (recursive_groups, source_kind): (Vec<Vec<SelectedAvalancheSample>>, &str) =
-            if recursive_resample_count > 0 {
-                let recursive_group_seeds: Vec<u64> = (0..recursive_resample_count)
-                    .map(|_| recursive_rng.next_u64())
-                    .collect();
-                println!(
-                    "Avalanche recursive tier {} group preparation for batch {}: source-samples {} group-size {} target-groups {} mode recursive-resampled-samples",
-                    next_tier_index,
-                    batch_number,
-                    current_tier_samples.len(),
-                    recursive_group_size,
-                    recursive_resample_count
-                );
-                let prepare_done = AtomicU64::new(0);
-                let prepare_log_start = Instant::now();
-                let prepare_log_interval = Duration::from_secs(5);
-                let prepare_next_log_at_ms = AtomicU64::new(
-                    prepare_log_interval.as_millis().min(u128::from(u64::MAX)) as u64,
-                );
-                let prepare_progress_label = format!(
-                    "Avalanche recursive tier {} group preparation batch {}",
-                    next_tier_index, batch_number
-                );
-                let recursive_groups = recursive_group_seeds
-                    .into_par_iter()
-                    .map(|seed| {
-                        let mut local_rng = RngChoice::from_seed(rng_mode, seed);
-                        let group = select_recursive_tier_sample_group(
-                            &current_tier_samples,
-                            recursive_group_size,
-                            &mut local_rng,
-                        );
-                        let done = prepare_done.fetch_add(1, Ordering::Relaxed) + 1;
-                        log_parallel_progress_every_interval(
-                            done,
-                            recursive_resample_count as u64,
-                            &prepare_log_start,
-                            &prepare_next_log_at_ms,
-                            &prepare_progress_label,
-                            prepare_log_interval,
-                        );
-                        group
-                    })
-                    .filter(|group| !group.is_empty())
-                    .collect();
-                (recursive_groups, "recursive-resampled-samples")
-            } else {
-                let shuffled_samples =
-                    shuffle_recursive_tier_samples(&current_tier_samples, &mut recursive_rng);
-                (
-                    shuffled_samples
-                        .chunks(recursive_group_size)
-                        .map(|chunk| chunk.to_vec())
-                        .collect(),
-                    "recursive-samples",
-                )
-            };
-        let group_count = recursive_groups.len();
-        println!(
-            "Avalanche recursive tier {} for batch {}: source-samples {} group-size {} groups {} mode {}",
-            next_tier_index,
-            batch_number,
-            current_tier_samples.len(),
-            recursive_group_size,
-            group_count,
-            source_kind
-        );
-
         let recursive_done = AtomicU64::new(0);
         let recursive_log_start = Instant::now();
         let recursive_log_interval = Duration::from_secs(5);
@@ -4770,31 +4713,124 @@ fn run_sampled_avalanche_beam_search(
             "Avalanche recursive tier {} batch {}",
             next_tier_index, batch_number
         );
-        let next_samples_with_counts = recursive_groups
-            .into_par_iter()
-            .enumerate()
-            .map(|(group_index, chunk)| {
-                let evaluated_candidates = chunk.len();
-                let sample = execute_recursive_avalanche_sample(
-                    engine,
-                    &message_bits,
-                    &chunk,
-                    next_tier_index,
-                    group_index,
-                )?;
-                let done = recursive_done.fetch_add(1, Ordering::Relaxed) + 1;
-                log_parallel_progress_every_interval(
-                    done,
-                    group_count as u64,
-                    &recursive_log_start,
-                    &recursive_next_log_at_ms,
-                    &progress_label,
-                    recursive_log_interval,
-                );
-                Ok::<_, String>((sample, evaluated_candidates))
-            })
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(|err| -> Box<dyn Error> { err.into() })?;
+        let (next_samples_with_counts, source_kind, group_count): (
+            Vec<(SelectedAvalancheSample, usize)>,
+            &str,
+            usize,
+        ) = if recursive_resample_count > 0 {
+            let recursive_group_seeds: Vec<u64> = (0..recursive_resample_count)
+                .map(|_| recursive_rng.next_u64())
+                .collect();
+            println!(
+                "Avalanche recursive tier {} group preparation for batch {}: source-samples {} group-size {} target-groups {} mode recursive-resampled-samples",
+                next_tier_index,
+                batch_number,
+                current_tier_samples.len(),
+                recursive_group_size,
+                recursive_resample_count
+            );
+            let prepare_done = AtomicU64::new(0);
+            let prepare_log_start = Instant::now();
+            let prepare_log_interval = Duration::from_secs(5);
+            let prepare_next_log_at_ms =
+                AtomicU64::new(prepare_log_interval.as_millis().min(u128::from(u64::MAX)) as u64);
+            let prepare_progress_label = format!(
+                "Avalanche recursive tier {} group preparation batch {}",
+                next_tier_index, batch_number
+            );
+            let group_count = recursive_group_seeds.len();
+            println!(
+                "Avalanche recursive tier {} for batch {}: source-samples {} group-size {} groups {} mode recursive-resampled-samples",
+                next_tier_index,
+                batch_number,
+                current_tier_samples.len(),
+                recursive_group_size,
+                group_count
+            );
+            let next_samples_with_counts = recursive_group_seeds
+                .into_par_iter()
+                .enumerate()
+                .map(|(group_index, seed)| {
+                    let mut local_rng = RngChoice::from_seed(rng_mode, seed);
+                    let chunk = select_recursive_tier_sample_group(
+                        &current_tier_samples,
+                        recursive_group_size,
+                        &mut local_rng,
+                    );
+                    let prepared = prepare_done.fetch_add(1, Ordering::Relaxed) + 1;
+                    log_parallel_progress_every_interval(
+                        prepared,
+                        group_count as u64,
+                        &prepare_log_start,
+                        &prepare_next_log_at_ms,
+                        &prepare_progress_label,
+                        prepare_log_interval,
+                    );
+                    let evaluated_candidates = chunk.len();
+                    let sample = execute_recursive_avalanche_sample(
+                        engine,
+                        &message_bits,
+                        &chunk,
+                        next_tier_index,
+                        group_index,
+                    )?;
+                    let done = recursive_done.fetch_add(1, Ordering::Relaxed) + 1;
+                    log_parallel_progress_every_interval(
+                        done,
+                        group_count as u64,
+                        &recursive_log_start,
+                        &recursive_next_log_at_ms,
+                        &progress_label,
+                        recursive_log_interval,
+                    );
+                    Ok::<_, String>((sample, evaluated_candidates))
+                })
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|err| -> Box<dyn Error> { err.into() })?;
+            (
+                next_samples_with_counts,
+                "recursive-resampled-samples",
+                group_count,
+            )
+        } else {
+            let shuffled_samples =
+                shuffle_recursive_tier_samples(&current_tier_samples, &mut recursive_rng);
+            let group_count = shuffled_samples.len().div_ceil(recursive_group_size);
+            println!(
+                "Avalanche recursive tier {} for batch {}: source-samples {} group-size {} groups {} mode recursive-samples",
+                next_tier_index,
+                batch_number,
+                current_tier_samples.len(),
+                recursive_group_size,
+                group_count
+            );
+            let next_samples_with_counts = shuffled_samples
+                .par_chunks(recursive_group_size)
+                .enumerate()
+                .map(|(group_index, chunk)| {
+                    let evaluated_candidates = chunk.len();
+                    let sample = execute_recursive_avalanche_sample(
+                        engine,
+                        &message_bits,
+                        chunk,
+                        next_tier_index,
+                        group_index,
+                    )?;
+                    let done = recursive_done.fetch_add(1, Ordering::Relaxed) + 1;
+                    log_parallel_progress_every_interval(
+                        done,
+                        group_count as u64,
+                        &recursive_log_start,
+                        &recursive_next_log_at_ms,
+                        &progress_label,
+                        recursive_log_interval,
+                    );
+                    Ok::<_, String>((sample, evaluated_candidates))
+                })
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|err| -> Box<dyn Error> { err.into() })?;
+            (next_samples_with_counts, "recursive-samples", group_count)
+        };
         reduced.evaluated_candidates += next_samples_with_counts
             .iter()
             .map(|(_, evaluated_candidates)| *evaluated_candidates)
@@ -4812,6 +4848,7 @@ fn run_sampled_avalanche_beam_search(
                 source_kind,
                 &next_samples,
             ));
+        debug_assert_eq!(next_samples.len(), group_count);
         current_tier_samples = next_samples;
         tier_index = next_tier_index;
     }
