@@ -4193,6 +4193,7 @@ fn finalize_avalanche_sample(
         .unwrap_or(0.0)
         .max(majority_vote_match_pct);
     let sample_index = sample_index + 1;
+    let stored_node = compact_stored_avalanche_node(&avalanche_search.node);
 
     Ok(ComputedAvalancheSample {
         sample: SelectedAvalancheSample {
@@ -4208,7 +4209,7 @@ fn finalize_avalanche_sample(
             top_beam_score,
             top_beam_match_pct,
             best_match_pct,
-            node: avalanche_search.node.clone(),
+            node: stored_node,
         },
         majority_vote_ones_count: majority_distribution.ones_count,
         majority_vote_zeros_count: majority_distribution.zeros_count,
@@ -4256,6 +4257,23 @@ fn build_avalanche_tier_statistics(
             })
             .collect(),
     }
+}
+
+/// Strips persisted bias vectors from a finalized Avalanche node while preserving its bits.
+///
+/// # Parameters
+/// - `node`: Finalized Avalanche node whose message bits should be retained.
+///
+/// # Returns
+/// - `AvalancheNode`: Node containing the same message bits with zeroed stored biases.
+///
+/// # Expected Output
+/// - Returns a compact node suitable for recursive-tier reuse; no stdout/stderr output.
+fn compact_stored_avalanche_node(node: &AvalancheNode) -> AvalancheNode {
+    AvalancheNode::from_packed_bits(
+        PackedBits::from_bools(&node.message_bits_vec()),
+        vec![0.0; node.bit_len()],
+    )
 }
 
 /// Removes original sampled `c^x`/`r` inputs from retained tier-one sample payloads before recursion.
@@ -6270,6 +6288,54 @@ mod tests {
 
         assert_eq!(recursive_input.message_bits_vec(), vec![true, false, true]);
         assert_eq!(recursive_input.biases, vec![0.0, 0.0, 0.0]);
+    }
+
+    #[test]
+    fn test_run_sampled_avalanche_beam_search_discards_stored_sample_biases() {
+        let mut config = Config::default();
+        config.engine.avalanche_random_chacha20_inputs = true;
+        config.engine.avalanche_combination_samples = 1;
+        config.engine.avalanche_combination_size = 2;
+        config.engine.avalanche_combination_mixed_r_candidates = 0;
+
+        let scored_inputs = vec![
+            ScoredAvalancheInput {
+                batch_candidate_index: 0,
+                message_index: 0,
+                r: BigUint::from(3u8),
+                x: BigUint::from(1u8),
+                score_match_pct: 75.0,
+                message_bits: PackedBits::from_bools(&[true, false]),
+                detail: None,
+            },
+            ScoredAvalancheInput {
+                batch_candidate_index: 1,
+                message_index: 0,
+                r: BigUint::from(5u8),
+                x: BigUint::from(3u8),
+                score_match_pct: 65.0,
+                message_bits: PackedBits::from_bools(&[false, true]),
+                detail: None,
+            },
+        ];
+
+        let mut rng = RngChoice::from_seed(RngMode::Standard, 7);
+        let result = run_sampled_avalanche_beam_search(
+            &config.engine,
+            &BigUint::from(1u8),
+            &scored_inputs,
+            1,
+            &mut rng,
+        )
+        .expect("sampled avalanche should succeed");
+        let selected_sample = result
+            .selected_sample
+            .expect("sampled avalanche should retain a selected sample");
+
+        assert_eq!(
+            selected_sample.node.biases,
+            vec![0.0; selected_sample.node.bit_len()]
+        );
     }
 
     #[test]
