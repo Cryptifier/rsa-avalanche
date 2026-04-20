@@ -2089,35 +2089,10 @@ fn run_avalanche_search(
     let beam_bit_one_threshold = engine.beam_bit_one_threshold;
     let avalanche_beam_top_k = engine.avalanche_beam_top_k.max(1);
     let avalanche_probability_spread_exponent = engine.avalanche_probability_spread_exponent;
-    let raw_bias_line = avalanche_result
-        .biases
-        .iter()
-        .map(|bias| format_beam_float(*bias, BEAM_SCORE_DECIMALS))
-        .collect::<Vec<_>>()
-        .join(" ");
-    println!("Avalanche beam raw biases (lsb0 order): {}", raw_bias_line);
     let normalized_biases = normalize_avalanche_biases(&avalanche_result.biases);
-    let normalized_bias_line = normalized_biases
-        .iter()
-        .map(|bias| format_beam_float(*bias, BEAM_SCORE_DECIMALS))
-        .collect::<Vec<_>>()
-        .join(" ");
-    println!(
-        "Avalanche beam normalized probabilities (lsb0 order): {}",
-        normalized_bias_line
-    );
     let beam_probabilities = spread_normalized_avalanche_biases(
         &normalized_biases,
         avalanche_probability_spread_exponent,
-    );
-    let beam_probability_line = beam_probabilities
-        .iter()
-        .map(|bias| format_beam_float(*bias, BEAM_SCORE_DECIMALS))
-        .collect::<Vec<_>>()
-        .join(" ");
-    println!(
-        "Avalanche beam search probabilities (lsb0 order): {}",
-        beam_probability_line
     );
     println!(
         "Avalanche beam bias diagnostics: raw_len {} bit_width {} raw_last {}",
@@ -2134,15 +2109,6 @@ fn run_avalanche_search(
         format_beam_float(beam_bit_one_threshold, BEAM_SCORE_DECIMALS),
         format_beam_float(avalanche_probability_spread_exponent, BEAM_SCORE_DECIMALS),
     );
-    if !avalanche_search.level_similarity_pct.is_empty() {
-        let similarity_line = avalanche_search
-            .level_similarity_pct
-            .iter()
-            .map(|pct| format_beam_float(*pct, BEAM_PCT_DECIMALS))
-            .collect::<Vec<_>>()
-            .join(" ");
-        println!("Avalanche similarity per level (%): {}", similarity_line);
-    }
     let beam_result = beam_search_top_k_with_progress(
         vec![Vec::new()],
         avalanche_beam_top_k,
@@ -5333,19 +5299,6 @@ fn run_r_candidate_accuracy_batches(
                     tier_index: selected_sample.tier_index,
                 });
             }
-
-            if !sampled_avalanche_result.final_tier_samples.is_empty() {
-                println!(
-                    "Avalanche batch {} top match percentages: [{}]",
-                    batch_number,
-                    sampled_avalanche_result
-                        .final_tier_samples
-                        .iter()
-                        .map(|sample| format_beam_float(sample.best_match_pct, BEAM_PCT_DECIMALS))
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                );
-            }
         } else {
             println!(
                 "Accuracy batch {} produced no valid avalanche samples",
@@ -5462,14 +5415,6 @@ fn run_r_candidate_accuracy_batches(
                     println!("Avalanche majority vote results: N/A");
                 }
             }
-            println!(
-                "Avalanche batch top match percentages: [{}]",
-                batch_top_match_percentages
-                    .iter()
-                    .map(|value| format_beam_float(*value, BEAM_PCT_DECIMALS))
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            );
             if let Some(ref max) = cx_run_max {
                 println!(
                     "Avalanche c^x run max: match {}% batch {} x {} r {}",

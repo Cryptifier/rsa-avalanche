@@ -728,35 +728,10 @@ fn run_avalanche_beam_search(
         search_avalanche_tree_with_progress(avalanche_nodes, "Avalanche tree reduction")?;
     let beam_bit_one_threshold = engine.beam_bit_one_threshold;
     let avalanche_probability_spread_exponent = engine.avalanche_probability_spread_exponent;
-    let raw_bias_line = avalanche_result
-        .biases
-        .iter()
-        .map(|bias| format_beam_float(*bias, BEAM_SCORE_DECIMALS))
-        .collect::<Vec<_>>()
-        .join(" ");
-    println!("Avalanche beam raw biases (lsb0 order): {}", raw_bias_line);
     let normalized_biases = normalize_avalanche_biases(&avalanche_result.biases);
-    let normalized_bias_line = normalized_biases
-        .iter()
-        .map(|bias| format_beam_float(*bias, BEAM_SCORE_DECIMALS))
-        .collect::<Vec<_>>()
-        .join(" ");
-    println!(
-        "Avalanche beam normalized probabilities (lsb0 order): {}",
-        normalized_bias_line
-    );
     let beam_probabilities = spread_normalized_avalanche_biases(
         &normalized_biases,
         avalanche_probability_spread_exponent,
-    );
-    let beam_probability_line = beam_probabilities
-        .iter()
-        .map(|bias| format_beam_float(*bias, BEAM_SCORE_DECIMALS))
-        .collect::<Vec<_>>()
-        .join(" ");
-    println!(
-        "Avalanche beam search probabilities (lsb0 order): {}",
-        beam_probability_line
     );
     println!(
         "Avalanche beam bias diagnostics: raw_len {} bit_width {} raw_last {}",
