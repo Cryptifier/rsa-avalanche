@@ -8,83 +8,85 @@ The problem addressed here is partial recovery of an RSA-encrypted message when 
 
 Standard RSA is
 
-$$
+```math
 N = pq,
-\qquad
+\quad
 \varphi(N) = (p-1)(q-1),
-\qquad
+\quad
 c = m^e \bmod N.
-$$
+```
 
 The private exponent satisfies
 
-$$
+```math
 d \equiv e^{-1} \pmod{\varphi(N)},
-\qquad
+\quad
 m = c^d \bmod N.
-$$
+```
 
-The method introduces speculative candidate moduli \(r\) that are easier to analyze than \(N\). A convenient model is
+The method introduces speculative candidate moduli $r$ that are easier to analyze than $N$. A convenient model is
 
-$$
+```math
 r_j = \prod_{i=1}^{k_j} p_{j,i},
-\qquad
+\quad
 r_j \approx N^{\alpha_j},
-$$
+```
 
-where each \(r_j\) is built from several prime factors and retargeted so that it represents a related modulus rather than the original RSA modulus itself.
+where each $r_j$ is built from several prime factors and retargeted so that it represents a related modulus rather than the original RSA modulus itself.
 
-For each candidate modulus, the ciphertext may also be perturbed by an odd exponent \(x\):
+For each candidate modulus, the ciphertext may also be perturbed by an odd exponent $x$:
 
-$$
+```math
 c_x = c^x \bmod N,
-\qquad
+\quad
 d_{r,x} \equiv (ex)^{-1} \pmod{\varphi(r)}.
-$$
+```
 
 The candidate-space decryption path is
 
-$$
-\widetilde{c}_{r,x} = \operatorname{HBC}(c_x, r, N),
-$$
+```math
+\widetilde{c}_{r,x} = HBC(c_x, r, N),
+```
 
-$$
+```math
 \widehat{m}_{r,x}
 =
-\operatorname{HBC}\!\left(\widetilde{c}_{r,x}^{\,d_{r,x}} \bmod r,\; N,\; r\right)
+HBC(\widetilde{c}_{r,x}^{d_{r,x}} \bmod r, N, r)
 \bmod N.
-$$
+```
 
-Each \(\widehat{m}_{r,x}\) is a noisy plaintext estimate. If the plaintext width is \(W\) bits, its quality can be expressed as
+Each $\widehat{m}_{r,x}$ is a noisy plaintext estimate. If the plaintext width is $W$ bits, its quality can be expressed as
 
-$$
+```math
 \mathrm{match}(\widehat{m}_{r,x}, m)
 =
-\frac{1}{W}\sum_{i=0}^{W-1}\mathbf{1}\!\left[\widehat{m}_{r,x,i}=m_i\right].
-$$
+\frac{\mathrm{matching\ bits}}{W}.
+```
 
-## r-Candidates And \(c^x\) Candidates
+## r-Candidates And c^x Candidates
 
-- **\(r\)-candidates** are alternate moduli constructed as easier-to-factor products of primes that approximate fractional-power retargetings of the original modulus. Each \(r\)-candidate yields a different biased plaintext estimate and acts like a separate weak oracle on the message bits.
-- **\(c^x\) candidates** are ciphertext variants formed by raising the original ciphertext to odd exponents \(x\), subject to the requirement that \(ex\) remain invertible modulo \(\varphi(r)\) for the candidate being tested. These variants generate additional decryptable views from the same original ciphertext and enlarge the pool of noisy message estimates available to the method.
+- **$r$-candidates** are alternate moduli constructed as easier-to-factor products of primes that approximate fractional-power retargetings of the original modulus. Each $r$-candidate yields a different biased plaintext estimate and acts like a separate weak oracle on the message bits.
+- **$c^x$ candidates** are ciphertext variants formed by raising the original ciphertext to odd exponents $x$, subject to the requirement that $ex$ remain invertible modulo $\varphi(r)$ for the candidate being tested. These variants generate additional decryptable views from the same original ciphertext and enlarge the pool of noisy message estimates available to the method.
 
 ## Avalanche Method
 
-The Avalanche method takes many scored plaintext candidates, pairs the most similar bit-vectors, and recursively merges them so that stable agreements survive while inconsistent bits lose influence. The resulting per-bit bias pattern is converted into probabilities and then ranked with beam search, allowing repeated weak leaks from multiple \(r\)-candidates and \(c^x\) candidates to combine into a stronger message estimate. In this work, Avalanche is the central aggregation step that turns distributed statistical leakage into practical plaintext recovery.
+The Avalanche method takes many scored plaintext candidates, pairs the most similar bit-vectors, and recursively merges them so that stable agreements survive while inconsistent bits lose influence. The resulting per-bit bias pattern is converted into probabilities and then ranked with beam search, allowing repeated weak leaks from multiple $r$-candidates and $c^x$ candidates to combine into a stronger message estimate. In this work, Avalanche is the central aggregation step that turns distributed statistical leakage into practical plaintext recovery.
 
 ## PGP Envelope Format And AES-128 Focus
 
 For an RSA-encrypted OpenPGP session-key envelope, the payload of interest is the encoded session-key block rather than arbitrary user data. A compact model is
 
-$$
-M_{\text{PGP}} = \text{alg\_id} \,\|\, K_{\text{AES128}} \,\|\, \text{checksum},
-$$
+```math
+M_{PGP} = a || K_{AES128} || s.
+```
 
 embedded inside an RSA PKCS#1 v1.5 encryption block
 
-$$
-EM = 0x00 \,\|\, 0x02 \,\|\, PS \,\|\, 0x00 \,\|\, M_{\text{PGP}}.
-$$
+```math
+EM = 0x00 || 0x02 || PS || 0x00 || M_{PGP}.
+```
+
+where $a$ is the symmetric algorithm identifier, $K_{AES128}$ is the 16-byte AES-128 session key, and $s$ is the checksum field.
 
 | Envelope field | Typical content | Why it matters |
 | --- | --- | --- |
@@ -101,7 +103,7 @@ The practical focus is the AES-128 session key inside this envelope. Even when t
 
 1. Up to **74% retrieval** of the RSA-encrypted message has been achieved, with the current PGP-envelope setting reporting roughly **70-74%** message recovery.
 2. The method is **independent of the RSA modulus size** in the sense that it relies on candidate-modulus leakage aggregation and Avalanche reduction rather than a modulus-size-specific trick.
-3. The method is centered on **Avalanche-based aggregation** of many weak plaintext estimates obtained from \(r\)-candidates and \(c^x\) candidates.
+3. The method is centered on **Avalanche-based aggregation** of many weak plaintext estimates obtained from $r$-candidates and $c^x$ candidates.
 
 ## Contact
 
