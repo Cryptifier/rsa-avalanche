@@ -2,6 +2,11 @@
 
 Weekly changelog derived from git history.
 
+## 2026-W16 (2026-04-13 to 2026-04-19)
+- 2026-04-19: Add modular Avalanche builder and shared input interface for recursive tier execution.
+- 2026-04-19: Add recursive sampled-Avalanche config fields, per-tier session statistics, and viewer heatmap tab.
+- 2026-04-19: Update batch beam runner to print every batch-level beam and majority result, track true match percentages, and derive PASS/FAIL/UNKNOWN from a configurable threshold.
+
 ## 2026-W09 (2026-02-23 to 2026-03-01)
 - 2026-03-01: Add majority-vote prediction row to bit similarity view
 - 2026-03-01: Add bit-true probability timeline tab

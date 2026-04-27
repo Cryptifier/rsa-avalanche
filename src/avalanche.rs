@@ -1,11 +1,7 @@
 use rayon::prelude::*;
+use std::sync::Arc;
 
-use crate::helpers::hamming_distance_bits;
-#[cfg(any(
-    all(feature = "aarch64-hamming-accel", target_arch = "aarch64"),
-    all(feature = "x86-hamming-accel", target_arch = "x86_64"),
-))]
-use crate::helpers::{hamming_distance_packed_bytes, pack_bits_to_bytes};
+use crate::helpers::{PackedBits, hamming_distance_packed_bytes, pack_bits_to_bytes};
 
 /// Errors returned by avalanche tree search.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -30,8 +26,118 @@ impl std::error::Error for AvalancheError {}
 /// Container for avalanche tree state.
 #[derive(Debug, Clone)]
 pub struct AvalancheNode {
+    /// Per-bit accumulated bias values.
     pub biases: Vec<f64>,
-    pub message_bits: Vec<bool>,
+    packed_message_bits: PackedBits,
+}
+
+impl AvalancheNode {
+    /// Creates an avalanche node and caches its packed bit representation.
+    ///
+    /// # Parameters
+    /// - `message_bits`: Candidate message bits in little-endian order.
+    /// - `biases`: Per-bit bias values aligned with `message_bits`.
+    ///
+    /// # Returns
+    /// - `AvalancheNode`: Node with cached packed bytes for repeated Hamming-distance scans.
+    ///
+    /// # Expected Output
+    /// - Returns the constructed node; no stdout/stderr output.
+    pub fn new(message_bits: Vec<bool>, biases: Vec<f64>) -> Self {
+        let packed_message_bits = PackedBits::from_bools(&message_bits);
+        Self {
+            biases,
+            packed_message_bits,
+        }
+    }
+
+    /// Creates an avalanche node from pre-packed little-endian bit storage.
+    ///
+    /// # Parameters
+    /// - `packed_message_bits`: Packed message bits with the desired logical width.
+    /// - `biases`: Per-bit bias values aligned with the packed bit width.
+    ///
+    /// # Returns
+    /// - `AvalancheNode`: Node with cached packed bytes and aligned bias values.
+    ///
+    /// # Expected Output
+    /// - Returns the constructed node; no stdout/stderr output.
+    pub(crate) fn from_packed_bits(packed_message_bits: PackedBits, biases: Vec<f64>) -> Self {
+        Self {
+            biases,
+            packed_message_bits,
+        }
+    }
+
+    /// Returns the cached packed message bits.
+    ///
+    /// # Parameters
+    /// - None.
+    ///
+    /// # Returns
+    /// - `&[u8]`: Cached little-endian packed bit bytes.
+    ///
+    /// # Expected Output
+    /// - Returns the cached slice; no stdout/stderr output.
+    pub fn packed_message_bits(&self) -> &[u8] {
+        self.packed_message_bits.bytes_le()
+    }
+
+    /// Returns the logical message-bit width.
+    ///
+    /// # Parameters
+    /// - None.
+    ///
+    /// # Returns
+    /// - `usize`: Logical bit width represented by this node.
+    ///
+    /// # Expected Output
+    /// - Returns the bit width; no stdout/stderr output.
+    pub(crate) fn bit_len(&self) -> usize {
+        self.packed_message_bits.len()
+    }
+
+    /// Reads one logical message bit by index.
+    ///
+    /// # Parameters
+    /// - `index`: Bit index with LSB at `0`.
+    ///
+    /// # Returns
+    /// - `bool`: Bit value, or `false` when out of range.
+    ///
+    /// # Expected Output
+    /// - Returns the requested bit; no stdout/stderr output.
+    pub(crate) fn bit(&self, index: usize) -> bool {
+        self.packed_message_bits.bit(index)
+    }
+
+    /// Returns the most-significant logical message bit when present.
+    ///
+    /// # Parameters
+    /// - None.
+    ///
+    /// # Returns
+    /// - `Option<bool>`: Highest-indexed bit, or `None` when empty.
+    ///
+    /// # Expected Output
+    /// - Returns the MSB when present; no stdout/stderr output.
+    pub fn msb(&self) -> Option<bool> {
+        self.bit_len().checked_sub(1).map(|idx| self.bit(idx))
+    }
+
+    /// Expands the packed message bits into a little-endian boolean vector.
+    ///
+    /// # Parameters
+    /// - None.
+    ///
+    /// # Returns
+    /// - `Vec<bool>`: Unpacked message bits in little-endian order.
+    ///
+    /// # Expected Output
+    /// - Returns unpacked bits for cold-path consumers; no stdout/stderr output.
+    pub(crate) fn message_bits_vec(&self) -> Vec<bool> {
+        self.packed_message_bits.to_bools()
+    }
 }
 
 /// Result of an avalanche tree search with per-level similarity scores.
@@ -40,6 +146,273 @@ pub struct AvalancheSearchResult {
     pub node: AvalancheNode,
     pub level_similarity_pct: Vec<f64>,
     pub level_pair_counts: Vec<usize>,
+}
+
+/// Shared interface for values that can be reduced by Avalanche.
+pub trait AvalancheInput {
+    /// Converts the value into an Avalanche node.
+    ///
+    /// # Parameters
+    /// - None.
+    ///
+    /// # Returns
+    /// - `Result<AvalancheNode, AvalancheError>`: Node representation ready for reduction.
+    ///
+    /// # Expected Output
+    /// - Returns an in-memory node; no stdout/stderr output.
+    fn avalanche_node(&self) -> Result<AvalancheNode, AvalancheError>;
+}
+
+impl AvalancheInput for AvalancheNode {
+    fn avalanche_node(&self) -> Result<AvalancheNode, AvalancheError> {
+        Ok(self.clone())
+    }
+}
+
+/// Anonymous preprocessing pass applied to prepared Avalanche candidates.
+pub type AvalanchePass =
+    Arc<dyn Fn(Vec<AvalancheNode>) -> Result<Vec<AvalancheNode>, AvalancheError> + Send + Sync>;
+
+/// Configuration for a prepared Avalanche run.
+#[derive(Debug, Clone, Default)]
+pub struct AvalancheConfig {
+    /// Whether to mirror candidates with bitwise inversions before reduction.
+    pub mirror_invert_candidates: bool,
+    /// Optional reference bits used to sort candidates by Hamming distance before reduction.
+    pub reference_bits: Option<Vec<bool>>,
+    /// Whether per-level similarity scores should be recorded.
+    pub collect_scores: bool,
+    /// Optional stdout progress label for long-running reductions.
+    pub progress_label: Option<String>,
+}
+
+/// Prepared Avalanche reducer built from a shared configuration and candidate set.
+#[derive(Debug, Clone)]
+pub struct Avalanche {
+    candidates: Vec<AvalancheNode>,
+    config: AvalancheConfig,
+}
+
+impl Avalanche {
+    /// Executes the prepared Avalanche reduction.
+    ///
+    /// # Parameters
+    /// - None.
+    ///
+    /// # Returns
+    /// - `Result<AvalancheSearchResult, AvalancheError>`: Reduced node plus optional per-level scores.
+    ///
+    /// # Expected Output
+    /// - Optionally prints progress updates to stdout and returns the reduction result.
+    pub fn execute(&self) -> Result<AvalancheSearchResult, AvalancheError> {
+        if self.config.collect_scores {
+            search_avalanche_tree_with_scores_internal(
+                self.candidates.clone(),
+                self.config.progress_label.as_deref(),
+            )
+        } else {
+            search_avalanche_tree_internal(
+                self.candidates.clone(),
+                self.config.progress_label.as_deref(),
+            )
+        }
+    }
+
+    /// Returns the prepared candidate list.
+    ///
+    /// # Parameters
+    /// - None.
+    ///
+    /// # Returns
+    /// - `&[AvalancheNode]`: Prepared nodes in execution order.
+    ///
+    /// # Expected Output
+    /// - Returns a shared slice; no stdout/stderr output.
+    pub fn candidates(&self) -> &[AvalancheNode] {
+        &self.candidates
+    }
+
+    /// Returns the configuration used to prepare this run.
+    ///
+    /// # Parameters
+    /// - None.
+    ///
+    /// # Returns
+    /// - `&AvalancheConfig`: Prepared Avalanche configuration.
+    ///
+    /// # Expected Output
+    /// - Returns a shared configuration reference; no stdout/stderr output.
+    pub fn config(&self) -> &AvalancheConfig {
+        &self.config
+    }
+}
+
+/// Builder for a prepared Avalanche reducer.
+#[derive(Clone, Default)]
+pub struct AvalancheBuilder {
+    config: AvalancheConfig,
+    candidates: Vec<AvalancheNode>,
+    preprocess_passes: Vec<AvalanchePass>,
+}
+
+impl std::fmt::Debug for AvalancheBuilder {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AvalancheBuilder")
+            .field("config", &self.config)
+            .field("candidates", &self.candidates)
+            .field("preprocess_pass_count", &self.preprocess_passes.len())
+            .finish()
+    }
+}
+
+impl AvalancheBuilder {
+    /// Creates an empty Avalanche builder.
+    ///
+    /// # Parameters
+    /// - None.
+    ///
+    /// # Returns
+    /// - `AvalancheBuilder`: Empty builder with default configuration.
+    ///
+    /// # Expected Output
+    /// - Returns the builder; no stdout/stderr output.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Enables or disables mirrored inverted candidates.
+    ///
+    /// # Parameters
+    /// - `enabled`: Whether inverted mirrors should be included.
+    ///
+    /// # Returns
+    /// - `AvalancheBuilder`: Updated builder.
+    ///
+    /// # Expected Output
+    /// - Returns the updated builder; no stdout/stderr output.
+    pub fn mirror_invert_candidates(mut self, enabled: bool) -> Self {
+        self.config.mirror_invert_candidates = enabled;
+        self
+    }
+
+    /// Configures optional Hamming-distance ordering.
+    ///
+    /// # Parameters
+    /// - `reference_bits`: Reference bits used to order candidates by Hamming distance.
+    ///
+    /// # Returns
+    /// - `AvalancheBuilder`: Updated builder.
+    ///
+    /// # Expected Output
+    /// - Returns the updated builder; no stdout/stderr output.
+    pub fn reference_bits(mut self, reference_bits: Option<Vec<bool>>) -> Self {
+        self.config.reference_bits = reference_bits;
+        self
+    }
+
+    /// Enables or disables per-level similarity score collection.
+    ///
+    /// # Parameters
+    /// - `enabled`: Whether to record per-level similarity percentages.
+    ///
+    /// # Returns
+    /// - `AvalancheBuilder`: Updated builder.
+    ///
+    /// # Expected Output
+    /// - Returns the updated builder; no stdout/stderr output.
+    pub fn collect_scores(mut self, enabled: bool) -> Self {
+        self.config.collect_scores = enabled;
+        self
+    }
+
+    /// Sets the optional progress label used during execution.
+    ///
+    /// # Parameters
+    /// - `label`: Optional human-readable progress label.
+    ///
+    /// # Returns
+    /// - `AvalancheBuilder`: Updated builder.
+    ///
+    /// # Expected Output
+    /// - Returns the updated builder; no stdout/stderr output.
+    pub fn progress_label(mut self, label: Option<String>) -> Self {
+        self.config.progress_label = label;
+        self
+    }
+
+    /// Registers an anonymous preprocessing pass that can filter, sort, or downselect candidates.
+    ///
+    /// # Parameters
+    /// - `pass`: Closure invoked after the built-in preprocessing steps and before execution.
+    ///
+    /// # Returns
+    /// - `AvalancheBuilder`: Updated builder carrying the supplied preprocessing pass.
+    ///
+    /// # Expected Output
+    /// - Returns the updated builder; no stdout/stderr output.
+    pub fn pass<F>(mut self, pass: F) -> Self
+    where
+        F: Fn(Vec<AvalancheNode>) -> Result<Vec<AvalancheNode>, AvalancheError>
+            + Send
+            + Sync
+            + 'static,
+    {
+        self.preprocess_passes.push(Arc::new(pass));
+        self
+    }
+
+    /// Replaces the builder's candidate list from a shared Avalanche input interface.
+    ///
+    /// # Parameters
+    /// - `inputs`: Values that can be converted into Avalanche nodes.
+    ///
+    /// # Returns
+    /// - `Result<AvalancheBuilder, AvalancheError>`: Updated builder or the first conversion error.
+    ///
+    /// # Expected Output
+    /// - Returns the updated builder; no stdout/stderr output.
+    pub fn candidates<I, T>(mut self, inputs: I) -> Result<Self, AvalancheError>
+    where
+        I: IntoIterator<Item = T>,
+        T: AvalancheInput,
+    {
+        self.candidates = inputs
+            .into_iter()
+            .map(|input| input.avalanche_node())
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(self)
+    }
+
+    /// Builds the prepared Avalanche reducer after applying configured preprocessing.
+    ///
+    /// # Parameters
+    /// - None.
+    ///
+    /// # Returns
+    /// - `Result<Avalanche, AvalancheError>`: Prepared reducer ready to execute.
+    ///
+    /// # Expected Output
+    /// - Returns the prepared reducer; no stdout/stderr output.
+    pub fn build(self) -> Result<Avalanche, AvalancheError> {
+        let mut candidates = self.candidates;
+        validate_candidates(&candidates)?;
+
+        if self.config.mirror_invert_candidates {
+            candidates = mirror_inverted_candidates(candidates)?;
+        }
+        if let Some(reference_bits) = self.config.reference_bits.as_deref() {
+            candidates = sort_candidates_by_hamming_distance(candidates, reference_bits)?;
+        }
+        for pass in self.preprocess_passes {
+            candidates = pass(candidates)?;
+            validate_candidates(&candidates)?;
+        }
+
+        Ok(Avalanche {
+            candidates,
+            config: self.config,
+        })
+    }
 }
 
 /// Counts the number of reduction levels needed to collapse an avalanche tree.
@@ -134,85 +507,22 @@ pub fn sort_candidates_by_hamming_distance(
         return Err(AvalancheError::InconsistentBitWidth);
     }
 
-    if let Some(sorted) =
-        sort_candidates_by_hamming_distance_accelerated(&candidates, reference_bits)
-    {
-        return Ok(sorted);
-    }
-
+    let packed_reference = pack_bits_to_bytes(reference_bits);
     let mut sorted = candidates;
     sorted.sort_by(|left, right| {
-        hamming_distance_bits(&left.message_bits, reference_bits)
-            .cmp(&hamming_distance_bits(&right.message_bits, reference_bits))
-            .then_with(|| compare_message_bits_le(&left.message_bits, &right.message_bits))
+        hamming_distance_packed_bytes(left.packed_message_bits(), &packed_reference)
+            .cmp(&hamming_distance_packed_bytes(
+                right.packed_message_bits(),
+                &packed_reference,
+            ))
+            .then_with(|| {
+                compare_packed_message_bits_le(
+                    &left.packed_message_bits,
+                    &right.packed_message_bits,
+                )
+            })
     });
     Ok(sorted)
-}
-
-/// Sorts candidates by precomputed Hamming-distance keys on accelerated targets.
-///
-/// # Parameters
-/// - `candidates`: Candidate nodes to sort.
-/// - `reference_bits`: Reference bit vector used for distance ordering.
-///
-/// # Returns
-/// - `Option<Vec<AvalancheNode>>`: Candidates sorted by distance and then message bits.
-///
-/// # Expected Output
-/// - Returns a sorted candidate list; no stdout/stderr output.
-#[cfg(any(
-    all(feature = "aarch64-hamming-accel", target_arch = "aarch64"),
-    all(feature = "x86-hamming-accel", target_arch = "x86_64"),
-))]
-fn sort_candidates_by_hamming_distance_accelerated(
-    candidates: &[AvalancheNode],
-    reference_bits: &[bool],
-) -> Option<Vec<AvalancheNode>> {
-    let packed_reference = pack_bits_to_bytes(reference_bits);
-    let mut keyed_candidates: Vec<(usize, AvalancheNode)> = candidates
-        .iter()
-        .cloned()
-        .map(|candidate| {
-            let packed_message = pack_bits_to_bytes(&candidate.message_bits);
-            let distance = hamming_distance_packed_bytes(&packed_message, &packed_reference);
-            (distance, candidate)
-        })
-        .collect();
-
-    keyed_candidates.sort_by(|left, right| {
-        left.0
-            .cmp(&right.0)
-            .then_with(|| compare_message_bits_le(&left.1.message_bits, &right.1.message_bits))
-    });
-
-    Some(
-        keyed_candidates
-            .into_iter()
-            .map(|(_, candidate)| candidate)
-            .collect::<Vec<_>>(),
-    )
-}
-
-/// Sorts candidates by precomputed Hamming-distance keys on accelerated targets.
-///
-/// # Parameters
-/// - `candidates`: Candidate nodes to sort.
-/// - `reference_bits`: Reference bit vector used for distance ordering.
-///
-/// # Returns
-/// - `Option<Vec<AvalancheNode>>`: `None` when no accelerated backend is compiled in.
-///
-/// # Expected Output
-/// - Returns `None`; no stdout/stderr output.
-#[cfg(not(any(
-    all(feature = "aarch64-hamming-accel", target_arch = "aarch64"),
-    all(feature = "x86-hamming-accel", target_arch = "x86_64"),
-)))]
-fn sort_candidates_by_hamming_distance_accelerated(
-    _candidates: &[AvalancheNode],
-    _reference_bits: &[bool],
-) -> Option<Vec<AvalancheNode>> {
-    None
 }
 
 /// Mirrors candidates with their bitwise inversions.
@@ -251,7 +561,11 @@ pub fn mirror_inverted_candidates(
 pub fn search_avalanche_tree(
     candidates: Vec<AvalancheNode>,
 ) -> Result<AvalancheNode, AvalancheError> {
-    search_avalanche_tree_internal(candidates, None).map(|result| result.node)
+    AvalancheBuilder::new()
+        .candidates(candidates)?
+        .build()?
+        .execute()
+        .map(|result| result.node)
 }
 
 /// Recursively reduces candidates by bitwise AND with bias accumulation while printing progress.
@@ -269,7 +583,12 @@ pub fn search_avalanche_tree_with_progress(
     candidates: Vec<AvalancheNode>,
     progress_label: &str,
 ) -> Result<AvalancheNode, AvalancheError> {
-    search_avalanche_tree_internal(candidates, Some(progress_label)).map(|result| result.node)
+    AvalancheBuilder::new()
+        .candidates(candidates)?
+        .progress_label(Some(progress_label.to_string()))
+        .build()?
+        .execute()
+        .map(|result| result.node)
 }
 
 /// Recursively reduces candidates while computing per-level similarity scores.
@@ -285,7 +604,11 @@ pub fn search_avalanche_tree_with_progress(
 pub fn search_avalanche_tree_with_scores(
     candidates: Vec<AvalancheNode>,
 ) -> Result<AvalancheSearchResult, AvalancheError> {
-    search_avalanche_tree_with_scores_internal(candidates, None)
+    AvalancheBuilder::new()
+        .candidates(candidates)?
+        .collect_scores(true)
+        .build()?
+        .execute()
 }
 
 /// Recursively reduces candidates while computing per-level similarity scores and printing progress.
@@ -303,7 +626,12 @@ pub fn search_avalanche_tree_with_scores_progress(
     candidates: Vec<AvalancheNode>,
     progress_label: &str,
 ) -> Result<AvalancheSearchResult, AvalancheError> {
-    search_avalanche_tree_with_scores_internal(candidates, Some(progress_label))
+    AvalancheBuilder::new()
+        .candidates(candidates)?
+        .collect_scores(true)
+        .progress_label(Some(progress_label.to_string()))
+        .build()?
+        .execute()
 }
 
 /// Validates that candidates are non-empty and consistent in bit width.
@@ -320,12 +648,12 @@ fn validate_candidates(candidates: &[AvalancheNode]) -> Result<usize, AvalancheE
     if candidates.is_empty() {
         return Err(AvalancheError::EmptyCandidates);
     }
-    let bit_width = candidates[0].message_bits.len();
+    let bit_width = candidates[0].bit_len();
     if bit_width == 0 {
         return Err(AvalancheError::InconsistentBitWidth);
     }
     for candidate in candidates {
-        if candidate.message_bits.len() != bit_width || candidate.biases.len() != bit_width {
+        if candidate.bit_len() != bit_width || candidate.biases.len() != bit_width {
             return Err(AvalancheError::InconsistentBitWidth);
         }
     }
@@ -461,26 +789,32 @@ fn search_avalanche_tree_with_scores_internal(
 /// # Expected Output
 /// - Returns the inverted node; no stdout/stderr output.
 fn invert_candidate(candidate: &AvalancheNode) -> AvalancheNode {
-    AvalancheNode {
-        biases: candidate.biases.clone(),
-        message_bits: candidate.message_bits.iter().map(|bit| !*bit).collect(),
-    }
+    AvalancheNode::from_packed_bits(
+        candidate.packed_message_bits.bitnot(),
+        candidate.biases.clone(),
+    )
 }
 
-/// Compares little-endian bit vectors by their numeric value.
+/// Compares packed little-endian bit vectors by their numeric value.
 ///
 /// # Parameters
-/// - `left`: Left-hand little-endian bit vector.
-/// - `right`: Right-hand little-endian bit vector.
+/// - `left`: Left-hand packed bit vector.
+/// - `right`: Right-hand packed bit vector.
 ///
 /// # Returns
 /// - `std::cmp::Ordering`: Ordering of the represented integer values.
 ///
 /// # Expected Output
 /// - Returns the numeric ordering; no stdout/stderr output.
-fn compare_message_bits_le(left: &[bool], right: &[bool]) -> std::cmp::Ordering {
-    for idx in (0..left.len()).rev() {
-        let ordering = left[idx].cmp(&right[idx]);
+fn compare_packed_message_bits_le(left: &PackedBits, right: &PackedBits) -> std::cmp::Ordering {
+    let byte_len = left.len().max(right.len()).div_ceil(8);
+    for byte_idx in (0..byte_len).rev() {
+        let ordering = left
+            .bytes_le()
+            .get(byte_idx)
+            .copied()
+            .unwrap_or(0)
+            .cmp(&right.bytes_le().get(byte_idx).copied().unwrap_or(0));
         if ordering != std::cmp::Ordering::Equal {
             return ordering;
         }
@@ -558,9 +892,9 @@ fn build_next_level_internal(
             .into_par_iter()
             .filter(|other| !used[*other])
             .map(|other| {
-                let distance = hamming_distance_bits(
-                    &candidates[idx].message_bits,
-                    &candidates[other].message_bits,
+                let distance = hamming_distance_packed_bytes(
+                    candidates[idx].packed_message_bits(),
+                    candidates[other].packed_message_bits(),
                 );
                 (distance, other)
             })
@@ -662,9 +996,9 @@ fn build_next_level_with_similarity_internal(
             .into_par_iter()
             .filter(|other| !used[*other])
             .map(|other| {
-                let distance = hamming_distance_bits(
-                    &candidates[idx].message_bits,
-                    &candidates[other].message_bits,
+                let distance = hamming_distance_packed_bytes(
+                    candidates[idx].packed_message_bits(),
+                    candidates[other].packed_message_bits(),
                 );
                 (distance, other)
             })
@@ -715,8 +1049,8 @@ fn weighted_similarity(
     right: &AvalancheNode,
     bit_width: usize,
 ) -> Result<(f64, f64), AvalancheError> {
-    if left.message_bits.len() != bit_width
-        || right.message_bits.len() != bit_width
+    if left.bit_len() != bit_width
+        || right.bit_len() != bit_width
         || left.biases.len() != bit_width
         || right.biases.len() != bit_width
     {
@@ -728,7 +1062,7 @@ fn weighted_similarity(
     for idx in 0..bit_width {
         let weight = 1.0 + left.biases[idx].abs() + right.biases[idx].abs();
         weight_sum += weight;
-        if left.message_bits[idx] == right.message_bits[idx] {
+        if left.bit(idx) == right.bit(idx) {
             match_weight += weight;
         }
     }
@@ -752,48 +1086,42 @@ fn combine_candidates(
     right: &AvalancheNode,
     bit_width: usize,
 ) -> Result<AvalancheNode, AvalancheError> {
-    if left.message_bits.len() != bit_width
-        || right.message_bits.len() != bit_width
+    if left.bit_len() != bit_width
+        || right.bit_len() != bit_width
         || left.biases.len() != bit_width
         || right.biases.len() != bit_width
     {
         return Err(AvalancheError::InconsistentBitWidth);
     }
 
-    let mut message_bits = Vec::with_capacity(bit_width);
+    let combined_bits = left.packed_message_bits.bitand(&right.packed_message_bits);
     let mut biases = Vec::with_capacity(bit_width);
     for idx in 0..bit_width {
-        let and_bit = left.message_bits[idx] & right.message_bits[idx];
+        let and_bit = combined_bits.bit(idx);
         let bias = if and_bit {
             let sum = left.biases[idx] + right.biases[idx];
             if sum == 0.0 { 1.0 } else { sum }
         } else {
             (left.biases[idx] - right.biases[idx]).abs()
         };
-        message_bits.push(and_bit);
         biases.push(bias);
     }
 
-    Ok(AvalancheNode {
-        biases,
-        message_bits,
-    })
+    Ok(AvalancheNode::from_packed_bits(combined_bits, biases))
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        AvalancheError, AvalancheNode, mirror_inverted_candidates, search_avalanche_tree,
-        search_avalanche_tree_with_scores, sort_candidates_by_hamming_distance,
+        AvalancheBuilder, AvalancheError, AvalancheNode, mirror_inverted_candidates,
+        search_avalanche_tree, search_avalanche_tree_with_scores,
+        sort_candidates_by_hamming_distance,
     };
     use insta::assert_yaml_snapshot;
     use serde_json::json;
 
     fn node(bits: &[bool], biases: &[f64]) -> AvalancheNode {
-        AvalancheNode {
-            biases: biases.to_vec(),
-            message_bits: bits.to_vec(),
-        }
+        AvalancheNode::new(bits.to_vec(), biases.to_vec())
     }
 
     #[test]
@@ -804,7 +1132,7 @@ mod tests {
         ];
         let result = search_avalanche_tree(candidates).expect("avalanche tree failed");
         let snapshot = json!({
-            "message_bits": result.message_bits,
+            "message_bits": result.message_bits_vec(),
             "biases": result.biases,
         });
         assert_yaml_snapshot!(snapshot);
@@ -820,7 +1148,7 @@ mod tests {
         ];
         let result = search_avalanche_tree(candidates).expect("avalanche tree failed");
         let snapshot = json!({
-            "message_bits": result.message_bits,
+            "message_bits": result.message_bits_vec(),
             "biases": result.biases,
         });
         assert_yaml_snapshot!(snapshot);
@@ -835,7 +1163,7 @@ mod tests {
         ];
         let result = search_avalanche_tree(candidates).expect("avalanche tree failed");
         let snapshot = json!({
-            "message_bits": result.message_bits,
+            "message_bits": result.message_bits_vec(),
             "biases": result.biases,
         });
         assert_yaml_snapshot!(snapshot);
@@ -890,10 +1218,7 @@ mod tests {
         let sorted = sort_candidates_by_hamming_distance(candidates, &[true, true])
             .expect("distance sort failed");
 
-        let bits: Vec<Vec<bool>> = sorted
-            .iter()
-            .map(|node| node.message_bits.clone())
-            .collect();
+        let bits: Vec<Vec<bool>> = sorted.iter().map(|node| node.message_bits_vec()).collect();
         let biases: Vec<Vec<f64>> = sorted.iter().map(|node| node.biases.clone()).collect();
 
         assert_eq!(bits, vec![vec![true, false], vec![false, false],]);
@@ -910,7 +1235,7 @@ mod tests {
 
         let bits: Vec<Vec<bool>> = mirrored
             .iter()
-            .map(|node| node.message_bits.clone())
+            .map(|node| node.message_bits_vec())
             .collect();
         let biases: Vec<Vec<f64>> = mirrored.iter().map(|node| node.biases.clone()).collect();
 
@@ -940,5 +1265,30 @@ mod tests {
         let err = sort_candidates_by_hamming_distance(candidates, &[true])
             .expect_err("expected width mismatch");
         assert_eq!(err, AvalancheError::InconsistentBitWidth);
+    }
+
+    #[test]
+    fn test_avalanche_builder_pass_can_filter_and_reorder_candidates() {
+        let prepared = AvalancheBuilder::new()
+            .candidates(vec![
+                node(&[false, false], &[0.0, 0.0]),
+                node(&[true, false], &[1.0, 1.0]),
+                node(&[true, true], &[2.0, 2.0]),
+            ])
+            .expect("builder candidates should convert")
+            .pass(|mut candidates| {
+                candidates.reverse();
+                candidates.pop();
+                Ok(candidates)
+            })
+            .build()
+            .expect("builder pass should succeed");
+
+        let bits = prepared
+            .candidates()
+            .iter()
+            .map(|node| node.message_bits_vec())
+            .collect::<Vec<_>>();
+        assert_eq!(bits, vec![vec![true, true], vec![true, false]]);
     }
 }

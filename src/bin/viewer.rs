@@ -17,6 +17,7 @@ use clap::Parser;
 use eframe::egui;
 use egui_extras::{Column, TableBuilder};
 use egui_plot::{Plot, PlotPoints, Points};
+use num_bigint::BigUint;
 #[cfg(not(target_arch = "wasm32"))]
 use rsademo::zmq_status::{QueryResponsePayload, build_client_from_endpoint_with_timeouts};
 use serde::Deserialize;
@@ -126,8 +127,34 @@ enum Tab {
     BitSimilarity,
     BitTrueTimeline,
     Avalanche,
+    AvalancheTiers,
     BeamVsR,
     Bitflow,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AvalancheTierMetric {
+    Best,
+    Beam,
+    Majority,
+}
+
+impl AvalancheTierMetric {
+    fn label(&self) -> &'static str {
+        match self {
+            AvalancheTierMetric::Best => "Best Match %",
+            AvalancheTierMetric::Beam => "Beam Match %",
+            AvalancheTierMetric::Majority => "Majority Match %",
+        }
+    }
+
+    fn all() -> [AvalancheTierMetric; 3] {
+        [
+            AvalancheTierMetric::Best,
+            AvalancheTierMetric::Beam,
+            AvalancheTierMetric::Majority,
+        ]
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -227,6 +254,8 @@ struct ViewerApp {
     bit_similarity_hide_shifted: bool,
     bit_similarity_start: usize,
     bit_similarity_rows: usize,
+    avalanche_tier_metric: AvalancheTierMetric,
+    avalanche_tier_columns: usize,
     pending: Rc<RefCell<PendingUpdates>>,
     #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
     log_request_in_flight: Rc<Cell<bool>>,
@@ -279,6 +308,8 @@ impl ViewerApp {
             bit_similarity_hide_shifted: true,
             bit_similarity_start: 0,
             bit_similarity_rows: 50,
+            avalanche_tier_metric: AvalancheTierMetric::Best,
+            avalanche_tier_columns: 256,
             pending,
             log_request_in_flight,
             session_request_in_flight,
@@ -921,7 +952,7 @@ impl ViewerApp {
                 r_max: stats.max,
                 r_min: stats.min,
                 r_stddev: stats.stddev,
-                candidate_count: batch.candidates.len(),
+                candidate_count: batch.candidate_count as usize,
             });
         }
 
@@ -1267,6 +1298,42 @@ impl ViewerApp {
         }
     }
 
+    fn draw_avalanche_tiers(&mut self, ui: &mut egui::Ui) {
+        ui.heading("Avalanche Tier Accuracy");
+        let rows = build_avalanche_tier_rows(&self.session, self.avalanche_tier_metric);
+        if rows.is_empty() {
+            ui.label("Recursive Avalanche tier statistics not found.");
+            return;
+        }
+
+        let max_samples = rows.iter().map(|row| row.sample_count).max().unwrap_or(0);
+        ui.horizontal(|ui| {
+            ui.label("Metric:");
+            egui::ComboBox::from_id_source("avalanche_tier_metric")
+                .selected_text(self.avalanche_tier_metric.label())
+                .show_ui(ui, |ui| {
+                    for metric in AvalancheTierMetric::all() {
+                        ui.selectable_value(
+                            &mut self.avalanche_tier_metric,
+                            metric,
+                            metric.label(),
+                        );
+                    }
+                });
+            ui.label("Render columns:");
+            ui.add(
+                egui::Slider::new(&mut self.avalanche_tier_columns, 16..=1024).logarithmic(true),
+            );
+        });
+        ui.label(format!(
+            "Rows: {} | Max samples in a row: {} | Values are compressed into fixed-width bins for efficient rendering.",
+            rows.len(),
+            max_samples
+        ));
+        ui.add_space(8.0);
+        draw_avalanche_tier_heatmap(ui, &rows, self.avalanche_tier_columns.max(16));
+    }
+
     fn draw_bitflow(&mut self, ui: &mut egui::Ui) {
         ui.heading("Bitflow");
         if self.session.bitflow_runs.is_empty() && self.session.bitflow_candidates.is_empty() {
@@ -1404,6 +1471,7 @@ impl eframe::App for ViewerApp {
                 tab_button(ui, "Bit Similarity", Tab::BitSimilarity, &mut self.tab);
                 tab_button(ui, "Bit True Timeline", Tab::BitTrueTimeline, &mut self.tab);
                 tab_button(ui, "Avalanche", Tab::Avalanche, &mut self.tab);
+                tab_button(ui, "Avalanche Tiers", Tab::AvalancheTiers, &mut self.tab);
                 tab_button(ui, "Beam vs R", Tab::BeamVsR, &mut self.tab);
                 tab_button(ui, "Bitflow", Tab::Bitflow, &mut self.tab);
             });
@@ -1444,6 +1512,7 @@ impl eframe::App for ViewerApp {
             Tab::BitSimilarity => self.draw_bit_similarity(ui),
             Tab::BitTrueTimeline => self.draw_bit_true_timeline(ui),
             Tab::Avalanche => self.draw_avalanche(ui),
+            Tab::AvalancheTiers => self.draw_avalanche_tiers(ui),
             Tab::BeamVsR => self.draw_beam_vs_r(ui),
             Tab::Bitflow => self.draw_bitflow(ui),
         });
@@ -1554,14 +1623,14 @@ struct Feature {
 #[derive(Debug, Default, Clone)]
 #[allow(dead_code)]
 struct RCandidateFactor {
-    prime: String,
+    prime: BigUint,
     exponent: u64,
     prime_bits: u64,
 }
 
 #[derive(Debug, Default, Clone)]
 struct RCandidateEntry {
-    r: String,
+    r: BigUint,
     r_bits: u64,
     factors: Vec<RCandidateFactor>,
 }
@@ -1577,61 +1646,88 @@ struct RCandidateBatch {
     reuse_path: String,
     reuse_enabled: bool,
     reuse_append_only: bool,
-    min_factor: String,
+    min_factor: BigUint,
     process_scale: u64,
     small_prime_factors: u64,
     max_factors: u64,
     target_bit_length: Option<u64>,
+    candidate_count: u64,
     candidates: Vec<RCandidateEntry>,
 }
 
 #[derive(Debug, Default, Clone)]
 #[allow(dead_code)]
 struct RCandidateAccuracyEntry {
-    r: String,
+    r: BigUint,
     r_bits: u64,
     factors: Vec<RCandidateFactor>,
     accuracy_pct: f64,
-    hbc_ciphertexts_r: Vec<String>,
-    candidate_decryptions: Vec<String>,
+    hbc_ciphertexts_r: Vec<BigUint>,
+    candidate_decryptions: Vec<BigUint>,
 }
 
 #[derive(Debug, Default, Clone)]
 #[allow(dead_code)]
 struct RCandidateAccuracyBatch {
     context: Option<String>,
-    messages: Vec<String>,
-    ciphertexts: Vec<String>,
-    shifted_ciphertexts: Vec<String>,
+    messages: Vec<BigUint>,
+    ciphertexts: Vec<BigUint>,
+    shifted_ciphertexts: Vec<BigUint>,
     rabin_exponent: u64,
-    tonelli_shanks_modulus: String,
-    tonelli_shanks_ciphertexts: Vec<String>,
+    tonelli_shanks_modulus: BigUint,
+    tonelli_shanks_ciphertexts: Vec<BigUint>,
+    candidate_count: u64,
     candidates: Vec<RCandidateAccuracyEntry>,
     beam_match_pct: Option<f64>,
     beam_ones_match_pct: Option<f64>,
+    majority_vote_match_pct: Option<f64>,
+    majority_vote_ones_match_pct: Option<f64>,
     beam_score: Option<f64>,
     beam_bit_width: Option<u64>,
+    avalanche_tier_statistics: Vec<AvalancheTierStatistics>,
+}
+
+#[derive(Debug, Default, Clone)]
+#[allow(dead_code)]
+struct AvalancheTierStatistics {
+    tier_index: u64,
+    sample_count: u64,
+    group_size: u64,
+    source_kind: String,
+    sample_stats: Vec<AvalancheTierSampleStat>,
+}
+
+#[derive(Debug, Default, Clone)]
+#[allow(dead_code)]
+struct AvalancheTierSampleStat {
+    sample_index: u64,
+    input_count: u64,
+    average_score_pct: f64,
+    beam_match_pct: Option<f64>,
+    majority_vote_match_pct: Option<f64>,
+    best_match_pct: f64,
 }
 
 #[derive(Debug, Default, Clone)]
 #[allow(dead_code)]
 struct RCandidateTraceEntry {
-    r: String,
+    r: BigUint,
     r_bits: u64,
-    hbc_ciphertext_r: String,
-    candidate_decryption: String,
+    hbc_ciphertext_r: BigUint,
+    candidate_decryption: BigUint,
 }
 
 #[derive(Debug, Default, Clone)]
 #[allow(dead_code)]
 struct RCandidateTraceBatch {
     context: Option<String>,
-    message: String,
-    ciphertext: String,
-    shifted_ciphertext: String,
+    message: BigUint,
+    ciphertext: BigUint,
+    shifted_ciphertext: BigUint,
     rabin_exponent: u64,
-    tonelli_shanks_modulus: String,
-    tonelli_shanks_ciphertext: String,
+    tonelli_shanks_modulus: BigUint,
+    tonelli_shanks_ciphertext: BigUint,
+    candidate_count: u64,
     candidates: Vec<RCandidateTraceEntry>,
 }
 
@@ -1686,6 +1782,14 @@ struct BeamRow {
     candidate_count: usize,
 }
 
+#[derive(Debug, Clone)]
+struct AvalancheTierRow {
+    label: String,
+    sample_count: usize,
+    values: Vec<f64>,
+    tier_index: usize,
+}
+
 #[derive(Debug)]
 struct BasicStats {
     mean: Option<f64>,
@@ -1700,9 +1804,9 @@ struct BitSimilarityEntry {
     orig_index: usize,
     index: usize,
     shift: usize,
-    r: String,
-    e: Option<String>,
-    x: Option<String>,
+    r: BigUint,
+    e: Option<BigUint>,
+    x: Option<BigUint>,
     candidate_hex: String,
     match_pct: f64,
     matching_bits: u64,
@@ -1716,9 +1820,9 @@ struct BitSimilarityEntry {
 #[derive(Debug, Clone)]
 struct BitSimilarityRow {
     index: usize,
-    r: String,
-    e: Option<String>,
-    x: Option<String>,
+    r: BigUint,
+    e: Option<BigUint>,
+    x: Option<BigUint>,
     base_match_pct: f64,
     base_matching_bits: u64,
     entries: Vec<BitSimilarityEntry>,
@@ -2266,11 +2370,13 @@ fn parse_r_candidate_batch(map: &Map<String, Value>) -> RCandidateBatch {
         reuse_path: value_as_string(map.get("reuse_path")),
         reuse_enabled: value_as_bool(map.get("reuse_enabled")),
         reuse_append_only: value_as_bool(map.get("reuse_append_only")),
-        min_factor: value_as_string(map.get("min_factor")),
+        min_factor: value_as_biguint(map.get("min_factor")),
         process_scale: value_as_u64(map.get("process_scale")),
         small_prime_factors: value_as_u64(map.get("small_prime_factors")),
         max_factors: value_as_u64(map.get("max_factors")),
         target_bit_length: value_as_opt_u64(map.get("target_bit_length")),
+        candidate_count: value_as_opt_u64(map.get("candidate_count"))
+            .unwrap_or(candidates.len() as u64),
         candidates,
     }
 }
@@ -2281,7 +2387,7 @@ fn parse_r_candidate_entry(map: &Map<String, Value>) -> RCandidateEntry {
         for factor in list {
             if let Some(factor) = factor.as_object() {
                 factors.push(RCandidateFactor {
-                    prime: value_as_string(factor.get("prime")),
+                    prime: value_as_biguint(factor.get("prime")),
                     exponent: value_as_u64(factor.get("exponent")),
                     prime_bits: value_as_u64(factor.get("prime_bits")),
                 });
@@ -2289,7 +2395,7 @@ fn parse_r_candidate_entry(map: &Map<String, Value>) -> RCandidateEntry {
         }
     }
     RCandidateEntry {
-        r: value_as_string(map.get("r")),
+        r: value_as_biguint(map.get("r")),
         r_bits: value_as_u64(map.get("r_bits")),
         factors,
     }
@@ -2306,18 +2412,60 @@ fn parse_r_candidate_accuracy_batch(map: &Map<String, Value>) -> RCandidateAccur
     }
     RCandidateAccuracyBatch {
         context: value_as_opt_string(map.get("context")),
-        messages: value_as_vec_string(map.get("messages")),
-        ciphertexts: value_as_vec_string(map.get("ciphertexts")),
-        shifted_ciphertexts: value_as_vec_string(map.get("shifted_ciphertexts")),
+        messages: value_as_vec_biguint(map.get("messages")),
+        ciphertexts: value_as_vec_biguint(map.get("ciphertexts")),
+        shifted_ciphertexts: value_as_vec_biguint(map.get("shifted_ciphertexts")),
         rabin_exponent: value_as_u64(map.get("rabin_exponent")),
-        tonelli_shanks_modulus: value_as_string(map.get("tonelli_shanks_modulus")),
-        tonelli_shanks_ciphertexts: value_as_vec_string(map.get("tonelli_shanks_ciphertexts")),
+        tonelli_shanks_modulus: value_as_biguint(map.get("tonelli_shanks_modulus")),
+        tonelli_shanks_ciphertexts: value_as_vec_biguint(map.get("tonelli_shanks_ciphertexts")),
+        candidate_count: value_as_opt_u64(map.get("candidate_count"))
+            .unwrap_or(candidates.len() as u64),
         candidates,
         beam_match_pct: value_as_opt_f64(map.get("beam_match_pct")),
         beam_ones_match_pct: value_as_opt_f64(map.get("beam_ones_match_pct")),
+        majority_vote_match_pct: value_as_opt_f64(map.get("majority_vote_match_pct")),
+        majority_vote_ones_match_pct: value_as_opt_f64(map.get("majority_vote_ones_match_pct")),
         beam_score: value_as_opt_f64(map.get("beam_score")),
         beam_bit_width: value_as_opt_u64(map.get("beam_bit_width")),
+        avalanche_tier_statistics: value_as_avalanche_tier_statistics(
+            map.get("avalanche_tier_statistics"),
+        ),
     }
+}
+
+fn value_as_avalanche_tier_statistics(value: Option<&Value>) -> Vec<AvalancheTierStatistics> {
+    let Some(Value::Array(list)) = value else {
+        return Vec::new();
+    };
+    list.iter()
+        .filter_map(|item| item.as_object())
+        .map(|map| AvalancheTierStatistics {
+            tier_index: value_as_u64(map.get("tier_index")),
+            sample_count: value_as_u64(map.get("sample_count")),
+            group_size: value_as_u64(map.get("group_size")),
+            source_kind: value_as_string(map.get("source_kind")),
+            sample_stats: map
+                .get("sample_stats")
+                .and_then(|value| value.as_array())
+                .map(|stats| {
+                    stats
+                        .iter()
+                        .filter_map(|stat| stat.as_object())
+                        .map(|stat| AvalancheTierSampleStat {
+                            sample_index: value_as_u64(stat.get("sample_index")),
+                            input_count: value_as_u64(stat.get("input_count")),
+                            average_score_pct: value_as_f64(stat.get("average_score_pct")),
+                            beam_match_pct: value_as_opt_f64(stat.get("beam_match_pct")),
+                            majority_vote_match_pct: value_as_opt_f64(
+                                stat.get("majority_vote_match_pct"),
+                            ),
+                            best_match_pct: value_as_f64(stat.get("best_match_pct")),
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default(),
+        })
+        .collect()
 }
 
 fn parse_r_candidate_accuracy_entry(map: &Map<String, Value>) -> RCandidateAccuracyEntry {
@@ -2326,7 +2474,7 @@ fn parse_r_candidate_accuracy_entry(map: &Map<String, Value>) -> RCandidateAccur
         for factor in list {
             if let Some(factor) = factor.as_object() {
                 factors.push(RCandidateFactor {
-                    prime: value_as_string(factor.get("prime")),
+                    prime: value_as_biguint(factor.get("prime")),
                     exponent: value_as_u64(factor.get("exponent")),
                     prime_bits: value_as_u64(factor.get("prime_bits")),
                 });
@@ -2334,12 +2482,12 @@ fn parse_r_candidate_accuracy_entry(map: &Map<String, Value>) -> RCandidateAccur
         }
     }
     RCandidateAccuracyEntry {
-        r: value_as_string(map.get("r")),
+        r: value_as_biguint(map.get("r")),
         r_bits: value_as_u64(map.get("r_bits")),
         factors,
         accuracy_pct: value_as_f64(map.get("accuracy_pct")),
-        hbc_ciphertexts_r: value_as_vec_string(map.get("hbc_ciphertexts_r")),
-        candidate_decryptions: value_as_vec_string(map.get("candidate_decryptions")),
+        hbc_ciphertexts_r: value_as_vec_biguint(map.get("hbc_ciphertexts_r")),
+        candidate_decryptions: value_as_vec_biguint(map.get("candidate_decryptions")),
     }
 }
 
@@ -2349,22 +2497,24 @@ fn parse_r_candidate_trace_batch(map: &Map<String, Value>) -> RCandidateTraceBat
         for entry in list {
             if let Some(entry) = entry.as_object() {
                 candidates.push(RCandidateTraceEntry {
-                    r: value_as_string(entry.get("r")),
+                    r: value_as_biguint(entry.get("r")),
                     r_bits: value_as_u64(entry.get("r_bits")),
-                    hbc_ciphertext_r: value_as_string(entry.get("hbc_ciphertext_r")),
-                    candidate_decryption: value_as_string(entry.get("candidate_decryption")),
+                    hbc_ciphertext_r: value_as_biguint(entry.get("hbc_ciphertext_r")),
+                    candidate_decryption: value_as_biguint(entry.get("candidate_decryption")),
                 });
             }
         }
     }
     RCandidateTraceBatch {
         context: value_as_opt_string(map.get("context")),
-        message: value_as_string(map.get("message")),
-        ciphertext: value_as_string(map.get("ciphertext")),
-        shifted_ciphertext: value_as_string(map.get("shifted_ciphertext")),
+        message: value_as_biguint(map.get("message")),
+        ciphertext: value_as_biguint(map.get("ciphertext")),
+        shifted_ciphertext: value_as_biguint(map.get("shifted_ciphertext")),
         rabin_exponent: value_as_u64(map.get("rabin_exponent")),
-        tonelli_shanks_modulus: value_as_string(map.get("tonelli_shanks_modulus")),
-        tonelli_shanks_ciphertext: value_as_string(map.get("tonelli_shanks_ciphertext")),
+        tonelli_shanks_modulus: value_as_biguint(map.get("tonelli_shanks_modulus")),
+        tonelli_shanks_ciphertext: value_as_biguint(map.get("tonelli_shanks_ciphertext")),
+        candidate_count: value_as_opt_u64(map.get("candidate_count"))
+            .unwrap_or(candidates.len() as u64),
         candidates,
     }
 }
@@ -2413,6 +2563,26 @@ fn value_as_opt_string(value: Option<&Value>) -> Option<String> {
         Some(Value::Number(num)) => Some(num.to_string()),
         Some(Value::Bool(val)) => Some(val.to_string()),
         _ => None,
+    }
+}
+
+fn value_as_biguint(value: Option<&Value>) -> BigUint {
+    let Some(value) = value else {
+        return BigUint::default();
+    };
+    match value {
+        Value::String(val) => BigUint::parse_bytes(val.as_bytes(), 10).unwrap_or_default(),
+        Value::Number(num) => num.as_u64().map(BigUint::from).unwrap_or_default(),
+        Value::Bool(val) => BigUint::from(u8::from(*val)),
+        Value::Array(_) => serde_json::from_value::<BigUint>(value.clone()).unwrap_or_default(),
+        _ => BigUint::default(),
+    }
+}
+
+fn value_as_opt_biguint(value: Option<&Value>) -> Option<BigUint> {
+    match value {
+        Some(Value::Null) | None => None,
+        Some(_) => Some(value_as_biguint(value)),
     }
 }
 
@@ -2501,6 +2671,13 @@ fn value_as_opt_f64(value: Option<&Value>) -> Option<f64> {
 fn value_as_vec_string(value: Option<&Value>) -> Vec<String> {
     match value {
         Some(Value::Array(list)) => list.iter().map(|v| value_as_string(Some(v))).collect(),
+        _ => Vec::new(),
+    }
+}
+
+fn value_as_vec_biguint(value: Option<&Value>) -> Vec<BigUint> {
+    match value {
+        Some(Value::Array(list)) => list.iter().map(|v| value_as_biguint(Some(v))).collect(),
         _ => Vec::new(),
     }
 }
@@ -2594,7 +2771,7 @@ fn flatten_candidate_batches(session: &Session) -> Vec<CandidateRow> {
                 context: context.clone(),
                 mode: mode.clone(),
                 index: idx,
-                r: entry.r.clone(),
+                r: entry.r.to_string(),
                 r_bits: entry.r_bits,
                 factors: factor_str,
             });
@@ -2605,6 +2782,138 @@ fn flatten_candidate_batches(session: &Session) -> Vec<CandidateRow> {
 
 fn format_opt_f64(value: Option<f64>) -> String {
     value.map_or_else(|| "".to_string(), |val| format!("{val:.2}"))
+}
+
+fn build_avalanche_tier_rows(
+    session: &Session,
+    metric: AvalancheTierMetric,
+) -> Vec<AvalancheTierRow> {
+    let mut rows = Vec::new();
+    for (batch_idx, batch) in session.r_candidate_accuracy_batches.iter().enumerate() {
+        let batch_label = batch
+            .context
+            .clone()
+            .unwrap_or_else(|| format!("batch_{}", batch_idx + 1));
+        for tier in &batch.avalanche_tier_statistics {
+            let values = tier
+                .sample_stats
+                .iter()
+                .map(|sample| match metric {
+                    AvalancheTierMetric::Best => sample.best_match_pct,
+                    AvalancheTierMetric::Beam => {
+                        sample.beam_match_pct.unwrap_or(sample.best_match_pct)
+                    }
+                    AvalancheTierMetric::Majority => sample
+                        .majority_vote_match_pct
+                        .unwrap_or(sample.best_match_pct),
+                })
+                .collect::<Vec<_>>();
+            rows.push(AvalancheTierRow {
+                label: format!(
+                    "{} | tier {} | source {} | group {}",
+                    batch_label, tier.tier_index, tier.source_kind, tier.group_size
+                ),
+                sample_count: values.len(),
+                values,
+                tier_index: tier.tier_index as usize,
+            });
+        }
+    }
+    rows.sort_by(|left, right| {
+        left.tier_index
+            .cmp(&right.tier_index)
+            .then_with(|| left.label.cmp(&right.label))
+    });
+    rows
+}
+
+fn draw_avalanche_tier_heatmap(
+    ui: &mut egui::Ui,
+    rows: &[AvalancheTierRow],
+    render_columns: usize,
+) {
+    let label_width = 280.0;
+    let cell_width = 3.0;
+    let cell_height = 16.0;
+    let row_gap = 4.0;
+    let margin = 8.0;
+    let columns = render_columns.max(1);
+    let width = label_width + columns as f32 * cell_width + margin * 2.0;
+    let height = rows.len() as f32 * (cell_height + row_gap) + 48.0;
+
+    egui::ScrollArea::both()
+        .id_source("avalanche_tier_heatmap")
+        .auto_shrink([false, false])
+        .show(ui, |ui| {
+            let (rect, _) = ui.allocate_exact_size(egui::vec2(width, height), egui::Sense::hover());
+            let painter = ui.painter_at(rect);
+            let title_y = rect.min.y + margin;
+            painter.text(
+                egui::pos2(rect.min.x + margin, title_y),
+                egui::Align2::LEFT_TOP,
+                "0%",
+                egui::FontId::proportional(11.0),
+                ui.visuals().text_color(),
+            );
+            painter.text(
+                egui::pos2(
+                    rect.min.x + margin + label_width + columns as f32 * cell_width,
+                    title_y,
+                ),
+                egui::Align2::RIGHT_TOP,
+                "100%",
+                egui::FontId::proportional(11.0),
+                ui.visuals().text_color(),
+            );
+
+            for (row_idx, row) in rows.iter().enumerate() {
+                let y = rect.min.y + 28.0 + row_idx as f32 * (cell_height + row_gap);
+                painter.text(
+                    egui::pos2(rect.min.x + margin, y),
+                    egui::Align2::LEFT_TOP,
+                    format!("{} | samples {}", row.label, row.sample_count),
+                    egui::FontId::proportional(11.0),
+                    ui.visuals().text_color(),
+                );
+
+                let values = &row.values;
+                if values.is_empty() {
+                    continue;
+                }
+                let bin_count = values.len().min(columns).max(1);
+                let bin_size = values.len().div_ceil(bin_count).max(1);
+                for col in 0..bin_count {
+                    let start = col * bin_size;
+                    let end = (start + bin_size).min(values.len());
+                    if start >= end {
+                        continue;
+                    }
+                    let avg = values[start..end].iter().sum::<f64>() / (end - start) as f64;
+                    let color = avalanche_tier_heatmap_color(avg);
+                    let x = rect.min.x + margin + label_width + col as f32 * cell_width;
+                    let cell = egui::Rect::from_min_size(
+                        egui::pos2(x, y),
+                        egui::vec2(cell_width, cell_height),
+                    );
+                    painter.rect_filled(cell, 0.0, color);
+                }
+            }
+        });
+}
+
+fn avalanche_tier_heatmap_color(value: f64) -> egui::Color32 {
+    let clamped = (value / 100.0).clamp(0.0, 1.0);
+    let red = if clamped < 0.5 {
+        255.0
+    } else {
+        255.0 * (1.0 - ((clamped - 0.5) * 2.0))
+    };
+    let green = if clamped < 0.5 {
+        255.0 * (clamped * 2.0)
+    } else {
+        255.0
+    };
+    egui::Color32::from_rgb(red as u8, green as u8, 64)
 }
 
 fn bits_preview(bits: &[u8], max_len: usize) -> String {
@@ -2659,9 +2968,9 @@ fn parse_bit_similarity_data(map: &Map<String, Value>) -> BitSimilarityData {
                 orig_index: idx,
                 index: value_as_usize(entry.get("index")),
                 shift: value_as_usize(entry.get("shift")),
-                r: value_as_string(entry.get("r")),
-                e: value_as_opt_string(entry.get("e")),
-                x: value_as_opt_string(entry.get("x")),
+                r: value_as_biguint(entry.get("r")),
+                e: value_as_opt_biguint(entry.get("e")),
+                x: value_as_opt_biguint(entry.get("x")),
                 candidate_hex: value_as_string(entry.get("candidate_hex")),
                 match_pct,
                 matching_bits,
@@ -2933,7 +3242,7 @@ fn draw_bit_similarity_row(
     let boxes_start = origin_x + label_width;
     let label_x = origin_x;
     let suffix = match (&row.e, &row.x) {
-        (Some(e), Some(x)) if !e.is_empty() && !x.is_empty() => format!(" | e={e} | x={x}"),
+        (Some(e), Some(x)) => format!(" | e={e} | x={x}"),
         _ => String::new(),
     };
     let header_text = format!(
@@ -3001,9 +3310,7 @@ fn draw_bit_similarity_row(
             format!("Candidate << {shift}")
         };
         if let (Some(e), Some(x)) = (&entry.e, &entry.x) {
-            if !e.is_empty() && !x.is_empty() {
-                label.push_str(&format!(" | e={e} | x={x}"));
-            }
+            label.push_str(&format!(" | e={e} | x={x}"));
         }
         let adjusted_denom = bit_width.saturating_sub(masked_bits).max(1) as u64;
         let line = format!(
@@ -3280,9 +3587,9 @@ mod tests {
             orig_index,
             index,
             shift,
-            r: r.to_string(),
-            e: Some("17".to_string()),
-            x: Some("3".to_string()),
+            r: BigUint::parse_bytes(r.as_bytes(), 10).expect("valid r"),
+            e: Some(BigUint::from(17u8)),
+            x: Some(BigUint::from(3u8)),
             candidate_hex: "01".to_string(),
             match_pct: 75.0,
             matching_bits: 12,
@@ -3380,6 +3687,51 @@ mod tests {
         assert_eq!(session.errors, vec!["done".to_string()]);
     }
 
+    #[test]
+    fn parse_session_from_str_reads_avalanche_tier_statistics() {
+        let raw = r#"{
+            "r_candidate_accuracy_batches": [
+                {
+                    "context": "analysis_batch_accuracy_1",
+                    "beam_match_pct": 88.5,
+                    "majority_vote_match_pct": 86.0,
+                    "avalanche_tier_statistics": [
+                        {
+                            "tier_index": 1,
+                            "sample_count": 3,
+                            "group_size": 2,
+                            "source_kind": "mixed-r-combinations",
+                            "sample_stats": [
+                                {
+                                    "sample_index": 1,
+                                    "input_count": 2,
+                                    "average_score_pct": 71.0,
+                                    "beam_match_pct": 88.5,
+                                    "majority_vote_match_pct": 86.0,
+                                    "best_match_pct": 88.5
+                                }
+                            ]
+                        }
+                    ]
+                }
+            ]
+        }"#;
+
+        let (session, ndjson) =
+            parse_session_from_str(raw).expect("session JSON with tier stats should parse");
+
+        assert!(!ndjson);
+        assert_eq!(session.r_candidate_accuracy_batches.len(), 1);
+        let batch = &session.r_candidate_accuracy_batches[0];
+        assert_eq!(batch.avalanche_tier_statistics.len(), 1);
+        assert_eq!(batch.avalanche_tier_statistics[0].tier_index, 1);
+        assert_eq!(batch.avalanche_tier_statistics[0].sample_stats.len(), 1);
+        assert_eq!(
+            batch.avalanche_tier_statistics[0].sample_stats[0].best_match_pct,
+            88.5
+        );
+    }
+
     #[cfg(not(target_arch = "wasm32"))]
     #[test]
     fn load_session_from_path_streams_ndjson_files() {
@@ -3421,11 +3773,11 @@ mod tests {
         let rows = build_bit_similarity_rows(&entries, false, BitSimilaritySort::Original);
 
         assert_eq!(rows.len(), 3);
-        assert_eq!(rows[0].r, "101");
+        assert_eq!(rows[0].r, BigUint::from(101u16));
         assert_eq!(rows[0].entries.len(), 2);
-        assert_eq!(rows[1].r, "202");
+        assert_eq!(rows[1].r, BigUint::from(202u16));
         assert_eq!(rows[1].entries.len(), 2);
-        assert_eq!(rows[2].r, "303");
+        assert_eq!(rows[2].r, BigUint::from(303u16));
         assert_eq!(rows[2].entries.len(), 1);
     }
 
@@ -3441,9 +3793,9 @@ mod tests {
         let rows = build_bit_similarity_rows(&entries, true, BitSimilaritySort::Original);
 
         assert_eq!(rows.len(), 2);
-        assert_eq!(rows[0].r, "101");
+        assert_eq!(rows[0].r, BigUint::from(101u16));
         assert_eq!(rows[0].entries.len(), 1);
-        assert_eq!(rows[1].r, "202");
+        assert_eq!(rows[1].r, BigUint::from(202u16));
         assert_eq!(rows[1].entries.len(), 1);
     }
 }

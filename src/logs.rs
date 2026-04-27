@@ -1,4 +1,4 @@
-use std::fs::File;
+use std::fs::{File, OpenOptions};
 use std::io::{BufWriter, Write};
 
 use serde::Serialize;
@@ -59,6 +59,23 @@ impl LogWriter<BufWriter<File>> {
             writer: BufWriter::new(file),
         })
     }
+
+    /// Creates a log writer that appends NDJSON to `path`.
+    ///
+    /// # Parameters
+    /// - `path`: Output file path for the log stream.
+    ///
+    /// # Returns
+    /// - `Result<LogWriter<BufWriter<File>>, LogError>`: Writer or error.
+    ///
+    /// # Expected Output
+    /// - Opens the file at `path` in append mode, creating it when missing.
+    pub fn create_append(path: &str) -> Result<Self, LogError> {
+        let file = OpenOptions::new().create(true).append(true).open(path)?;
+        Ok(Self {
+            writer: BufWriter::new(file),
+        })
+    }
 }
 
 impl<W: Write> LogWriter<W> {
@@ -96,26 +113,78 @@ impl<W: Write> LogWriter<W> {
     }
 }
 
+/// Writes the session-start event for an analytics stream.
+///
+/// # Parameters
+/// - `writer`: Log writer for NDJSON output.
+/// - `started_unix_ms`: Session start timestamp in milliseconds since UNIX epoch.
+/// - `cli`: CLI metadata captured for the session.
+///
+/// # Returns
+/// - `Result<(), LogError>`: `Ok(())` on success.
+///
+/// # Expected Output
+/// - Appends one `session_start` event to the output stream.
+pub(crate) fn write_session_start<W: Write>(
+    writer: &mut LogWriter<W>,
+    started_unix_ms: u128,
+    cli: &AnalyticsCliInfo,
+) -> Result<(), LogError> {
+    writer.write_event(
+        "session_start",
+        &SessionStart {
+            started_unix_ms,
+            cli,
+        },
+    )
+}
+
+/// Writes the session-finish event for an analytics stream.
+///
+/// # Parameters
+/// - `writer`: Log writer for NDJSON output.
+/// - `finished_unix_ms`: Optional session-finish timestamp in milliseconds since UNIX epoch.
+/// - `errors`: Terminal error list captured for the session.
+///
+/// # Returns
+/// - `Result<(), LogError>`: `Ok(())` on success.
+///
+/// # Expected Output
+/// - Appends one `session_finish` event to the output stream.
+pub(crate) fn write_session_finish<W: Write>(
+    writer: &mut LogWriter<W>,
+    finished_unix_ms: Option<u128>,
+    errors: &[String],
+) -> Result<(), LogError> {
+    writer.write_event(
+        "session_finish",
+        &SessionFinish {
+            finished_unix_ms,
+            errors: errors.to_vec(),
+        },
+    )
+}
+
 /// Writes a full session analytics log as NDJSON.
 ///
 /// # Parameters
-/// - `path`: Output file path for the NDJSON stream.
 /// - `session`: Analytics session to serialize.
 ///
 /// # Returns
 /// - `Result<(), LogError>`: `Ok(())` on success.
 ///
 /// # Expected Output
-/// - Writes an NDJSON file to `path`.
-pub fn write_session_log(path: &str, session: &SessionAnalytics) -> Result<(), LogError> {
-    let mut writer = LogWriter::create(path)?;
-    writer.write_event(
-        "session_start",
-        &SessionStart {
-            started_unix_ms: session.started_unix_ms,
-            cli: &session.cli,
-        },
-    )?;
+/// - Writes pending NDJSON analytics events to the configured session path.
+pub fn write_session_log(session: &mut SessionAnalytics) -> Result<(), LogError> {
+    let mut writer = if let Some(writer) = session.stream_writer.take() {
+        writer
+    } else if session.stream_started {
+        LogWriter::create_append(session.session_json_path())?
+    } else {
+        let mut writer = LogWriter::create(session.session_json_path())?;
+        write_session_start(&mut writer, session.started_unix_ms, &session.cli)?;
+        writer
+    };
     for step in &session.steps {
         writer.write_event("step", step)?;
     }
@@ -134,13 +203,7 @@ pub fn write_session_log(path: &str, session: &SessionAnalytics) -> Result<(), L
     for batch in &session.r_candidate_traces {
         writer.write_event("r_candidate_trace_batch", batch)?;
     }
-    writer.write_event(
-        "session_finish",
-        &SessionFinish {
-            finished_unix_ms: session.finished_unix_ms,
-            errors: session.errors.clone(),
-        },
-    )?;
+    write_session_finish(&mut writer, session.finished_unix_ms, &session.errors)?;
     writer.flush()?;
     Ok(())
 }

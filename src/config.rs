@@ -115,6 +115,24 @@ pub struct EngineConfig {
     /// Legacy pool-size setting retained for compatibility; sampled pools now use the full batch.
     #[serde(default = "default_avalanche_combination_pool_size")]
     pub avalanche_combination_pool_size: usize,
+    /// Number of Avalanche tiers to execute, including the initial sampled-input tier.
+    #[serde(default = "default_avalanche_combination_recursion_depth")]
+    pub avalanche_combination_recursion_depth: usize,
+    /// Number of sample outputs grouped into each subsequent recursive Avalanche call.
+    #[serde(default = "default_avalanche_combination_recursive_group_size")]
+    pub avalanche_combination_recursive_group_size: usize,
+    /// Number of recursive samples to produce per subsequent Avalanche tier; `0` preserves one-pass grouping.
+    #[serde(default = "default_avalanche_combination_recursive_resample_count")]
+    pub avalanche_combination_recursive_resample_count: usize,
+    /// Whether sampled avalanche prunes scored inputs to a central Hamming-distance percentile band before sampling.
+    #[serde(default = "default_avalanche_combination_hamming_distance_prune")]
+    pub avalanche_combination_hamming_distance_prune: bool,
+    /// Central percentile of Hamming distances retained when sampled-avalanche pruning is enabled.
+    #[serde(default = "default_avalanche_combination_hamming_distance_keep_percentile")]
+    pub avalanche_combination_hamming_distance_keep_percentile: f64,
+    /// Percentage of the retained inlier pool size to add back from the Hamming-distance outlier tails.
+    #[serde(default = "default_avalanche_combination_hamming_distance_outlier_preference_pct")]
+    pub avalanche_combination_hamming_distance_outlier_preference_pct: f64,
     /// Whether sampled avalanche uses per-bit majority-vote probabilities from the combination outputs.
     #[serde(default = "default_avalanche_combination_majority_vote")]
     pub avalanche_combination_majority_vote: bool,
@@ -124,6 +142,33 @@ pub struct EngineConfig {
     /// Whether sampled avalanche prints a separate majority-vote summary for the selected sample.
     #[serde(default = "default_avalanche_combination_majority_vote_print")]
     pub avalanche_combination_majority_vote_print: bool,
+    /// Whether recursive Avalanche tiers carry forward the top beam-search bits instead of majority-vote bits.
+    #[serde(default = "default_avalanche_use_top_beam")]
+    pub avalanche_use_top_beam: bool,
+    /// Whether sampled avalanche retains every evaluated sample in memory for downstream consumers.
+    #[serde(default = "default_avalanche_combination_keep_all_samples_in_memory")]
+    pub avalanche_combination_keep_all_samples_in_memory: bool,
+    /// Whether avalanche runs collect per-level and per-sample statistics for analytics output.
+    #[serde(default = "default_avalanche_statistics_collection")]
+    pub avalanche_statistics_collection: bool,
+    /// Whether sampled avalanche bypasses mixed-r combinations and samples raw scored inputs with ChaCha20.
+    #[serde(default = "default_avalanche_random_chacha20_inputs")]
+    pub avalanche_random_chacha20_inputs: bool,
+    /// Whether sampled avalanche applies the trailing-zero fitness pass before sampling.
+    #[serde(default = "default_avalanche_fitness_scoring_pass")]
+    pub avalanche_fitness_scoring_pass: bool,
+    /// Number of bytes to left-shift the plaintext before candidate scoring to create the LSB fitness slice.
+    #[serde(default = "default_avalanche_fitness_shift_bytes")]
+    pub avalanche_fitness_shift_bytes: usize,
+    /// Number of least-significant bits inspected when computing trailing-zero fitness.
+    #[serde(default = "default_avalanche_fitness_bit_width")]
+    pub avalanche_fitness_bit_width: usize,
+    /// Maximum number of r-candidate groups retained by the fitness pass; `0` keeps every group.
+    #[serde(default = "default_avalanche_fitness_r_candidate_limit")]
+    pub avalanche_fitness_r_candidate_limit: usize,
+    /// Maximum number of `c^x` inputs retained per r-candidate group by the fitness pass; `0` keeps every input.
+    #[serde(default = "default_avalanche_fitness_cx_candidate_limit")]
+    pub avalanche_fitness_cx_candidate_limit: usize,
     #[serde(default = "default_same_r_batch")]
     pub same_r_batch: bool,
     #[serde(default = "default_ciphertext_modify")]
@@ -153,6 +198,10 @@ pub struct EngineConfig {
     pub reuse_r_candidates: bool,
     #[serde(default = "default_reuse_r_candidates_append_only")]
     pub reuse_r_candidates_append_only: bool,
+    #[serde(default = "default_reuse_retargeted_r_candidates")]
+    pub reuse_retargeted_r_candidates: bool,
+    #[serde(default = "default_reuse_retargeted_r_candidates_path_prefix")]
+    pub reuse_retargeted_r_candidates_path_prefix: String,
     #[serde(default = "default_r_candidate_mode")]
     pub r_candidate_mode: RCandidateMode,
     #[serde(default = "default_r_candidate_small_primes")]
@@ -276,11 +325,32 @@ impl Default for EngineConfig {
             avalanche_combination_mixed_r_candidates:
                 default_avalanche_combination_mixed_r_candidates(),
             avalanche_combination_pool_size: default_avalanche_combination_pool_size(),
+            avalanche_combination_recursion_depth: default_avalanche_combination_recursion_depth(),
+            avalanche_combination_recursive_group_size:
+                default_avalanche_combination_recursive_group_size(),
+            avalanche_combination_recursive_resample_count:
+                default_avalanche_combination_recursive_resample_count(),
+            avalanche_combination_hamming_distance_prune:
+                default_avalanche_combination_hamming_distance_prune(),
+            avalanche_combination_hamming_distance_keep_percentile:
+                default_avalanche_combination_hamming_distance_keep_percentile(),
+            avalanche_combination_hamming_distance_outlier_preference_pct:
+                default_avalanche_combination_hamming_distance_outlier_preference_pct(),
             avalanche_combination_majority_vote: default_avalanche_combination_majority_vote(),
             avalanche_combination_sample_smoothing: default_avalanche_combination_sample_smoothing(
             ),
             avalanche_combination_majority_vote_print:
                 default_avalanche_combination_majority_vote_print(),
+            avalanche_use_top_beam: default_avalanche_use_top_beam(),
+            avalanche_combination_keep_all_samples_in_memory:
+                default_avalanche_combination_keep_all_samples_in_memory(),
+            avalanche_statistics_collection: default_avalanche_statistics_collection(),
+            avalanche_random_chacha20_inputs: default_avalanche_random_chacha20_inputs(),
+            avalanche_fitness_scoring_pass: default_avalanche_fitness_scoring_pass(),
+            avalanche_fitness_shift_bytes: default_avalanche_fitness_shift_bytes(),
+            avalanche_fitness_bit_width: default_avalanche_fitness_bit_width(),
+            avalanche_fitness_r_candidate_limit: default_avalanche_fitness_r_candidate_limit(),
+            avalanche_fitness_cx_candidate_limit: default_avalanche_fitness_cx_candidate_limit(),
             same_r_batch: default_same_r_batch(),
             ciphertext_modify: default_ciphertext_modify(),
             oracle_accuracy_threshold: default_oracle_accuracy_threshold(),
@@ -293,6 +363,9 @@ impl Default for EngineConfig {
             reuse_r_candidates_path: default_reuse_r_candidates_path(),
             reuse_r_candidates: default_reuse_r_candidates(),
             reuse_r_candidates_append_only: default_reuse_r_candidates_append_only(),
+            reuse_retargeted_r_candidates: default_reuse_retargeted_r_candidates(),
+            reuse_retargeted_r_candidates_path_prefix:
+                default_reuse_retargeted_r_candidates_path_prefix(),
             r_candidate_mode: default_r_candidate_mode(),
             r_candidate_small_primes: default_r_candidate_small_primes(),
             r_candidate_small_prime_factors: default_r_candidate_small_prime_factors(),
@@ -855,6 +928,104 @@ fn default_avalanche_combination_pool_size() -> usize {
     100
 }
 
+/// Default recursion depth for sampled Avalanche.
+///
+/// # Parameters
+/// - None.
+///
+/// # Returns
+/// - `usize`: `1` so sampled Avalanche preserves the existing single-tier behavior by default.
+///
+/// # Expected Output
+/// - Returns a constant default value; no side effects.
+fn default_avalanche_combination_recursion_depth() -> usize {
+    1
+}
+
+/// Default group size for recursive sampled Avalanche tiers.
+///
+/// # Parameters
+/// - None.
+///
+/// # Returns
+/// - `usize`: Number of prior-tier samples grouped into each subsequent recursive call.
+///
+/// # Expected Output
+/// - Returns a constant default value; no side effects.
+fn default_avalanche_combination_recursive_group_size() -> usize {
+    8
+}
+
+/// Default recursive resample count for sampled Avalanche tiers.
+///
+/// # Parameters
+/// - None.
+///
+/// # Returns
+/// - `usize`: `0` so recursive tiers preserve legacy one-pass regrouping unless explicitly enabled.
+///
+/// # Expected Output
+/// - Returns a constant default value; no side effects.
+fn default_avalanche_combination_recursive_resample_count() -> usize {
+    0
+}
+
+/// Default flag for pruning sampled-avalanche inputs by Hamming-distance percentiles.
+///
+/// # Parameters
+/// - None.
+///
+/// # Returns
+/// - `bool`: `false` so sampled avalanche keeps the full scored pool unless explicitly enabled.
+///
+/// # Expected Output
+/// - Returns a constant default value; no side effects.
+fn default_avalanche_combination_hamming_distance_prune() -> bool {
+    false
+}
+
+/// Default central percentile retained when pruning sampled-avalanche Hamming-distance outliers.
+///
+/// # Parameters
+/// - None.
+///
+/// # Returns
+/// - `f64`: Default retained percentile, keeping the middle 95% of Hamming distances.
+///
+/// # Expected Output
+/// - Returns a constant default value; no side effects.
+fn default_avalanche_combination_hamming_distance_keep_percentile() -> f64 {
+    95.0
+}
+
+/// Default percentage of retained inliers to add back from Hamming-distance outlier tails.
+///
+/// # Parameters
+/// - None.
+///
+/// # Returns
+/// - `f64`: `0.0` so no outliers are reintroduced unless explicitly requested.
+///
+/// # Expected Output
+/// - Returns a constant default value; no side effects.
+fn default_avalanche_combination_hamming_distance_outlier_preference_pct() -> f64 {
+    0.0
+}
+
+/// Default flag for random ChaCha20 sampled avalanche inputs.
+///
+/// # Parameters
+/// - None.
+///
+/// # Returns
+/// - `bool`: `false` to keep mixed-r combination sampling enabled by default.
+///
+/// # Expected Output
+/// - Returns a constant default value; no side effects.
+fn default_avalanche_random_chacha20_inputs() -> bool {
+    false
+}
+
 /// Default flag for per-bit majority voting across sampled avalanche combinations.
 ///
 /// # Parameters
@@ -895,6 +1066,118 @@ fn default_avalanche_combination_sample_smoothing() -> bool {
 /// - Returns a constant default value; no side effects.
 fn default_avalanche_combination_majority_vote_print() -> bool {
     true
+}
+
+/// Default flag for carrying forward the top beam-search result between recursive avalanche tiers.
+///
+/// # Parameters
+/// - None.
+///
+/// # Returns
+/// - `bool`: `true` so recursive tiers use the prior tier's top beam-search bits by default.
+///
+/// # Expected Output
+/// - Returns the default configuration value; no side effects.
+fn default_avalanche_use_top_beam() -> bool {
+    true
+}
+
+/// Returns the default in-memory sampled-avalanche retention mode.
+///
+/// # Parameters
+/// - None.
+///
+/// # Returns
+/// - `bool`: `false` so only the selected sample is retained by default.
+///
+/// # Expected Output
+/// - Returns the default configuration value; no side effects.
+fn default_avalanche_combination_keep_all_samples_in_memory() -> bool {
+    false
+}
+
+/// Returns the default avalanche statistics collection mode.
+///
+/// # Parameters
+/// - None.
+///
+/// # Returns
+/// - `bool`: `true` so avalanche analytics are collected unless explicitly disabled.
+///
+/// # Expected Output
+/// - Returns the default configuration value; no side effects.
+fn default_avalanche_statistics_collection() -> bool {
+    true
+}
+
+/// Default flag for enabling the trailing-zero fitness preprocessing pass.
+///
+/// # Parameters
+/// - None.
+///
+/// # Returns
+/// - `bool`: Default enable state for the fitness preprocessing pass.
+///
+/// # Expected Output
+/// - Returns a constant default value; no side effects.
+fn default_avalanche_fitness_scoring_pass() -> bool {
+    false
+}
+
+/// Default byte shift used to create the fitness slice ahead of the original message bits.
+///
+/// # Parameters
+/// - None.
+///
+/// # Returns
+/// - `usize`: Default byte shift applied to plaintexts before candidate scoring.
+///
+/// # Expected Output
+/// - Returns a constant default value; no side effects.
+fn default_avalanche_fitness_shift_bytes() -> usize {
+    0
+}
+
+/// Default trailing-zero fitness window width.
+///
+/// # Parameters
+/// - None.
+///
+/// # Returns
+/// - `usize`: Default number of LSBs scored by the fitness pass.
+///
+/// # Expected Output
+/// - Returns a constant default value; no side effects.
+fn default_avalanche_fitness_bit_width() -> usize {
+    32
+}
+
+/// Default cap on retained r-candidate groups for the fitness pass.
+///
+/// # Parameters
+/// - None.
+///
+/// # Returns
+/// - `usize`: Default r-group retention limit, where `0` disables truncation.
+///
+/// # Expected Output
+/// - Returns a constant default value; no side effects.
+fn default_avalanche_fitness_r_candidate_limit() -> usize {
+    0
+}
+
+/// Default cap on retained `c^x` inputs per r-candidate group for the fitness pass.
+///
+/// # Parameters
+/// - None.
+///
+/// # Returns
+/// - `usize`: Default per-group retention limit, where `0` disables truncation.
+///
+/// # Expected Output
+/// - Returns a constant default value; no side effects.
+fn default_avalanche_fitness_cx_candidate_limit() -> usize {
+    0
 }
 
 /// Default flag for using the same r candidate across a batch.
@@ -1051,6 +1334,34 @@ fn default_reuse_r_candidates_append_only() -> bool {
     false
 }
 
+/// Default flag for reading pre-retargeted r candidates from a keyed cache file.
+///
+/// # Parameters
+/// - None.
+///
+/// # Returns
+/// - `bool`: Default retargeted-cache reuse setting.
+///
+/// # Expected Output
+/// - Returns a constant default value; no side effects.
+fn default_reuse_retargeted_r_candidates() -> bool {
+    false
+}
+
+/// Default path prefix for keyed retargeted r-candidate cache files.
+///
+/// # Parameters
+/// - None.
+///
+/// # Returns
+/// - `String`: Default retargeted-cache path prefix.
+///
+/// # Expected Output
+/// - Returns a constant default value; no side effects.
+fn default_reuse_retargeted_r_candidates_path_prefix() -> String {
+    "data/rgen_retargeted".to_string()
+}
+
 /// Default r candidate generation mode.
 ///
 /// # Parameters
@@ -1204,4 +1515,27 @@ fn default_combiner_k_oracles() -> usize {
 /// - Returns a constant default value; no side effects.
 fn default_combiner_tie_breaker() -> bool {
     true
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_engine_config_defaults_disable_avalanche_hamming_distance_pruning() {
+        let engine = EngineConfig::default();
+
+        assert!(engine.avalanche_use_top_beam);
+        assert!(engine.avalanche_statistics_collection);
+        assert_eq!(engine.avalanche_combination_recursive_resample_count, 0);
+        assert!(!engine.avalanche_combination_hamming_distance_prune);
+        assert_eq!(
+            engine.avalanche_combination_hamming_distance_keep_percentile,
+            95.0
+        );
+        assert_eq!(
+            engine.avalanche_combination_hamming_distance_outlier_preference_pct,
+            0.0
+        );
+    }
 }

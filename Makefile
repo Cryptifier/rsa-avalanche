@@ -11,6 +11,9 @@ test:
 deploy:
 	./scripts/make_deploy.sh
 
+demo:
+	RUNS=20 SEED_START=2100000 ./scripts/run_small_batch_beam.sh
+
 install-deps:
 	./scripts/install_deps.sh
 

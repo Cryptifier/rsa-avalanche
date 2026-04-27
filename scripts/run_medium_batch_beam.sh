@@ -3,7 +3,7 @@ set -euo pipefail
 
 RUNS=${RUNS:-1}
 SEED_START=${SEED_START:-1}
-CONFIG=${CONFIG:-"config/rsa_config_small_batch.json"}
+CONFIG=${CONFIG:-"config/rsa_config_medium.json"}
 ANALYSIS_LOG=${ANALYSIS_LOG:-"logs_current.log"}
 SCRIPT_LOG=${SCRIPT_LOG:-"logs_current_script.log"}
 RESUME=${RESUME:-0}
@@ -14,7 +14,6 @@ LOG_DIR=${LOG_DIR:-"logs"}
 RUN_TESTS=${RUN_TESTS:-0}
 RUN_PCA=${RUN_PCA:-0}
 PCA_OUTPUT=${PCA_OUTPUT:-"pca_clusters.png"}
-VERDICT_MATCH_THRESHOLD_PCT=${VERDICT_MATCH_THRESHOLD_PCT:-75}
 
 read -r -a EXTRA_ARGS <<< "${ANALYSIS_EXTRA_ARGS}"
 
@@ -73,30 +72,6 @@ progress_bar() {
   printf "\r${BLUE}[%-${width}s]${RESET} %3d%% (%d/%d)" "${bar}${pad}" "${percent}" "${current}" "${total}"
 }
 
-extract_first_match_pct() {
-  sed -n 's/.* match \([0-9.]*\)% ones-match.*/\1/p'
-}
-
-extract_max_match_pct_from_file() {
-  local path=$1
-  awk '
-    /^[[:space:]]*Avalanche .* match [0-9.]+% ones-match/ {
-      if (match($0, / match ([0-9.]+)% ones-match/, captures)) {
-        value = captures[1] + 0
-        if (!found || value > max) {
-          max = value
-          found = 1
-        }
-      }
-    }
-    END {
-      if (found) {
-        printf "%.6f", max
-      }
-    }
-  ' "${path}"
-}
-
 cx_match_sum=0
 cx_match_sumsq=0
 cx_match_min=""
@@ -108,12 +83,10 @@ avalanche_candidates_sum=0
 avalanche_candidates_count=0
 pass_count=0
 fail_count=0
-unknown_count=0
 total_ns=0
 
 echo "Running ${RUNS} iterations with config ${CONFIG}"
 echo "Detected architecture ${arch_name}; cargo run args: ${CARGO_RUN_ARGS[*]} (acceleration feature: ${ACCEL_FEATURE})"
-echo "Verdict threshold: ${VERDICT_MATCH_THRESHOLD_PCT}%"
 mkdir -p "${LOG_DIR}"
 run_stamp=$(date +"%Y%m%d_%H%M%S")
 
@@ -126,7 +99,7 @@ for i in $(seq 1 "${RUNS}"); do
   echo ""
   echo "===== RUN ${i} (seed ${seed}) ====="
   set +e
-  cargo run "${CARGO_RUN_ARGS[@]}" --bin analysis -- --true --bits 56 --bits-decrypt 128 --seed "${seed}" -c "${CONFIG}" --crypto-rng --session-json "${session_path}" \
+  cargo run "${CARGO_RUN_ARGS[@]}" --bin analysis -- --true --bits 256 --bits-decrypt 256 --seed "${seed}" -c "${CONFIG}" --crypto-rng --session-json "${session_path}" \
     "${BATCH_ARGS[@]}" "${TEST_ARGS[@]}" "${EXTRA_ARGS[@]}" \
     2>&1 | tee -a "${ANALYSIS_LOG}" | tee "${run_output}" > /dev/null
   status=$?
@@ -139,24 +112,15 @@ for i in $(seq 1 "${RUNS}"); do
 
   cx_match_line=$(grep -F -m1 "Avalanche c^x run max:" "${run_output}" || true)
   cx_match_pct=$(echo "${cx_match_line}" | sed -n 's/.*match \([0-9.]*\)%.*/\1/p')
-  majority_vote_line=$(grep -F -m1 "Avalanche majority vote run max:" "${run_output}" || true)
-  majority_vote_match_pct=$(echo "${majority_vote_line}" | extract_first_match_pct)
   beam_run_max_line=$(grep -F -m1 "Avalanche beam run max:" "${run_output}" || true)
-  beam_run_max_match_pct=$(echo "${beam_run_max_line}" | extract_first_match_pct)
-  batch_match_percentages=$(grep -F -m1 "Avalanche batch top match percentages:" "${run_output}" | sed -n 's/.*\[\(.*\)\]/\1/p' || true)
-  top_output_match_pct=$(extract_max_match_pct_from_file "${run_output}")
+  beam_run_max_match_pct=$(echo "${beam_run_max_line}" | sed -n 's/.*match \([0-9.]*\)%.*/\1/p')
+  majority_vote_line=$(grep -F -m1 "Avalanche majority vote run max:" "${run_output}" || true)
+  majority_vote_match_pct=$(echo "${majority_vote_line}" | sed -n 's/.*match \([0-9.]*\)%.*/\1/p')
   cx_total_line=$(grep -F -m1 "Avalanche c^x evaluated total:" "${run_output}" || true)
   cx_candidates_total=$(echo "${cx_total_line}" | sed -n 's/.*: \([0-9][0-9]*\)$/\1/p')
   avalanche_total_line=$(grep -m1 "Avalanche evaluated candidates total:" "${run_output}" || true)
   avalanche_candidates_total=$(echo "${avalanche_total_line}" | sed -n 's/.*: \([0-9][0-9]*\)$/\1/p')
-  verdict="UNKNOWN"
-  if [[ -n "${top_output_match_pct}" ]]; then
-    if awk -v v="${top_output_match_pct}" -v threshold="${VERDICT_MATCH_THRESHOLD_PCT}" 'BEGIN { exit (v >= threshold) ? 0 : 1 }'; then
-      verdict="PASS"
-    else
-      verdict="FAIL"
-    fi
-  fi
+  verdict=$(grep -m1 "Sufficiency verdict" "${run_output}" | sed -n 's/.*: //p' || true)
 
   if [[ -n "${cx_match_pct}" ]]; then
     cx_match_count=$((cx_match_count + 1))
@@ -180,12 +144,10 @@ for i in $(seq 1 "${RUNS}"); do
     avalanche_candidates_sum=$((avalanche_candidates_sum + avalanche_candidates_total))
   fi
 
-  if [[ "${verdict}" == "PASS" ]]; then
+  if [[ "${verdict}" == *PASS* ]]; then
     pass_count=$((pass_count + 1))
-  elif [[ "${verdict}" == "FAIL" ]]; then
-    fail_count=$((fail_count + 1))
   else
-    unknown_count=$((unknown_count + 1))
+    fail_count=$((fail_count + 1))
   fi
 
   if [[ -n "${cx_match_pct}" ]]; then
@@ -218,27 +180,15 @@ for i in $(seq 1 "${RUNS}"); do
     majority_match_color="${YELLOW}"
   fi
 
-  if [[ -n "${top_output_match_pct}" ]]; then
-    if awk -v v="${top_output_match_pct}" -v threshold="${VERDICT_MATCH_THRESHOLD_PCT}" 'BEGIN { exit (v >= threshold) ? 0 : 1 }'; then
-      top_output_match_color="${GREEN}"
-    else
-      top_output_match_color="${RED}"
-    fi
-  else
-    top_output_match_color="${YELLOW}"
-  fi
-
-  verdict_color="${YELLOW}"
-  if [[ "${verdict}" == "PASS" ]]; then
-    verdict_color="${GREEN}"
-  elif [[ "${verdict}" == "FAIL" ]]; then
+  verdict_color="${GREEN}"
+  if [[ "${verdict}" != *PASS* ]]; then
     verdict_color="${RED}"
   fi
 
   if [[ ${status} -eq 0 ]]; then
-    echo "Run ${i} summary: c^x max match ${match_color}${cx_match_pct:-N/A}%${RESET}, beam run max ${beam_match_color}${beam_run_max_match_pct:-N/A}%${RESET}, majority vote match ${majority_match_color}${majority_vote_match_pct:-N/A}%${RESET}, top avalanche output match ${top_output_match_color}${top_output_match_pct:-N/A}%${RESET}, c^x candidates ${cx_candidates_total:-N/A}, avalanche candidates ${avalanche_candidates_total:-N/A}, verdict ${verdict_color}${verdict}${RESET}, duration ${duration_s}s"
+    echo "Run ${i} summary: c^x max match ${match_color}${cx_match_pct:-N/A}%${RESET}, beam run max ${beam_match_color}${beam_run_max_match_pct:-N/A}%${RESET}, majority vote match ${majority_match_color}${majority_vote_match_pct:-N/A}%${RESET}, c^x candidates ${cx_candidates_total:-N/A}, avalanche candidates ${avalanche_candidates_total:-N/A}, verdict ${verdict_color}${verdict:-UNKNOWN}${RESET}, duration ${duration_s}s"
   else
-    echo "Run ${i} summary: ${RED}FAILED (exit ${status})${RESET}, c^x max match ${match_color}${cx_match_pct:-N/A}%${RESET}, beam run max ${beam_match_color}${beam_run_max_match_pct:-N/A}%${RESET}, majority vote match ${majority_match_color}${majority_vote_match_pct:-N/A}%${RESET}, top avalanche output match ${top_output_match_color}${top_output_match_pct:-N/A}%${RESET}, c^x candidates ${cx_candidates_total:-N/A}, avalanche candidates ${avalanche_candidates_total:-N/A}, verdict ${verdict_color}${verdict}${RESET}, duration ${duration_s}s"
+    echo "Run ${i} summary: ${RED}FAILED (exit ${status})${RESET}, c^x max match ${match_color}${cx_match_pct:-N/A}%${RESET}, beam run max ${beam_match_color}${beam_run_max_match_pct:-N/A}%${RESET}, majority vote match ${majority_match_color}${majority_vote_match_pct:-N/A}%${RESET}, c^x candidates ${cx_candidates_total:-N/A}, avalanche candidates ${avalanche_candidates_total:-N/A}, verdict ${verdict_color}${verdict:-UNKNOWN}${RESET}, duration ${duration_s}s"
   fi
   echo "Session JSON: ${session_path}"
   if [[ -n "${beam_run_max_line}" ]]; then
@@ -267,11 +217,6 @@ for i in $(seq 1 "${RUNS}"); do
     else
       echo "Avalanche majority vote colored comparison: N/A"
     fi
-  fi
-  if [[ -n "${batch_match_percentages}" ]]; then
-    echo "Match percentages: [${batch_match_percentages}]"
-  else
-    echo "Match percentages: N/A"
   fi
   progress_bar "${i}" "${RUNS}"
   rm -f "${run_output}"
@@ -309,8 +254,7 @@ echo "===== SUMMARY ====="
 echo "c^x max match % stats: mean ${cx_match_mean}, std dev ${cx_match_stddev}, min ${cx_match_min}, max ${cx_match_max}, n ${cx_match_count}"
 echo "c^x evaluated candidates: total ${cx_candidates_sum}, average ${cx_candidates_avg}, n ${cx_candidates_count}"
 echo "Avalanche evaluated candidates: total ${avalanche_candidates_sum}, average ${avalanche_candidates_avg}, n ${avalanche_candidates_count}"
-echo "Verdict threshold: ${VERDICT_MATCH_THRESHOLD_PCT}%"
-echo "Verdicts: PASS ${pass_count}, FAIL ${fail_count}, UNKNOWN ${unknown_count}"
+echo "Verdicts: PASS ${pass_count}, FAIL ${fail_count}"
 echo "Average duration per run: ${avg_time_s}s"
 if [[ -n "${session_path:-}" ]]; then
   echo "Viewer: python3 scripts/session_viewer.py ${session_path} (Beam vs R tab)"

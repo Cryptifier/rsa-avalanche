@@ -42,7 +42,11 @@ struct Args {
     crypto_rng: bool,
 
     /// Path to a JSON config matching the original rsa_demo.sage schema
-    #[arg(short = 'c', long, default_value = "config/rsa_config.json")]
+    #[arg(
+        short = 'c',
+        long,
+        default_value = "config/rsa_config_small_batch.json"
+    )]
     config: String,
 
     /// Run extended analysis tests and sufficiency checks
@@ -89,6 +93,30 @@ struct Args {
     #[arg(long = "avalanche-combination-pool-size", value_parser = clap::value_parser!(u64).range(1..))]
     avalanche_combination_pool_size: Option<u64>,
 
+    /// Number of Avalanche tiers to execute, including the initial sampled-input tier
+    #[arg(long = "avalanche-combination-recursion-depth", value_parser = clap::value_parser!(u64).range(1..))]
+    avalanche_combination_recursion_depth: Option<u64>,
+
+    /// Number of prior-tier samples grouped into each recursive Avalanche call
+    #[arg(long = "avalanche-combination-recursive-group-size", value_parser = clap::value_parser!(u64).range(1..))]
+    avalanche_combination_recursive_group_size: Option<u64>,
+
+    /// Number of recursive samples to produce per subsequent Avalanche tier; 0 preserves one-pass regrouping
+    #[arg(long = "avalanche-combination-recursive-resample-count", value_parser = clap::value_parser!(u64))]
+    avalanche_combination_recursive_resample_count: Option<u64>,
+
+    /// Whether sampled avalanche prunes the scored-input pool by central Hamming-distance percentile before sampling
+    #[arg(long = "avalanche-combination-hamming-distance-prune")]
+    avalanche_combination_hamming_distance_prune: Option<bool>,
+
+    /// Central percentile of Hamming distances retained when sampled-avalanche pruning is enabled
+    #[arg(long = "avalanche-combination-hamming-distance-keep-percentile")]
+    avalanche_combination_hamming_distance_keep_percentile: Option<f64>,
+
+    /// Percentage of the retained inlier pool size to add back from Hamming-distance outlier tails
+    #[arg(long = "avalanche-combination-hamming-distance-outlier-preference-pct")]
+    avalanche_combination_hamming_distance_outlier_preference_pct: Option<f64>,
+
     /// Whether sampled avalanche uses per-bit majority-vote probabilities from the combination outputs
     #[arg(long = "avalanche-combination-majority-vote")]
     avalanche_combination_majority_vote: Option<bool>,
@@ -100,6 +128,10 @@ struct Args {
     /// Whether sampled avalanche prints a separate majority-vote summary for the selected sample
     #[arg(long = "avalanche-combination-majority-vote-print")]
     avalanche_combination_majority_vote_print: Option<bool>,
+
+    /// Whether recursive Avalanche tiers carry forward the top beam-search bits instead of majority-vote bits
+    #[arg(long = "avalanche-use-top-beam")]
+    avalanche_use_top_beam: Option<bool>,
 
     /// Raise ciphertext to a monotonically increasing exponent per batch
     #[arg(long)]
@@ -159,6 +191,35 @@ fn main() -> Result<(), Box<dyn Error>> {
         config.engine.avalanche_combination_pool_size = usize::try_from(pool_size)
             .map_err(|_| "avalanche combination pool size exceeds usize range")?;
     }
+    if let Some(recursion_depth) = args.avalanche_combination_recursion_depth {
+        config.engine.avalanche_combination_recursion_depth = usize::try_from(recursion_depth)
+            .map_err(|_| "avalanche combination recursion depth exceeds usize range")?;
+    }
+    if let Some(group_size) = args.avalanche_combination_recursive_group_size {
+        config.engine.avalanche_combination_recursive_group_size = usize::try_from(group_size)
+            .map_err(|_| "avalanche combination recursive group size exceeds usize range")?;
+    }
+    if let Some(resample_count) = args.avalanche_combination_recursive_resample_count {
+        config.engine.avalanche_combination_recursive_resample_count = usize::try_from(
+            resample_count,
+        )
+        .map_err(|_| "avalanche combination recursive resample count exceeds usize range")?;
+    }
+    if let Some(prune_hamming_distance) = args.avalanche_combination_hamming_distance_prune {
+        config.engine.avalanche_combination_hamming_distance_prune = prune_hamming_distance;
+    }
+    if let Some(keep_percentile) = args.avalanche_combination_hamming_distance_keep_percentile {
+        config
+            .engine
+            .avalanche_combination_hamming_distance_keep_percentile = keep_percentile;
+    }
+    if let Some(outlier_preference_pct) =
+        args.avalanche_combination_hamming_distance_outlier_preference_pct
+    {
+        config
+            .engine
+            .avalanche_combination_hamming_distance_outlier_preference_pct = outlier_preference_pct;
+    }
     if let Some(majority_vote) = args.avalanche_combination_majority_vote {
         config.engine.avalanche_combination_majority_vote = majority_vote;
     }
@@ -167,6 +228,9 @@ fn main() -> Result<(), Box<dyn Error>> {
     }
     if let Some(majority_vote_print) = args.avalanche_combination_majority_vote_print {
         config.engine.avalanche_combination_majority_vote_print = majority_vote_print;
+    }
+    if let Some(use_top_beam) = args.avalanche_use_top_beam {
+        config.engine.avalanche_use_top_beam = use_top_beam;
     }
     config.engine.analysis_batch_enable = batch_enable;
     if args.ciphertext_modify {
@@ -210,6 +274,22 @@ fn main() -> Result<(), Box<dyn Error>> {
             .engine
             .avalanche_combination_mixed_r_candidates,
         avalanche_combination_pool_size: config.engine.avalanche_combination_pool_size,
+        avalanche_combination_recursion_depth: config.engine.avalanche_combination_recursion_depth,
+        avalanche_combination_recursive_group_size: config
+            .engine
+            .avalanche_combination_recursive_group_size,
+        avalanche_combination_recursive_resample_count: config
+            .engine
+            .avalanche_combination_recursive_resample_count,
+        avalanche_combination_hamming_distance_prune: config
+            .engine
+            .avalanche_combination_hamming_distance_prune,
+        avalanche_combination_hamming_distance_keep_percentile: config
+            .engine
+            .avalanche_combination_hamming_distance_keep_percentile,
+        avalanche_combination_hamming_distance_outlier_preference_pct: config
+            .engine
+            .avalanche_combination_hamming_distance_outlier_preference_pct,
         avalanche_combination_majority_vote: config.engine.avalanche_combination_majority_vote,
         avalanche_combination_sample_smoothing: config
             .engine
@@ -217,23 +297,34 @@ fn main() -> Result<(), Box<dyn Error>> {
         avalanche_combination_majority_vote_print: config
             .engine
             .avalanche_combination_majority_vote_print,
+        avalanche_use_top_beam: config.engine.avalanche_use_top_beam,
+        avalanche_combination_keep_all_samples_in_memory: config
+            .engine
+            .avalanche_combination_keep_all_samples_in_memory,
+        avalanche_statistics_collection: config.engine.avalanche_statistics_collection,
+        avalanche_random_chacha20_inputs: config.engine.avalanche_random_chacha20_inputs,
+        avalanche_fitness_scoring_pass: config.engine.avalanche_fitness_scoring_pass,
+        avalanche_fitness_shift_bytes: config.engine.avalanche_fitness_shift_bytes,
+        avalanche_fitness_bit_width: config.engine.avalanche_fitness_bit_width,
+        avalanche_fitness_r_candidate_limit: config.engine.avalanche_fitness_r_candidate_limit,
+        avalanche_fitness_cx_candidate_limit: config.engine.avalanche_fitness_cx_candidate_limit,
         bits_decrypt: args.bits_decrypt,
         r_candidate_target_exponent: args
             .r_candidate_target_exponent
             .as_ref()
-            .map(|value| value.normalized().to_string()),
+            .map(|value| value.normalized()),
         r_candidate_target_exponent_minimum: args
             .r_candidate_target_exponent_minimum
             .as_ref()
-            .map(|value| value.normalized().to_string()),
-    })));
+            .map(|value| value.normalized()),
+    })?));
 
     let analytics_for_handler = Arc::clone(&analytics);
     ctrlc::set_handler(move || {
         if let Ok(mut guard) = analytics_for_handler.lock() {
             guard.finish(Some("interrupted".to_string()));
             let output_path = guard.session_json_path().to_string();
-            if let Err(err) = write_session_log(&output_path, &guard) {
+            if let Err(err) = write_session_log(&mut guard) {
                 eprintln!("Failed to write {}: {}", output_path, err);
             }
         }
@@ -257,7 +348,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     if let Ok(mut guard) = analytics.lock() {
         guard.finish(result.as_ref().err().map(|err| err.to_string()));
         let output_path = guard.session_json_path().to_string();
-        if let Err(err) = write_session_log(&output_path, &guard) {
+        if let Err(err) = write_session_log(&mut guard) {
             eprintln!("Failed to write {}: {}", output_path, err);
         }
     }

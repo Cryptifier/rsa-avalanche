@@ -13,7 +13,7 @@
     availability_zone: us-west-2b
 
     ami_id: ami-0eaad8e6a673be41c
-    instance_type: c7gd.2xlarge
+    instance_type: c7a.16xlarge
     key_name: keypair-4
 
     subnet_id: subnet-063d51c99d3f31af1
@@ -25,7 +25,7 @@
     dev_user_id: 1000
     dev_user_gid: 1000
 
-    spot_price: "0.11"
+    spot_price: "1.20"
 
     # Root device from the AMI. Adjust if your AMI uses a different root device.
     root_device_name: /dev/sda1

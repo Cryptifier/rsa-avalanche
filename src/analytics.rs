@@ -1,4 +1,6 @@
 use bigdecimal::BigDecimal;
+use std::fs::File;
+use std::io::BufWriter;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
 
@@ -6,9 +8,9 @@ use num_bigint::BigUint;
 use serde::Serialize;
 use serde_json::{Map, Value};
 
+use crate::logs::{LogError, LogWriter, write_session_start};
 use crate::r_candidates::{
-    RCandidate, RCandidateMode, RCandidateSettings, generate_r_candidates_batch,
-    retarget_r_candidates_for_speculative_oracles,
+    RCandidate, RCandidateMode, RCandidateSettings, prepare_r_candidates_batch,
 };
 use crate::rng::RngChoice;
 
@@ -55,18 +57,48 @@ pub struct AnalyticsCliArgs {
     pub avalanche_combination_mixed_r_candidates: usize,
     /// Number of top scored candidates retained for avalanche combination sampling.
     pub avalanche_combination_pool_size: usize,
+    /// Number of Avalanche tiers to execute, including the initial sampled-input tier.
+    pub avalanche_combination_recursion_depth: usize,
+    /// Number of prior-tier samples grouped into each recursive Avalanche call.
+    pub avalanche_combination_recursive_group_size: usize,
+    /// Number of recursive samples produced per subsequent Avalanche tier; `0` preserves one-pass grouping.
+    pub avalanche_combination_recursive_resample_count: usize,
+    /// Whether sampled avalanche prunes the scored-input pool by Hamming-distance percentile before sampling.
+    pub avalanche_combination_hamming_distance_prune: bool,
+    /// Central percentile of Hamming distances retained when sampled-avalanche pruning is enabled.
+    pub avalanche_combination_hamming_distance_keep_percentile: f64,
+    /// Percentage of the retained inlier pool size to add back from Hamming-distance outlier tails.
+    pub avalanche_combination_hamming_distance_outlier_preference_pct: f64,
     /// Whether sampled avalanche uses per-bit majority-vote probabilities from the combination outputs.
     pub avalanche_combination_majority_vote: bool,
     /// Whether sampled avalanche smooths per-bit majority-vote probabilities before beam search.
     pub avalanche_combination_sample_smoothing: bool,
     /// Whether sampled avalanche prints a separate majority-vote summary for the selected sample.
     pub avalanche_combination_majority_vote_print: bool,
+    /// Whether recursive Avalanche tiers carry forward the top beam-search bits instead of majority-vote bits.
+    pub avalanche_use_top_beam: bool,
+    /// Whether all sampled-avalanche combinations were retained in memory during the run.
+    pub avalanche_combination_keep_all_samples_in_memory: bool,
+    /// Whether avalanche runs collected per-level and per-sample statistics.
+    pub avalanche_statistics_collection: bool,
+    /// Whether sampled avalanche used direct ChaCha20 input sampling instead of mixed-r combinations.
+    pub avalanche_random_chacha20_inputs: bool,
+    /// Whether sampled avalanche applies the trailing-zero fitness preprocessing pass.
+    pub avalanche_fitness_scoring_pass: bool,
+    /// Number of bytes used to shift plaintexts before candidate scoring.
+    pub avalanche_fitness_shift_bytes: usize,
+    /// Number of least-significant bits inspected by the trailing-zero fitness score.
+    pub avalanche_fitness_bit_width: usize,
+    /// Maximum number of retained r-candidate groups after fitness preprocessing.
+    pub avalanche_fitness_r_candidate_limit: usize,
+    /// Maximum number of retained `c^x` inputs per r-candidate group after fitness preprocessing.
+    pub avalanche_fitness_cx_candidate_limit: usize,
     /// Expected bit width for decryptions.
     pub bits_decrypt: Option<u32>,
     /// Optional CLI override for speculative r-candidate target exponent.
-    pub r_candidate_target_exponent: Option<String>,
+    pub r_candidate_target_exponent: Option<BigDecimal>,
     /// Optional CLI override for speculative r-candidate target exponent minimum.
-    pub r_candidate_target_exponent_minimum: Option<String>,
+    pub r_candidate_target_exponent_minimum: Option<BigDecimal>,
 }
 
 #[derive(Debug, Serialize)]
@@ -91,12 +123,27 @@ pub(crate) struct AnalyticsCliInfo {
     avalanche_combination_size: usize,
     avalanche_combination_mixed_r_candidates: usize,
     avalanche_combination_pool_size: usize,
+    avalanche_combination_recursion_depth: usize,
+    avalanche_combination_recursive_group_size: usize,
+    avalanche_combination_recursive_resample_count: usize,
+    avalanche_combination_hamming_distance_prune: bool,
+    avalanche_combination_hamming_distance_keep_percentile: f64,
+    avalanche_combination_hamming_distance_outlier_preference_pct: f64,
     avalanche_combination_majority_vote: bool,
     avalanche_combination_sample_smoothing: bool,
     avalanche_combination_majority_vote_print: bool,
+    avalanche_use_top_beam: bool,
+    avalanche_combination_keep_all_samples_in_memory: bool,
+    avalanche_statistics_collection: bool,
+    avalanche_random_chacha20_inputs: bool,
+    avalanche_fitness_scoring_pass: bool,
+    avalanche_fitness_shift_bytes: usize,
+    avalanche_fitness_bit_width: usize,
+    avalanche_fitness_r_candidate_limit: usize,
+    avalanche_fitness_cx_candidate_limit: usize,
     bits_decrypt: Option<u32>,
-    r_candidate_target_exponent: Option<String>,
-    r_candidate_target_exponent_minimum: Option<String>,
+    r_candidate_target_exponent: Option<BigDecimal>,
+    r_candidate_target_exponent_minimum: Option<BigDecimal>,
 }
 
 /// Timing entry for a named step.
@@ -129,7 +176,7 @@ pub struct FeatureAnalytics {
 #[derive(Debug, Serialize)]
 pub struct RCandidateFactor {
     /// Prime factor value.
-    pub prime: String,
+    pub prime: BigUint,
     /// Exponent for the prime factor.
     pub exponent: u64,
     /// Bit length of the prime factor.
@@ -140,11 +187,11 @@ pub struct RCandidateFactor {
 #[derive(Debug, Serialize)]
 pub struct RCandidateEntry {
     /// Candidate modulus value.
-    pub r: String,
+    pub r: BigUint,
     /// Bit length of the candidate modulus.
     pub r_bits: u64,
     /// Decimal target exponent used to retarget the candidate.
-    pub target_exponent: String,
+    pub target_exponent: BigDecimal,
     /// Prime factorization metadata.
     pub factors: Vec<RCandidateFactor>,
 }
@@ -153,15 +200,15 @@ pub struct RCandidateEntry {
 #[derive(Debug, Serialize)]
 pub struct RCandidateTraceEntry {
     /// Candidate modulus value.
-    pub r: String,
+    pub r: BigUint,
     /// Bit length of the candidate modulus.
     pub r_bits: u64,
     /// Decimal target exponent used to retarget the candidate.
-    pub target_exponent: String,
+    pub target_exponent: BigDecimal,
     /// Ciphertext after homomorphic base conversion into `r`.
-    pub hbc_ciphertext_r: String,
+    pub hbc_ciphertext_r: BigUint,
     /// Candidate-derived plaintext.
-    pub candidate_decryption: String,
+    pub candidate_decryption: BigUint,
 }
 
 /// Analytics payload for a batch of r candidates.
@@ -184,7 +231,7 @@ pub struct RCandidateBatchAnalytics {
     /// Whether reuse append-only mode is enabled.
     pub reuse_append_only: bool,
     /// Minimum factor used for candidate screening.
-    pub min_factor: String,
+    pub min_factor: BigUint,
     /// Process scale factor for candidate generation.
     pub process_scale: u32,
     /// Number of small primes per candidate.
@@ -193,7 +240,10 @@ pub struct RCandidateBatchAnalytics {
     pub max_factors: usize,
     /// Optional target bit length for candidates.
     pub target_bit_length: Option<u64>,
+    /// Number of candidate entries produced for the batch.
+    pub candidate_count: usize,
     /// Candidate entries for the batch.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
     pub candidates: Vec<RCandidateEntry>,
 }
 
@@ -201,19 +251,19 @@ pub struct RCandidateBatchAnalytics {
 #[derive(Debug, Serialize)]
 pub struct RCandidateAccuracyEntry {
     /// Candidate modulus value.
-    pub r: String,
+    pub r: BigUint,
     /// Bit length of the candidate modulus.
     pub r_bits: u64,
     /// Decimal target exponent used to retarget the candidate.
-    pub target_exponent: String,
+    pub target_exponent: BigDecimal,
     /// Prime factorization metadata.
     pub factors: Vec<RCandidateFactor>,
     /// Mean accuracy percentage across the message batch.
     pub accuracy_pct: f64,
     /// HBC ciphertexts in the candidate modulus (per message).
-    pub hbc_ciphertexts_r: Vec<String>,
+    pub hbc_ciphertexts_r: Vec<BigUint>,
     /// Candidate-derived plaintexts (per message).
-    pub candidate_decryptions: Vec<String>,
+    pub candidate_decryptions: Vec<BigUint>,
 }
 
 /// Accuracy batch payload for a shared message set.
@@ -222,23 +272,26 @@ pub struct RCandidateAccuracyBatch {
     /// Label describing the batch usage.
     pub context: String,
     /// Plaintext messages used in the batch.
-    pub messages: Vec<String>,
+    pub messages: Vec<BigUint>,
     /// Ciphertexts corresponding to the messages.
-    pub ciphertexts: Vec<String>,
+    pub ciphertexts: Vec<BigUint>,
     /// Shifted ciphertexts when shift is enabled.
-    pub shifted_ciphertexts: Vec<String>,
+    pub shifted_ciphertexts: Vec<BigUint>,
     /// Rabin exponent used for the batch transforms.
     pub rabin_exponent: u32,
     /// Historical bootstrap-source modulus field (currently the source modulus before HBC).
-    pub tonelli_shanks_modulus: String,
+    pub tonelli_shanks_modulus: BigUint,
     /// Historical bootstrap-source ciphertext field (currently the shifted ciphertexts).
-    pub tonelli_shanks_ciphertexts: Vec<String>,
+    pub tonelli_shanks_ciphertexts: Vec<BigUint>,
+    /// Number of per-candidate accuracy entries evaluated for the batch.
+    pub candidate_count: usize,
     /// Per-candidate accuracy entries.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
     pub candidates: Vec<RCandidateAccuracyEntry>,
     /// Maximum bitwise match percentage among evaluated `c^x` candidates in the batch.
     pub cx_max_match_pct: Option<f64>,
     /// Ciphertext exponent `x` that achieved the batch max bitwise match.
-    pub cx_max_x: Option<String>,
+    pub cx_max_x: Option<BigUint>,
     /// Total evaluated `c^x` candidates in the batch.
     pub cx_evaluated_candidates: usize,
     /// Total avalanche candidates evaluated for the batch.
@@ -247,6 +300,10 @@ pub struct RCandidateAccuracyBatch {
     pub beam_match_pct: Option<f64>,
     /// Beam search ones-match percentage for the batch.
     pub beam_ones_match_pct: Option<f64>,
+    /// Majority-vote match percentage for the selected or best final-tier sample.
+    pub majority_vote_match_pct: Option<f64>,
+    /// Majority-vote ones-match percentage for the selected or best final-tier sample.
+    pub majority_vote_ones_match_pct: Option<f64>,
     /// Beam search score for the top candidate.
     pub beam_score: Option<f64>,
     /// Bit width of the beam search candidate.
@@ -257,8 +314,46 @@ pub struct RCandidateAccuracyBatch {
     pub avalanche_selected_sample_average_score_pct: Option<f64>,
     /// Total sampled avalanche candidates evaluated across all combination samples.
     pub avalanche_sampled_candidates_evaluated: usize,
+    /// Number of avalanche combination samples retained for the batch.
+    pub avalanche_combination_sample_count: usize,
+    /// Per-tier sample-accuracy statistics for recursive Avalanche execution.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub avalanche_tier_statistics: Vec<AvalancheTierStatistics>,
     /// Detailed avalanche combination sample results for the batch.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
     pub avalanche_combination_samples: Vec<AvalancheCombinationSample>,
+}
+
+/// Accuracy summary for one sample within an Avalanche tier.
+#[derive(Debug, Serialize, Clone)]
+pub struct AvalancheTierSampleStat {
+    /// One-based sample index within the tier.
+    pub sample_index: usize,
+    /// Number of source items used to produce the sample.
+    pub input_count: usize,
+    /// Mean score percentage of the sample inputs.
+    pub average_score_pct: f64,
+    /// Beam-search match percentage for the top beam candidate when available.
+    pub beam_match_pct: Option<f64>,
+    /// Majority-vote match percentage for the sample when available.
+    pub majority_vote_match_pct: Option<f64>,
+    /// Best match percentage across the beam and majority-vote outputs for the sample.
+    pub best_match_pct: f64,
+}
+
+/// Accuracy distribution captured for an Avalanche tier.
+#[derive(Debug, Serialize, Clone)]
+pub struct AvalancheTierStatistics {
+    /// One-based tier index with `1` representing the initial sampled-input tier.
+    pub tier_index: usize,
+    /// Number of samples produced in the tier.
+    pub sample_count: usize,
+    /// Number of inputs grouped into each sample for this tier.
+    pub group_size: usize,
+    /// Human-readable description of the sample source for this tier.
+    pub source_kind: String,
+    /// Per-sample accuracy statistics across the full tier.
+    pub sample_stats: Vec<AvalancheTierSampleStat>,
 }
 
 /// Source candidate included in an avalanche combination sample.
@@ -269,19 +364,19 @@ pub struct AvalancheCombinationSampleInput {
     /// Zero-based index of the message or ciphertext variant inside the batch candidate.
     pub message_index: usize,
     /// Candidate modulus value.
-    pub r: String,
+    pub r: BigUint,
     /// Bit length of the candidate modulus.
     pub r_bits: u64,
     /// Decimal target exponent used to retarget the candidate.
-    pub target_exponent: String,
+    pub target_exponent: BigDecimal,
     /// Ciphertext exponent applied to the source ciphertext.
-    pub x: String,
+    pub x: BigUint,
     /// Match percentage used to score the source candidate.
     pub score_match_pct: f64,
     /// HBC ciphertext in the candidate modulus.
-    pub hbc_ciphertext_r: String,
+    pub hbc_ciphertext_r: BigUint,
     /// Candidate-derived plaintext for this source input.
-    pub candidate_decryption: String,
+    pub candidate_decryption: BigUint,
 }
 
 /// Beam-search candidate produced from an avalanche combination sample.
@@ -348,19 +443,71 @@ pub struct RCandidateTraceBatch {
     /// Label describing the batch usage.
     pub context: String,
     /// Plaintext message used in the trace.
-    pub message: String,
+    pub message: BigUint,
     /// Ciphertext corresponding to the message.
-    pub ciphertext: String,
+    pub ciphertext: BigUint,
     /// Shifted ciphertext when shift is enabled.
-    pub shifted_ciphertext: String,
+    pub shifted_ciphertext: BigUint,
     /// Rabin exponent used for the trace transforms.
     pub rabin_exponent: u32,
     /// Historical bootstrap-source modulus field (currently the source modulus before HBC).
-    pub tonelli_shanks_modulus: String,
+    pub tonelli_shanks_modulus: BigUint,
     /// Historical bootstrap-source ciphertext field (currently the shifted ciphertext).
-    pub tonelli_shanks_ciphertext: String,
+    pub tonelli_shanks_ciphertext: BigUint,
+    /// Number of trace candidate entries evaluated for the batch.
+    pub candidate_count: usize,
     /// Per-candidate trace entries.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
     pub candidates: Vec<RCandidateTraceEntry>,
+}
+
+impl RCandidateBatchAnalytics {
+    /// Removes per-candidate payloads before session-log persistence.
+    ///
+    /// # Parameters
+    /// - None.
+    ///
+    /// # Returns
+    /// - `()`: This method returns nothing.
+    ///
+    /// # Expected Output
+    /// - Clears candidate-detail storage while preserving summary counts.
+    fn compact_for_session_log(&mut self) {
+        self.candidates.clear();
+    }
+}
+
+impl RCandidateAccuracyBatch {
+    /// Removes per-candidate payloads before session-log persistence.
+    ///
+    /// # Parameters
+    /// - None.
+    ///
+    /// # Returns
+    /// - `()`: This method returns nothing.
+    ///
+    /// # Expected Output
+    /// - Clears candidate and sampled-avalanche detail storage while preserving summary counts.
+    fn compact_for_session_log(&mut self) {
+        self.candidates.clear();
+        self.avalanche_combination_samples.clear();
+    }
+}
+
+impl RCandidateTraceBatch {
+    /// Removes per-candidate payloads before session-log persistence.
+    ///
+    /// # Parameters
+    /// - None.
+    ///
+    /// # Returns
+    /// - `()`: This method returns nothing.
+    ///
+    /// # Expected Output
+    /// - Clears trace-detail storage while preserving summary counts.
+    fn compact_for_session_log(&mut self) {
+        self.candidates.clear();
+    }
 }
 
 /// Top-level analytics session payload.
@@ -376,6 +523,10 @@ pub struct SessionAnalytics {
     pub(crate) r_candidate_accuracy_batches: Vec<RCandidateAccuracyBatch>,
     pub(crate) r_candidate_traces: Vec<RCandidateTraceBatch>,
     pub(crate) errors: Vec<String>,
+    #[serde(skip_serializing)]
+    pub(crate) stream_writer: Option<LogWriter<BufWriter<File>>>,
+    #[serde(skip_serializing)]
+    pub(crate) stream_started: bool,
 }
 
 impl SessionAnalytics {
@@ -385,44 +536,69 @@ impl SessionAnalytics {
     /// - `args`: CLI metadata to persist in the session.
     ///
     /// # Returns
-    /// - `SessionAnalytics`: Initialized analytics container.
+    /// - `Result<SessionAnalytics, LogError>`: Initialized analytics container or an NDJSON stream error.
     ///
     /// # Expected Output
-    /// - Returns a new session with timestamps and CLI metadata; no side effects.
-    pub fn new(args: AnalyticsCliArgs) -> Self {
-        Self {
-            started_unix_ms: now_unix_ms(),
+    /// - Creates or overwrites the configured session NDJSON file and writes `session_start`.
+    pub fn new(args: AnalyticsCliArgs) -> Result<Self, LogError> {
+        let started_unix_ms = now_unix_ms();
+        let cli = AnalyticsCliInfo {
+            bits: args.bits,
+            message_override: args.message_override,
+            public_exponent: args.public_exponent,
+            seed: args.seed,
+            crypto_rng: args.crypto_rng,
+            config_path: args.config_path,
+            tests: args.tests,
+            export: args.export,
+            session_json: args.session_json,
+            shift: args.shift,
+            ciphertext_modify: args.ciphertext_modify,
+            use_hamming_distance: args.use_hamming_distance,
+            mirror_invert_candidates: args.mirror_invert_candidates,
+            beam_bit_one_threshold: args.beam_bit_one_threshold,
+            avalanche_beam_top_k: args.avalanche_beam_top_k,
+            avalanche_probability_spread_exponent: args.avalanche_probability_spread_exponent,
+            avalanche_combination_samples: args.avalanche_combination_samples,
+            avalanche_combination_size: args.avalanche_combination_size,
+            avalanche_combination_mixed_r_candidates: args.avalanche_combination_mixed_r_candidates,
+            avalanche_combination_pool_size: args.avalanche_combination_pool_size,
+            avalanche_combination_recursion_depth: args.avalanche_combination_recursion_depth,
+            avalanche_combination_recursive_group_size: args
+                .avalanche_combination_recursive_group_size,
+            avalanche_combination_recursive_resample_count: args
+                .avalanche_combination_recursive_resample_count,
+            avalanche_combination_hamming_distance_prune: args
+                .avalanche_combination_hamming_distance_prune,
+            avalanche_combination_hamming_distance_keep_percentile: args
+                .avalanche_combination_hamming_distance_keep_percentile,
+            avalanche_combination_hamming_distance_outlier_preference_pct: args
+                .avalanche_combination_hamming_distance_outlier_preference_pct,
+            avalanche_combination_majority_vote: args.avalanche_combination_majority_vote,
+            avalanche_combination_sample_smoothing: args.avalanche_combination_sample_smoothing,
+            avalanche_combination_majority_vote_print: args
+                .avalanche_combination_majority_vote_print,
+            avalanche_use_top_beam: args.avalanche_use_top_beam,
+            avalanche_combination_keep_all_samples_in_memory: args
+                .avalanche_combination_keep_all_samples_in_memory,
+            avalanche_statistics_collection: args.avalanche_statistics_collection,
+            avalanche_random_chacha20_inputs: args.avalanche_random_chacha20_inputs,
+            avalanche_fitness_scoring_pass: args.avalanche_fitness_scoring_pass,
+            avalanche_fitness_shift_bytes: args.avalanche_fitness_shift_bytes,
+            avalanche_fitness_bit_width: args.avalanche_fitness_bit_width,
+            avalanche_fitness_r_candidate_limit: args.avalanche_fitness_r_candidate_limit,
+            avalanche_fitness_cx_candidate_limit: args.avalanche_fitness_cx_candidate_limit,
+            bits_decrypt: args.bits_decrypt,
+            r_candidate_target_exponent: args.r_candidate_target_exponent,
+            r_candidate_target_exponent_minimum: args.r_candidate_target_exponent_minimum,
+        };
+        let mut stream_writer = LogWriter::create(&cli.session_json)?;
+        write_session_start(&mut stream_writer, started_unix_ms, &cli)?;
+
+        Ok(Self {
+            started_unix_ms,
             finished_unix_ms: None,
-            cli: AnalyticsCliInfo {
-                bits: args.bits,
-                message_override: args.message_override,
-                public_exponent: args.public_exponent,
-                seed: args.seed,
-                crypto_rng: args.crypto_rng,
-                config_path: args.config_path,
-                tests: args.tests,
-                export: args.export,
-                session_json: args.session_json,
-                shift: args.shift,
-                ciphertext_modify: args.ciphertext_modify,
-                use_hamming_distance: args.use_hamming_distance,
-                mirror_invert_candidates: args.mirror_invert_candidates,
-                beam_bit_one_threshold: args.beam_bit_one_threshold,
-                avalanche_beam_top_k: args.avalanche_beam_top_k,
-                avalanche_probability_spread_exponent: args.avalanche_probability_spread_exponent,
-                avalanche_combination_samples: args.avalanche_combination_samples,
-                avalanche_combination_size: args.avalanche_combination_size,
-                avalanche_combination_mixed_r_candidates: args
-                    .avalanche_combination_mixed_r_candidates,
-                avalanche_combination_pool_size: args.avalanche_combination_pool_size,
-                avalanche_combination_majority_vote: args.avalanche_combination_majority_vote,
-                avalanche_combination_sample_smoothing: args.avalanche_combination_sample_smoothing,
-                avalanche_combination_majority_vote_print: args
-                    .avalanche_combination_majority_vote_print,
-                bits_decrypt: args.bits_decrypt,
-                r_candidate_target_exponent: args.r_candidate_target_exponent,
-                r_candidate_target_exponent_minimum: args.r_candidate_target_exponent_minimum,
-            },
+            cli,
             steps: Vec::new(),
             step_summaries: Vec::new(),
             features: Vec::new(),
@@ -430,7 +606,9 @@ impl SessionAnalytics {
             r_candidate_accuracy_batches: Vec::new(),
             r_candidate_traces: Vec::new(),
             errors: Vec::new(),
-        }
+            stream_writer: Some(stream_writer),
+            stream_started: true,
+        })
     }
 
     /// Returns the configured output path for the session JSON.
@@ -476,10 +654,13 @@ impl SessionAnalytics {
     /// # Expected Output
     /// - Appends a step timing entry; no stdout/stderr output.
     pub fn record_step(&mut self, name: &str, duration: Duration) {
-        self.steps.push(StepTiming {
+        let step = StepTiming {
             name: name.to_string(),
             duration_ms: duration.as_millis(),
-        });
+        };
+        if !self.try_stream_event("step", &step) {
+            self.steps.push(step);
+        }
     }
 
     /// Records an aggregate step summary for repeated operations.
@@ -500,12 +681,15 @@ impl SessionAnalytics {
         }
         let total_ms = total.as_millis();
         let mean_ms = total_ms as f64 / count as f64;
-        self.step_summaries.push(StepSummary {
+        let summary = StepSummary {
             name: name.to_string(),
             count,
             total_ms,
             mean_ms,
-        });
+        };
+        if !self.try_stream_event("step_summary", &summary) {
+            self.step_summaries.push(summary);
+        }
     }
 
     /// Marks a feature as enabled or disabled for this session.
@@ -584,7 +768,11 @@ impl SessionAnalytics {
     /// # Expected Output
     /// - Appends the batch entry; no stdout/stderr output.
     pub fn push_r_candidate_batch(&mut self, batch: RCandidateBatchAnalytics) {
-        self.r_candidate_batches.push(batch);
+        let mut batch = batch;
+        batch.compact_for_session_log();
+        if !self.try_stream_event("r_candidate_batch", &batch) {
+            self.r_candidate_batches.push(batch);
+        }
     }
 
     /// Stores r candidate accuracy batch data for the session.
@@ -598,7 +786,11 @@ impl SessionAnalytics {
     /// # Expected Output
     /// - Appends the accuracy batch entry; no stdout/stderr output.
     pub fn push_r_candidate_accuracy_batch(&mut self, batch: RCandidateAccuracyBatch) {
-        self.r_candidate_accuracy_batches.push(batch);
+        let mut batch = batch;
+        batch.compact_for_session_log();
+        if !self.try_stream_event("r_candidate_accuracy_batch", &batch) {
+            self.r_candidate_accuracy_batches.push(batch);
+        }
     }
 
     /// Stores r candidate trace data for a specific message context.
@@ -612,7 +804,11 @@ impl SessionAnalytics {
     /// # Expected Output
     /// - Appends the trace entry; no stdout/stderr output.
     pub fn push_r_candidate_trace_batch(&mut self, batch: RCandidateTraceBatch) {
-        self.r_candidate_traces.push(batch);
+        let mut batch = batch;
+        batch.compact_for_session_log();
+        if !self.try_stream_event("r_candidate_trace_batch", &batch) {
+            self.r_candidate_traces.push(batch);
+        }
     }
 
     fn feature_mut(&mut self, name: &str) -> &mut FeatureAnalytics {
@@ -624,6 +820,28 @@ impl SessionAnalytics {
             ..FeatureAnalytics::default()
         });
         self.features.last_mut().expect("feature entry missing")
+    }
+
+    fn try_stream_event<T: Serialize>(&mut self, event: &str, payload: &T) -> bool {
+        let mut stream_error = None;
+        let streamed = if let Some(writer) = self.stream_writer.as_mut() {
+            match writer.write_event(event, payload) {
+                Ok(()) => true,
+                Err(err) => {
+                    stream_error = Some(err);
+                    false
+                }
+            }
+        } else {
+            false
+        };
+        if let Some(err) = stream_error {
+            self.stream_writer = None;
+            self.errors.push(format!(
+                "analytics stream disabled after {event} write failure: {err}"
+            ));
+        }
+        streamed
     }
 }
 
@@ -651,46 +869,39 @@ pub fn generate_r_candidates_with_analytics(
     analytics: &Arc<Mutex<SessionAnalytics>>,
 ) -> Vec<RCandidate> {
     let start = std::time::Instant::now();
-    let mut candidates = generate_r_candidates_batch(n, settings, rng, batch_size);
-    if settings.reuse_r_candidates
-        && settings.retarget_partition_count > 0
-        && !candidates.is_empty()
-        && candidates.len() < batch_size
-    {
-        let source_count = candidates.len();
-        candidates = candidates
-            .iter()
-            .cloned()
-            .cycle()
-            .take(batch_size)
-            .collect();
-        println!(
-            "Expanded {} reused r candidates to {} retarget inputs before retargeting",
-            source_count, batch_size
-        );
-    }
-    retarget_r_candidates_for_speculative_oracles(
-        n,
-        &mut candidates,
-        &settings.target_exponent_minimum,
-        &settings.target_exponent,
-        settings.retarget_partition_count,
-        &settings.retarget_minimum_exponent,
-        rng,
-    );
+    let candidates = match prepare_r_candidates_batch(n, settings, rng, batch_size) {
+        Ok(candidates) => candidates,
+        Err(err) => {
+            println!("Failed to prepare r candidates: {}", err);
+            Vec::new()
+        }
+    };
+    let mode = if settings.reuse_retargeted_r_candidates {
+        "retargeted_reuse".to_string()
+    } else {
+        match settings.mode {
+            RCandidateMode::Factoring => "factoring".to_string(),
+            RCandidateMode::SmallPrimes => "small_primes".to_string(),
+        }
+    };
+    let reuse_path = if settings.reuse_retargeted_r_candidates {
+        settings.reuse_retargeted_r_candidates_path.clone()
+    } else {
+        settings.reuse_r_candidates_path.clone()
+    };
     let duration = start.elapsed();
 
     let candidate_entries = candidates
         .iter()
         .map(|candidate| RCandidateEntry {
-            r: candidate.r.to_string(),
+            r: candidate.r.clone(),
             r_bits: candidate.r.bits(),
-            target_exponent: format_target_exponent(&candidate.target_exponent),
+            target_exponent: candidate.target_exponent.normalized(),
             factors: candidate
                 .factors
                 .iter()
                 .map(|(p, e)| RCandidateFactor {
-                    prime: p.to_string(),
+                    prime: p.clone(),
                     exponent: *e,
                     prime_bits: p.bits(),
                 })
@@ -698,45 +909,27 @@ pub fn generate_r_candidates_with_analytics(
         })
         .collect::<Vec<_>>();
 
-    let mode = match settings.mode {
-        RCandidateMode::Factoring => "factoring",
-        RCandidateMode::SmallPrimes => "small_primes",
-    };
-
     if let Ok(mut guard) = analytics.lock() {
         guard.push_r_candidate_batch(RCandidateBatchAnalytics {
             context: context.to_string(),
-            mode: mode.to_string(),
+            mode,
             target_count: batch_size.max(1),
             generated_count: candidates.len(),
             duration_ms: duration.as_millis(),
-            reuse_path: settings.reuse_r_candidates_path.clone(),
-            reuse_enabled: settings.reuse_r_candidates,
+            reuse_path,
+            reuse_enabled: settings.reuse_r_candidates || settings.reuse_retargeted_r_candidates,
             reuse_append_only: settings.reuse_r_candidates_append_only,
-            min_factor: settings.process_min_factor.to_string(),
+            min_factor: settings.process_min_factor.clone(),
             process_scale: settings.process_scale,
             small_prime_factors: settings.small_prime_factors_per_candidate,
             max_factors: settings.max_factors_per_candidate,
             target_bit_length: settings.target_bit_length,
+            candidate_count: candidate_entries.len(),
             candidates: candidate_entries,
         });
     }
 
     candidates
-}
-
-/// Formats a candidate target exponent for analytics output.
-///
-/// # Parameters
-/// - `target_exponent`: Decimal exponent associated with the candidate.
-///
-/// # Returns
-/// - `String`: Rendered decimal value.
-///
-/// # Expected Output
-/// - Returns a plain string form; no side effects.
-fn format_target_exponent(target_exponent: &BigDecimal) -> String {
-    target_exponent.normalized().to_string()
 }
 
 /// Writes the analytics session JSON to disk.

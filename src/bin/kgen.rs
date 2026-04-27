@@ -4,7 +4,7 @@
 use std::{
     error::Error,
     fs,
-    path::{Path, PathBuf},
+    path::Path,
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -433,6 +433,7 @@ fn size_mode_label(mode: SizeMode) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::PathBuf;
 
     fn temp_path(name: &str) -> PathBuf {
         let mut path = std::env::temp_dir();

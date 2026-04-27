@@ -449,14 +449,11 @@ mod tests {
     fn avalanche_reduce(candidates: &[Vec<bool>]) -> Vec<bool> {
         let nodes: Vec<AvalancheNode> = candidates
             .iter()
-            .map(|bits| AvalancheNode {
-                biases: vec![0.0; bits.len()],
-                message_bits: bits.clone(),
-            })
+            .map(|bits| AvalancheNode::new(bits.clone(), vec![0.0; bits.len()]))
             .collect();
         search_avalanche_tree(nodes)
             .expect("avalanche search should succeed")
-            .message_bits
+            .message_bits_vec()
     }
 
     #[test]
