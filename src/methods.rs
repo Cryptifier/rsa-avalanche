@@ -2615,6 +2615,64 @@ fn compute_bit_match_percentages(candidate_bits: &[bool], message_bits: &[bool])
     (match_pct, ones_match_pct)
 }
 
+/// Validates that reported Avalanche display data matches the underlying payload bits.
+///
+/// # Parameters
+/// - `label`: Human-readable label describing the checked candidate.
+/// - `message_bits`: Reference payload bits shown in the log output.
+/// - `candidate_bits`: Candidate payload bits shown in the log output.
+/// - `reported_match_pct`: Stored overall match percentage to validate.
+/// - `reported_ones_match_pct`: Stored predicted-one match percentage to validate.
+/// - `reported_hex`: Optional stored hex string to validate against the candidate bits.
+///
+/// # Returns
+/// - `Result<(), String>`: `Ok(())` when the display fields are self-consistent.
+///
+/// # Expected Output
+/// - Returns a descriptive error when the stored percentages or hex disagree with the displayed bits.
+fn validate_displayed_candidate_consistency(
+    label: &str,
+    message_bits: &[bool],
+    candidate_bits: &[bool],
+    reported_match_pct: f64,
+    reported_ones_match_pct: f64,
+    reported_hex: Option<&str>,
+) -> Result<(), String> {
+    const PCT_TOLERANCE: f64 = 1e-9;
+
+    let (computed_match_pct, computed_ones_match_pct) =
+        compute_bit_match_percentages(candidate_bits, message_bits);
+    if (computed_match_pct - reported_match_pct).abs() > PCT_TOLERANCE {
+        return Err(format!(
+            "{label} match percentage mismatch: stored={} computed={} candidate_bits={} message_bits={}",
+            reported_match_pct,
+            computed_match_pct,
+            candidate_bits.len(),
+            message_bits.len()
+        ));
+    }
+    if (computed_ones_match_pct - reported_ones_match_pct).abs() > PCT_TOLERANCE {
+        return Err(format!(
+            "{label} ones-match percentage mismatch: stored={} computed={} candidate_bits={} message_bits={}",
+            reported_ones_match_pct,
+            computed_ones_match_pct,
+            candidate_bits.len(),
+            message_bits.len()
+        ));
+    }
+    if let Some(reported_hex) = reported_hex {
+        let computed_hex = format_bits_hex_le(candidate_bits);
+        if computed_hex != reported_hex {
+            return Err(format!(
+                "{label} hex mismatch: stored={} computed={}",
+                reported_hex, computed_hex
+            ));
+        }
+    }
+
+    Ok(())
+}
+
 /// Pads a hex string with leading zeros to the requested length.
 ///
 /// # Parameters
@@ -4952,7 +5010,7 @@ fn execute_recursive_avalanche_sample_from_indices(
 /// - Prints sampled-avalanche progress and returns sampled avalanche results.
 fn run_sampled_avalanche_beam_search(
     engine: &EngineConfig,
-    message: &BigUint,
+    payload_message: &BigUint,
     scored_inputs: &[ScoredAvalancheInput],
     batch_number: usize,
     rng: &mut RngChoice,
@@ -5008,8 +5066,8 @@ fn run_sampled_avalanche_beam_search(
     }
 
     let comparison_message_bits =
-        biguint_to_bits_le(message, resolve_plaintext_message_bit_width(engine));
-    let transformed_message = build_candidate_message_transform(engine)(message);
+        biguint_to_bits_le(payload_message, resolve_plaintext_message_bit_width(engine));
+    let transformed_message = build_candidate_message_transform(engine)(payload_message);
     let reference_bits =
         biguint_to_bits_le(&transformed_message, scored_inputs[0].message_bits.len());
     let packed_message_bits = PackedBits::from_bools(&reference_bits);
@@ -5696,7 +5754,7 @@ fn run_r_candidate_accuracy_batches(
         let mut batch_selected_sample_average_score_pct = None;
         let sampled_avalanche_result = run_sampled_avalanche_beam_search(
             engine,
-            &avalanche_message,
+            &message,
             &batch_scored_inputs,
             batch_number,
             rng,
@@ -5725,6 +5783,17 @@ fn run_r_candidate_accuracy_batches(
 
             let message_bits = payload_message_bits(engine, &message);
             if let Some(top_beam) = selected_sample.beam_results.first() {
+                let beam_best_bits =
+                    extract_payload_bits_for_accuracy(engine, &selected_sample.best_bits);
+                validate_displayed_candidate_consistency(
+                    "avalanche beam top candidate",
+                    &message_bits,
+                    &beam_best_bits,
+                    top_beam.match_pct,
+                    top_beam.ones_match_pct,
+                    Some(&top_beam.hex),
+                )
+                .map_err(|err| -> Box<dyn Error> { err.into() })?;
                 let replace = match beam_max {
                     Some(ref current) => {
                         top_beam.match_pct > current.beam_match_pct
@@ -5742,16 +5811,35 @@ fn run_r_candidate_accuracy_batches(
                         average_score_pct: selected_sample.average_score_pct,
                         top_beam_score: selected_sample.top_beam_score,
                         beam_results: selected_sample.beam_results.clone(),
-                        best_bits: extract_payload_bits_for_accuracy(
-                            engine,
-                            &selected_sample.best_bits,
-                        ),
+                        best_bits: beam_best_bits,
                         message_bits: message_bits.clone(),
                         batch_number,
                         sample_index: selected_sample.sample_index,
                         tier_index: selected_sample.tier_index,
                     });
                 }
+            }
+            let majority_vote_bits =
+                extract_payload_bits_for_accuracy(engine, &selected_sample.majority_vote_bits);
+            validate_displayed_candidate_consistency(
+                "avalanche majority-vote candidate",
+                &message_bits,
+                &majority_vote_bits,
+                selected_sample.majority_vote_match_pct,
+                selected_sample.majority_vote_ones_match_pct,
+                None,
+            )
+            .map_err(|err| -> Box<dyn Error> { err.into() })?;
+            let expected_best_match_pct = selected_sample
+                .top_beam_match_pct
+                .unwrap_or(0.0)
+                .max(selected_sample.majority_vote_match_pct);
+            if (selected_sample.best_match_pct - expected_best_match_pct).abs() > 1e-9 {
+                return Err(format!(
+                    "avalanche selected sample best-match mismatch: stored={} expected={}",
+                    selected_sample.best_match_pct, expected_best_match_pct
+                )
+                .into());
             }
             let replace_majority = match majority_vote_max {
                 Some(ref current) => {
@@ -5765,10 +5853,7 @@ fn run_r_candidate_accuracy_batches(
             if replace_majority {
                 majority_vote_max = Some(MajorityVoteMaxCandidate {
                     average_score_pct: selected_sample.average_score_pct,
-                    majority_vote_bits: extract_payload_bits_for_accuracy(
-                        engine,
-                        &selected_sample.majority_vote_bits,
-                    ),
+                    majority_vote_bits,
                     majority_vote_match_pct: selected_sample.majority_vote_match_pct,
                     majority_vote_ones_match_pct: selected_sample.majority_vote_ones_match_pct,
                     message_bits,
@@ -6279,6 +6364,75 @@ mod tests {
             &[true, true, true, true, true, true, true, true, false, true],
         );
         assert_eq!(payload, vec![false, true]);
+    }
+
+    #[test]
+    fn test_validate_displayed_candidate_consistency_accepts_matching_fields() {
+        let message_bits = vec![true, false, true, false];
+        let candidate_bits = vec![true, true, true, false];
+        let (match_pct, ones_match_pct) =
+            compute_bit_match_percentages(&candidate_bits, &message_bits);
+
+        validate_displayed_candidate_consistency(
+            "test candidate",
+            &message_bits,
+            &candidate_bits,
+            match_pct,
+            ones_match_pct,
+            Some("07"),
+        )
+        .expect("matching display fields should validate");
+    }
+
+    #[test]
+    fn test_validate_displayed_candidate_consistency_rejects_mismatched_percentages() {
+        let message_bits = vec![true, false, true, false];
+        let candidate_bits = vec![true, true, true, false];
+
+        let error = validate_displayed_candidate_consistency(
+            "test candidate",
+            &message_bits,
+            &candidate_bits,
+            100.0,
+            100.0,
+            Some("07"),
+        )
+        .expect_err("mismatched display percentages should fail validation");
+
+        assert!(error.contains("match percentage mismatch"));
+    }
+
+    #[test]
+    fn test_shifted_payload_reference_can_artificially_inflate_match_percentage() {
+        let mut config = Config::default();
+        config.engine.message.bits = 64;
+        config.engine.avalanche_fitness_shift_bytes = 4;
+
+        let payload_message =
+            BigUint::parse_bytes(b"e859a7c01a265845", 16).expect("payload hex should parse");
+        let shifted_message = transform_message_for_candidate_scoring(
+            &config.engine,
+            &payload_message,
+            &BigUint::zero(),
+            "test",
+        )
+        .expect("shifted payload should build");
+        let candidate_bits = biguint_to_bits_le(
+            &BigUint::parse_bytes(b"1e02cd4531000001", 16).expect("candidate hex should parse"),
+            64,
+        );
+
+        let payload_reference_bits = payload_message_bits(&config.engine, &payload_message);
+        let shifted_reference_bits = biguint_to_bits_le(&shifted_message, 64);
+        let (payload_match_pct, payload_ones_match_pct) =
+            compute_bit_match_percentages(&candidate_bits, &payload_reference_bits);
+        let (shifted_match_pct, shifted_ones_match_pct) =
+            compute_bit_match_percentages(&candidate_bits, &shifted_reference_bits);
+
+        assert!((payload_match_pct - 53.125).abs() < 1e-9);
+        assert!((payload_ones_match_pct - 41.17647058823529).abs() < 1e-9);
+        assert!((shifted_match_pct - 82.8125).abs() < 1e-9);
+        assert!((shifted_ones_match_pct - 52.94117647058823).abs() < 1e-9);
     }
 
     #[test]
