@@ -95,8 +95,8 @@
     // Hamming-distance pruning keeps a central percentile band of scored items
     // before sampling, then optionally adds some tail outliers back in.
     "avalanche_combination_hamming_distance_prune": true,
-    "avalanche_combination_hamming_distance_keep_percentile": 25.0,
-    "avalanche_combination_hamming_distance_outlier_preference_pct": 50.0,
+    "avalanche_combination_hamming_distance_keep_percentile": 100.0,
+    "avalanche_combination_hamming_distance_outlier_preference_pct": 0.0,
     // Majority-vote mode turns each sampled combination into per-bit frequencies
     // for the beam, then smooths them before ranking plaintext hypotheses.
     "avalanche_combination_majority_vote": true, // Use per-bit majority-vote probabilities from each sampled combination.
