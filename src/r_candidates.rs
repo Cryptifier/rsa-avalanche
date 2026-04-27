@@ -16,7 +16,7 @@ use std::fs::{self, OpenOptions};
 use std::io::{BufRead, BufReader, Write};
 use std::sync::{
     Arc, Mutex,
-    atomic::{AtomicUsize, Ordering},
+    atomic::{AtomicU64, AtomicUsize, Ordering},
 };
 use std::time::{Duration, Instant};
 
@@ -988,7 +988,7 @@ fn append_reuse_candidates(path: &str, entries: &[RCandidate]) {
 /// - `()`: This function returns nothing.
 ///
 /// # Expected Output
-/// - Rewrites each candidate's modulus and factors in place; no stdout/stderr output.
+/// - Rewrites each candidate's modulus and factors in place and may print periodic progress logs.
 pub fn retarget_r_candidates_for_speculative_oracles(
     n: &BigUint,
     candidates: &mut [RCandidate],
@@ -1002,22 +1002,68 @@ pub fn retarget_r_candidates_for_speculative_oracles(
         return;
     }
 
+    println!(
+        "Retargeting {} r candidates for speculative oracles",
+        candidates.len()
+    );
+
     let rng_mode = rng.mode();
+    let total_candidates = candidates.len();
     let candidate_seeds: Vec<u64> = (0..candidates.len()).map(|_| rng.next_u64()).collect();
+    let started_at = Instant::now();
+    let completed = Arc::new(AtomicUsize::new(0));
+    let next_progress_log_secs = Arc::new(AtomicU64::new(5));
+    let progress_completed = Arc::clone(&completed);
+    let progress_next_log_secs = Arc::clone(&next_progress_log_secs);
     let updates: Vec<Option<(BigUint, Vec<(BigUint, u64)>, BigDecimal)>> = candidate_seeds
         .into_par_iter()
         .map(|seed| {
             let mut local_rng = RngChoice::from_seed(rng_mode, seed);
-            sample_retarget_candidate_update(
+            let update = sample_retarget_candidate_update(
                 n,
                 minimum_target_exponent,
                 target_exponent,
                 partition_count,
                 minimum_component_exponent,
                 &mut local_rng,
-            )
+            );
+            let completed_count = progress_completed.fetch_add(1, Ordering::Relaxed) + 1;
+            let elapsed_secs = started_at.elapsed().as_secs();
+            loop {
+                let next_log_secs = progress_next_log_secs.load(Ordering::Relaxed);
+                if elapsed_secs < next_log_secs {
+                    break;
+                }
+                if progress_next_log_secs
+                    .compare_exchange(
+                        next_log_secs,
+                        next_log_secs + 5,
+                        Ordering::Relaxed,
+                        Ordering::Relaxed,
+                    )
+                    .is_ok()
+                {
+                    let percent = (completed_count as f64 / total_candidates as f64) * 100.0;
+                    println!(
+                        "Retargeting progress: {:.2}% ({}/{}) elapsed {:.1}s",
+                        percent,
+                        completed_count,
+                        total_candidates,
+                        started_at.elapsed().as_secs_f64(),
+                    );
+                    break;
+                }
+            }
+            update
         })
         .collect();
+
+    println!(
+        "Retargeting progress: 100.00% ({}/{}) elapsed {:.1}s",
+        total_candidates,
+        total_candidates,
+        started_at.elapsed().as_secs_f64(),
+    );
 
     let mut seen = HashSet::with_capacity(candidates.len());
     for (candidate, update) in candidates.iter_mut().zip(updates) {

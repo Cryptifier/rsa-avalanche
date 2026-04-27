@@ -4080,8 +4080,19 @@ fn apply_scored_avalanche_fitness_pass(
             .push(input);
     }
 
-    let mut ranked_groups = grouped
-        .into_iter()
+    let grouped_inputs = grouped.into_iter().collect::<Vec<_>>();
+    let total_groups = grouped_inputs.len() as u64;
+    let progress_started_at = Instant::now();
+    let progress_done = AtomicU64::new(0);
+    let progress_next_log_at_ms =
+        AtomicU64::new(Duration::from_secs(5).as_millis().min(u128::from(u64::MAX)) as u64);
+    println!(
+        "Avalanche fitness pass: scoring {} r-candidate groups",
+        total_groups
+    );
+
+    let mut ranked_groups = grouped_inputs
+        .into_par_iter()
         .map(|(batch_candidate_index, group_inputs)| {
             let mut ranked_inputs = group_inputs
                 .into_iter()
@@ -4125,6 +4136,18 @@ fn apply_scored_avalanche_fitness_pass(
                 best_match_score,
                 inputs: ranked_inputs,
             }
+        })
+        .map(|ranked_group| {
+            let done = progress_done.fetch_add(1, Ordering::Relaxed) + 1;
+            log_parallel_progress_every_interval(
+                done,
+                total_groups,
+                &progress_started_at,
+                &progress_next_log_at_ms,
+                "Avalanche fitness pass",
+                Duration::from_secs(5),
+            );
+            ranked_group
         })
         .collect::<Vec<_>>();
     ranked_groups.sort_by(|left, right| {
