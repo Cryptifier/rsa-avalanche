@@ -3,6 +3,8 @@ This demo shows homomorphic key switching as a viable method to retrieve up to 5
 
 Proof of concept by Nicholas LaRoche <nlaroche@cryptifier.dev>.
 
+![Example output from `analysis`](77pct.png)
+
 # Theory
 - Use regular RSA encryption using a large modulus N = pq where p and q are large private primes.
 - Use homomorphic base switching to go from mod N to mod N^0.850 where N^0.850 is an easily factored modulus with at least three factors (more than regular RSA).
