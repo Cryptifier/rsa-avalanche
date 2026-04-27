@@ -288,6 +288,43 @@ fn payload_message_bits(engine: &EngineConfig, message: &BigUint) -> Vec<bool> {
     biguint_to_bits_le(message, resolve_plaintext_message_bit_width(engine))
 }
 
+/// Validates that the configured plaintext width and fitness slice can fit under the modulus.
+///
+/// # Parameters
+/// - `engine`: Engine configuration containing payload and fitness-shift widths.
+/// - `n`: RSA modulus that must contain the widened message without wrapping.
+/// - `context`: Human-readable label for the caller.
+///
+/// # Returns
+/// - `Result<(), Box<dyn Error>>`: `Ok(())` when the configured widened message can fit under `n`.
+///
+/// # Expected Output
+/// - Returns an error when `engine.message.bits + fitness_shift_bits` exceeds the modulus width.
+fn validate_message_width_under_modulus(
+    engine: &EngineConfig,
+    n: &BigUint,
+    context: &str,
+) -> Result<(), Box<dyn Error>> {
+    if n.is_zero() {
+        return Ok(());
+    }
+
+    let payload_bits = resolve_plaintext_message_bit_width(engine) as u64;
+    let fitness_shift_bits =
+        u64::try_from(resolve_avalanche_fitness_shift_bits(engine)).unwrap_or(u64::MAX);
+    let widened_bits = payload_bits.saturating_add(fitness_shift_bits);
+    let modulus_bits = n.bits().max(1);
+
+    if widened_bits > modulus_bits {
+        return Err(format!(
+            "{context} configured payload width {payload_bits} bits plus fitness shift {fitness_shift_bits} bits exceeds modulus width {modulus_bits} bits"
+        )
+        .into());
+    }
+
+    Ok(())
+}
+
 /// Runs the core RSA demo and analysis pipeline.
 ///
 /// # Parameters
@@ -372,7 +409,7 @@ pub fn run_demo(
     });
 
     let message_start = Instant::now();
-    let message = select_message(args.message.clone(), &config.engine, &mut rng);
+    let message = select_message(args.message.clone(), &config.engine, &n, &mut rng)?;
     if message.is_zero() {
         return Err("message cannot be empty".into());
     }
@@ -1238,18 +1275,18 @@ fn resolve_fixed_message_for_tests(
 /// - `rng`: Random number generator for random sampling.
 ///
 /// # Returns
-/// - `BigUint`: Selected message value.
+/// - `Result<BigUint, Box<dyn Error>>`: Selected message value.
 ///
 /// # Expected Output
-/// - Returns a message under `n` when random; no side effects.
+/// - Returns a message under `n` when random or an error when the configured widened width cannot fit.
 fn sample_message_for_tests(
     engine: &EngineConfig,
     n: &BigUint,
     fixed_message: &Option<BigUint>,
     rng: &mut RngChoice,
-) -> BigUint {
+) -> Result<BigUint, Box<dyn Error>> {
     if let Some(msg) = fixed_message {
-        return msg.clone();
+        return Ok(msg.clone());
     }
     random_message_under_n(engine, n, rng)
 }
@@ -1463,7 +1500,8 @@ fn run_oracle_entropy_timeline(
         .into_par_iter()
         .map(|seed| {
             let mut local_rng = RngChoice::from_seed(rng.mode(), seed);
-            let msg = sample_message_for_tests(engine, &ctx.n, &fixed_message, &mut local_rng);
+            let msg = sample_message_for_tests(engine, &ctx.n, &fixed_message, &mut local_rng)
+                .map_err(|err| err.to_string())?;
             let base_ciphertext = msg.modpow(&ctx.e, &ctx.n);
 
             let mut oracles: Vec<Vec<bool>> = Vec::with_capacity(oracle_count);
@@ -1598,7 +1636,8 @@ fn run_match_entropy_timeline(
         .into_par_iter()
         .map(|seed| {
             let mut local_rng = RngChoice::from_seed(rng.mode(), seed);
-            let msg = sample_message_for_tests(engine, &ctx.n, &fixed_message, &mut local_rng);
+            let msg = sample_message_for_tests(engine, &ctx.n, &fixed_message, &mut local_rng)
+                .map_err(|err| err.to_string())?;
             let base_ciphertext = msg.modpow(&ctx.e, &ctx.n);
             let ciphertext = ciphertext_for_candidate(ctx, &base_ciphertext, candidate);
             let dm = derive_candidate_message(
@@ -1633,12 +1672,13 @@ fn run_match_entropy_timeline(
                 }
             }
 
-            MatchSample {
+            Ok::<_, String>(MatchSample {
                 message_bytes_le: msg.to_bytes_le(),
                 candidate_bytes_le: dm.to_bytes_le(),
-            }
+            })
         })
-        .collect();
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|err| -> Box<dyn Error> { err.into() })?;
 
     if samples.is_empty() {
         return Err("no samples generated for match entropy timeline".into());
@@ -1755,7 +1795,8 @@ fn screen_oracles_per_bit(
         .into_par_iter()
         .map(|seed| {
             let mut local_rng = RngChoice::from_seed(rng.mode(), seed);
-            let msg = random_message_under_n(engine, &ctx.n, &mut local_rng);
+            let msg = random_message_under_n(engine, &ctx.n, &mut local_rng)
+                .map_err(|err| err.to_string())?;
             let ciphertext = msg.modpow(&ctx.e, &ctx.n);
             let message_bits = biguint_to_bits_le(&msg, bit_width);
 
@@ -1786,12 +1827,13 @@ fn screen_oracles_per_bit(
                 }
             }
 
-            OracleTrainingSample {
+            Ok::<_, String>(OracleTrainingSample {
                 ciphertext,
                 message_bits,
-            }
+            })
         })
-        .collect();
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|err| -> Box<dyn Error> { err.into() })?;
 
     let samples = Arc::new(samples);
     let counts: Vec<Vec<u32>> = candidates
@@ -3171,22 +3213,25 @@ fn run_information_sufficiency_tests(
 /// - `rng`: Random number generator for random message selection.
 ///
 /// # Returns
-/// - `BigUint`: Selected message as a big integer.
+/// - `Result<BigUint, Box<dyn Error>>`: Selected message as a big integer.
 ///
 /// # Expected Output
-/// - Returns the selected message; no side effects.
+/// - Returns the selected message or a validation error; no side effects.
 fn select_message(
     args_message: Option<String>,
     engine: &EngineConfig,
+    n: &BigUint,
     rng: &mut RngChoice,
-) -> BigUint {
+) -> Result<BigUint, Box<dyn Error>> {
     if let Some(explicit) = args_message {
-        return BigUint::from_bytes_be(explicit.as_bytes());
+        return Ok(BigUint::from_bytes_be(explicit.as_bytes()));
     }
     if engine.message.is_random {
-        return random_message_under_n(engine, &BigUint::zero(), rng);
+        return random_message_under_n(engine, n, rng);
     }
-    BigUint::from_bytes_be(engine.message.fixed_message.as_bytes())
+    Ok(BigUint::from_bytes_be(
+        engine.message.fixed_message.as_bytes(),
+    ))
 }
 
 /// Samples a random message that is non-zero and less than `n` (when provided).
@@ -3197,20 +3242,18 @@ fn select_message(
 /// - `rng`: Random number generator for sampling.
 ///
 /// # Returns
-/// - `BigUint`: Random message value.
+/// - `Result<BigUint, Box<dyn Error>>`: Random message value.
 ///
 /// # Expected Output
-/// - Returns a non-zero value under `n` when `n` is non-zero; no side effects.
-fn random_message_under_n(engine: &EngineConfig, n: &BigUint, rng: &mut RngChoice) -> BigUint {
+/// - Returns a non-zero exact-width value under `n` or a validation error when the widened message cannot fit.
+fn random_message_under_n(
+    engine: &EngineConfig,
+    n: &BigUint,
+    rng: &mut RngChoice,
+) -> Result<BigUint, Box<dyn Error>> {
+    validate_message_width_under_modulus(engine, n, "random message sampling")?;
     let transform = build_candidate_message_transform(engine);
-    let mut target_bits = engine.message.bits.max(1);
-    if !n.is_zero() {
-        let shift_bits =
-            u64::try_from(resolve_avalanche_fitness_shift_bits(engine)).unwrap_or(u64::MAX);
-        target_bits = target_bits
-            .min(n.bits().saturating_sub(shift_bits.saturating_add(1)) as u32)
-            .max(1);
-    }
+    let target_bits = engine.message.bits.max(1);
 
     loop {
         let candidate = random_biguint_bits(target_bits, rng);
@@ -3218,7 +3261,7 @@ fn random_message_under_n(engine: &EngineConfig, n: &BigUint, rng: &mut RngChoic
             continue;
         }
         if n.is_zero() || transform(&candidate) < *n {
-            return candidate;
+            return Ok(candidate);
         }
     }
 }
@@ -5471,7 +5514,7 @@ fn run_r_candidate_accuracy_batches(
         );
 
         let message = if engine.message.is_random {
-            random_message_under_n(engine, &ctx.n, rng)
+            random_message_under_n(engine, &ctx.n, rng)?
         } else {
             let msg = BigUint::from_bytes_be(engine.message.fixed_message.as_bytes());
             if msg.is_zero() {
@@ -6182,6 +6225,47 @@ mod tests {
             &transformed & ((BigUint::one() << 32usize) - BigUint::one()),
             BigUint::zero()
         );
+    }
+
+    #[test]
+    fn test_validate_message_width_under_modulus_rejects_impossible_widened_payload() {
+        let mut config = Config::default();
+        config.engine.message.bits = 128;
+        config.engine.avalanche_fitness_shift_bytes = 4;
+        let modulus = BigUint::one() << 143usize;
+
+        let error = validate_message_width_under_modulus(
+            &config.engine,
+            &modulus,
+            "test random message sampling",
+        )
+        .expect_err("widened payload should exceed the modulus width");
+
+        assert!(error
+            .to_string()
+            .contains("configured payload width 128 bits plus fitness shift 32 bits exceeds modulus width 144 bits"));
+    }
+
+    #[test]
+    fn test_random_message_under_n_preserves_configured_payload_width() {
+        let mut config = Config::default();
+        config.engine.message.bits = 64;
+        config.engine.avalanche_fitness_shift_bytes = 4;
+        let modulus = BigUint::one() << 127usize;
+        let mut rng = RngChoice::from_seed(RngMode::Standard, 23);
+
+        let message = random_message_under_n(&config.engine, &modulus, &mut rng)
+            .expect("random message sampling should preserve the configured width");
+
+        assert_eq!(message.bits(), 64);
+        let widened = transform_message_for_candidate_scoring(
+            &config.engine,
+            &message,
+            &modulus,
+            "test random message sampling",
+        )
+        .expect("widened payload should fit");
+        assert!(widened < modulus);
     }
 
     #[test]

@@ -1019,6 +1019,43 @@ fn analysis_bit_width(engine: &EngineConfig, n: &BigUint) -> usize {
     bit_width.max(1)
 }
 
+/// Validates that the configured plaintext width and fitness slice can fit under the modulus.
+///
+/// # Parameters
+/// - `engine`: Engine configuration containing payload and fitness-shift widths.
+/// - `n`: RSA modulus that must contain the widened message without wrapping.
+/// - `context`: Human-readable label for the caller.
+///
+/// # Returns
+/// - `Result<(), Box<dyn Error>>`: `Ok(())` when the configured widened message can fit under `n`.
+///
+/// # Expected Output
+/// - Returns an error when `engine.message.bits + fitness_shift_bits` exceeds the modulus width.
+fn validate_message_width_under_modulus(
+    engine: &EngineConfig,
+    n: &BigUint,
+    context: &str,
+) -> Result<(), Box<dyn Error>> {
+    if n.is_zero() {
+        return Ok(());
+    }
+
+    let payload_bits = engine.message.bits.max(1) as u64;
+    let fitness_shift_bits =
+        u64::try_from(engine.avalanche_fitness_shift_bytes.saturating_mul(8)).unwrap_or(u64::MAX);
+    let widened_bits = payload_bits.saturating_add(fitness_shift_bits);
+    let modulus_bits = n.bits().max(1);
+
+    if widened_bits > modulus_bits {
+        return Err(format!(
+            "{context} configured payload width {payload_bits} bits plus fitness shift {fitness_shift_bits} bits exceeds modulus width {modulus_bits} bits"
+        )
+        .into());
+    }
+
+    Ok(())
+}
+
 /// Samples a random message that is non-zero and less than `n`.
 ///
 /// # Parameters
@@ -1027,15 +1064,17 @@ fn analysis_bit_width(engine: &EngineConfig, n: &BigUint) -> usize {
 /// - `rng`: Random number generator for sampling.
 ///
 /// # Returns
-/// - `BigUint`: Random message value.
+/// - `Result<BigUint, Box<dyn Error>>`: Random message value.
 ///
 /// # Expected Output
-/// - Returns a non-zero value under `n` when `n` is non-zero; no side effects.
-fn random_message_under_n(engine: &EngineConfig, n: &BigUint, rng: &mut RngChoice) -> BigUint {
-    let mut target_bits = engine.message.bits.max(1);
-    if !n.is_zero() {
-        target_bits = target_bits.min(n.bits().saturating_sub(1) as u32).max(1);
-    }
+/// - Returns a non-zero exact-width value under `n` or a validation error when the widened message cannot fit.
+fn random_message_under_n(
+    engine: &EngineConfig,
+    n: &BigUint,
+    rng: &mut RngChoice,
+) -> Result<BigUint, Box<dyn Error>> {
+    validate_message_width_under_modulus(engine, n, "demo random message sampling")?;
+    let target_bits = engine.message.bits.max(1);
 
     loop {
         let candidate = random_biguint_bits(target_bits, rng);
@@ -1043,7 +1082,7 @@ fn random_message_under_n(engine: &EngineConfig, n: &BigUint, rng: &mut RngChoic
             continue;
         }
         if n.is_zero() || candidate < *n {
-            return candidate;
+            return Ok(candidate);
         }
     }
 }
@@ -1297,7 +1336,8 @@ fn screen_oracles_per_bit(
         .into_par_iter()
         .map(|seed| {
             let mut local_rng = RngChoice::from_seed(rng.mode(), seed);
-            let msg = random_message_under_n(engine, &ctx.n, &mut local_rng);
+            let msg = random_message_under_n(engine, &ctx.n, &mut local_rng)
+                .map_err(|err| err.to_string())?;
             let ciphertext = msg.modpow(&ctx.e, &ctx.n);
             let message_bits = biguint_to_bits_le(&msg, bit_width);
             let shifted = maybe_shift_ciphertext(ctx, &ciphertext, shift);
@@ -1329,12 +1369,13 @@ fn screen_oracles_per_bit(
                 }
             }
 
-            ScreeningSample {
+            Ok::<_, String>(ScreeningSample {
                 shifted_ciphertext: shifted,
                 message_bits,
-            }
+            })
         })
-        .collect();
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|err| -> Box<dyn Error> { err.into() })?;
 
     let samples = Arc::new(samples);
     let counts: Vec<Vec<u32>> = candidates
