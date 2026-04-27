@@ -255,6 +255,24 @@ fn lsb_zero_fitness(bits: &PackedBits, width: usize) -> usize {
     fitness
 }
 
+/// Extracts the original plaintext payload bits from a widened Avalanche bit vector.
+///
+/// # Parameters
+/// - `engine`: Engine configuration containing the fitness-shift and plaintext widths.
+/// - `bits`: Full-width widened bit vector containing the fitness slice at the low end.
+///
+/// # Returns
+/// - `Vec<bool>`: Payload-only bits with the leading fitness slice removed.
+///
+/// # Expected Output
+/// - Returns the payload slice used for final accuracy comparisons; no stdout/stderr output.
+fn extract_payload_bits_for_accuracy(engine: &EngineConfig, bits: &[bool]) -> Vec<bool> {
+    let shift_bits = resolve_avalanche_fitness_shift_bits(engine).min(bits.len());
+    let payload_width = resolve_plaintext_message_bit_width(engine);
+    let payload_end = shift_bits.saturating_add(payload_width).min(bits.len());
+    bits[shift_bits..payload_end].to_vec()
+}
+
 /// Runs the core RSA demo and analysis pipeline.
 ///
 /// # Parameters
@@ -4419,7 +4437,7 @@ fn build_avalanche_nodes_from_scored_inputs(
 ///
 /// # Parameters
 /// - `engine`: Engine configuration controlling beam-search behavior.
-/// - `message_bits`: Original plaintext bits used for scoring.
+/// - `comparison_message_bits`: Original plaintext payload bits used for scoring.
 /// - `sample_index`: Zero-based sample index within the current tier.
 /// - `tier_index`: One-based Avalanche tier index.
 /// - `input_count`: Number of source items that produced the sample.
@@ -4434,7 +4452,7 @@ fn build_avalanche_nodes_from_scored_inputs(
 /// - Returns the finalized sample data; no stdout/stderr output.
 fn finalize_avalanche_sample(
     engine: &EngineConfig,
-    message_bits: &[bool],
+    comparison_message_bits: &[bool],
     sample_index: usize,
     tier_index: usize,
     input_count: usize,
@@ -4511,8 +4529,9 @@ fn finalize_avalanche_sample(
             if rank == 0 {
                 best_bits = candidate_bits.clone();
             }
+            let payload_candidate_bits = extract_payload_bits_for_accuracy(engine, &candidate_bits);
             let (match_pct, ones_match_pct) =
-                compute_bit_match_percentages(&candidate_bits, message_bits);
+                compute_bit_match_percentages(&payload_candidate_bits, comparison_message_bits);
             AvalancheCombinationBeamResult {
                 rank: rank + 1,
                 score: candidate.score,
@@ -4527,8 +4546,9 @@ fn finalize_avalanche_sample(
     let top_beam_score = beam_results.first().map(|beam| beam.score).unwrap_or(0.0);
     let top_beam_match_pct = beam_results.first().map(|beam| beam.match_pct);
     let majority_vote_bits = majority_distribution.majority_bits;
+    let payload_majority_vote_bits = extract_payload_bits_for_accuracy(engine, &majority_vote_bits);
     let (majority_vote_match_pct, majority_vote_ones_match_pct) =
-        compute_bit_match_percentages(&majority_vote_bits, message_bits);
+        compute_bit_match_percentages(&payload_majority_vote_bits, comparison_message_bits);
     let best_match_pct = top_beam_match_pct
         .unwrap_or(0.0)
         .max(majority_vote_match_pct);
@@ -4636,7 +4656,8 @@ fn compact_retained_avalanche_sample_inputs(samples: &mut [AvalancheCombinationS
 ///
 /// # Parameters
 /// - `engine`: Engine configuration controlling combination sampling and beam scoring.
-/// - `message_bits`: Original plaintext bits used for beam-match scoring.
+/// - `reference_bits`: Full-width shifted reference bits used for ordering and reduction.
+/// - `comparison_message_bits`: Original plaintext payload bits used for beam-match scoring.
 /// - `grouped_inputs`: Scored candidate decryptions grouped by r candidate.
 /// - `pool_size`: Total number of scored inputs available in the batch.
 /// - `mixed_r_candidate_count`: Effective number of distinct r candidates mixed into the sample.
@@ -4650,7 +4671,8 @@ fn compact_retained_avalanche_sample_inputs(samples: &mut [AvalancheCombinationS
 /// - Returns sample analytics for one combination; no stdout/stderr output.
 fn execute_sampled_avalanche_sample(
     engine: &EngineConfig,
-    message_bits: &[bool],
+    reference_bits: &[bool],
+    comparison_message_bits: &[bool],
     scored_inputs: &[ScoredAvalancheInput],
     grouped_inputs: &[ScoredAvalancheInputGroup],
     pool_size: usize,
@@ -4695,7 +4717,7 @@ fn execute_sampled_avalanche_sample(
     let avalanche_search = build_prepared_avalanche(
         &selected_inputs,
         engine,
-        message_bits,
+        reference_bits,
         engine.avalanche_statistics_collection,
         None,
     )
@@ -4708,7 +4730,7 @@ fn execute_sampled_avalanche_sample(
         .collect::<Vec<_>>();
     let computed = finalize_avalanche_sample(
         engine,
-        message_bits,
+        comparison_message_bits,
         sample_index,
         tier_index,
         selected_inputs.len(),
@@ -4787,7 +4809,8 @@ fn execute_sampled_avalanche_sample(
 ///
 /// # Parameters
 /// - `engine`: Engine configuration controlling beam-search behavior.
-/// - `message_bits`: Original plaintext bits used for scoring.
+/// - `reference_bits`: Full-width shifted reference bits used for optional ordering.
+/// - `comparison_message_bits`: Original plaintext payload bits used for scoring.
 /// - `source_samples`: Prior-tier Avalanche outputs available for indexed lookup.
 /// - `source_sample_indices`: Indices selecting the prior-tier samples used by this recursive sample.
 /// - `tier_index`: One-based tier index being executed.
@@ -4800,7 +4823,8 @@ fn execute_sampled_avalanche_sample(
 /// - Returns the recursive sample output using borrowed prior-tier samples; no stdout/stderr output.
 fn execute_recursive_avalanche_sample_from_indices(
     engine: &EngineConfig,
-    message_bits: &[bool],
+    reference_bits: &[bool],
+    comparison_message_bits: &[bool],
     source_samples: &[SelectedAvalancheSample],
     source_sample_indices: &[usize],
     tier_index: usize,
@@ -4824,7 +4848,7 @@ fn execute_recursive_avalanche_sample_from_indices(
     let avalanche_search = build_prepared_avalanche(
         &recursive_inputs,
         engine,
-        message_bits,
+        reference_bits,
         engine.avalanche_statistics_collection,
         None,
     )
@@ -4837,7 +4861,7 @@ fn execute_recursive_avalanche_sample_from_indices(
         .collect::<Vec<_>>();
     finalize_avalanche_sample(
         engine,
-        message_bits,
+        comparison_message_bits,
         sample_index,
         tier_index,
         selected_samples.len(),
@@ -4852,7 +4876,7 @@ fn execute_recursive_avalanche_sample_from_indices(
 ///
 /// # Parameters
 /// - `engine`: Engine configuration controlling combination sampling and beam scoring.
-/// - `message`: Original plaintext used for beam-match scoring.
+/// - `message`: Original plaintext payload used for scoring and to derive the widened reference.
 /// - `scored_inputs`: Scored candidate decryptions available for sampling.
 /// - `batch_number`: One-based batch index used for progress logging.
 /// - `rng`: Random number generator for combination sampling.
@@ -4919,8 +4943,12 @@ fn run_sampled_avalanche_beam_search(
         return Ok(SampledAvalancheBatchResult::default());
     }
 
-    let message_bits = biguint_to_bits_le(message, scored_inputs[0].message_bits.len());
-    let packed_message_bits = PackedBits::from_bools(&message_bits);
+    let comparison_message_bits =
+        biguint_to_bits_le(message, resolve_plaintext_message_bit_width(engine));
+    let transformed_message = build_candidate_message_transform(engine)(message);
+    let reference_bits =
+        biguint_to_bits_le(&transformed_message, scored_inputs[0].message_bits.len());
+    let packed_message_bits = PackedBits::from_bools(&reference_bits);
     let pruned_pool = if engine.avalanche_combination_hamming_distance_prune {
         prune_scored_inputs_by_hamming_distance_percentile(
             &scored_inputs,
@@ -5060,7 +5088,8 @@ fn run_sampled_avalanche_beam_search(
             let mut local_rng = RngChoice::from_seed(rng_mode, seed);
             let outcome = execute_sampled_avalanche_sample(
                 engine,
-                &message_bits,
+                &reference_bits,
+                &comparison_message_bits,
                 &pruned_scored_inputs,
                 &grouped_inputs,
                 pool_size,
@@ -5190,7 +5219,8 @@ fn run_sampled_avalanche_beam_search(
                             .fetch_add(source_sample_indices.len() as u64, Ordering::Relaxed);
                         let sample = execute_recursive_avalanche_sample_from_indices(
                             engine,
-                            &message_bits,
+                            &reference_bits,
+                            &comparison_message_bits,
                             &source_samples,
                             &source_sample_indices,
                             next_tier_index,
@@ -5230,7 +5260,8 @@ fn run_sampled_avalanche_beam_search(
                             .fetch_add(source_sample_indices.len() as u64, Ordering::Relaxed);
                         let sample = execute_recursive_avalanche_sample_from_indices(
                             engine,
-                            &message_bits,
+                            &reference_bits,
+                            &comparison_message_bits,
                             &source_samples,
                             source_sample_indices,
                             next_tier_index,
@@ -6127,6 +6158,19 @@ mod tests {
     }
 
     #[test]
+    fn test_extract_payload_bits_for_accuracy_removes_fitness_slice() {
+        let mut config = Config::default();
+        config.engine.avalanche_fitness_shift_bytes = 1;
+        config.engine.message.bits = 2;
+
+        let payload = extract_payload_bits_for_accuracy(
+            &config.engine,
+            &[true, true, true, true, true, true, true, true, false, true],
+        );
+        assert_eq!(payload, vec![false, true]);
+    }
+
+    #[test]
     fn test_lsb_zero_fitness_counts_trailing_zero_window() {
         let bits = PackedBits::from_bools(&[false, false, false, true, true, false]);
         assert_eq!(lsb_zero_fitness(&bits, 5), 3);
@@ -6596,6 +6640,47 @@ mod tests {
     }
 
     #[test]
+    fn test_run_sampled_avalanche_beam_search_scores_only_payload_bits() {
+        let mut config = Config::default();
+        config.engine.avalanche_random_chacha20_inputs = true;
+        config.engine.avalanche_combination_samples = 1;
+        config.engine.avalanche_combination_size = 1;
+        config.engine.avalanche_combination_mixed_r_candidates = 0;
+        config.engine.avalanche_fitness_shift_bytes = 1;
+        config.engine.message.bits = 2;
+        config.engine.avalanche_beam_top_k = 1;
+
+        let scored_inputs = vec![ScoredAvalancheInput {
+            batch_candidate_index: 0,
+            message_index: 0,
+            r: BigUint::from(3u8),
+            x: BigUint::from(1u8),
+            score_match_pct: 80.0,
+            message_bits: PackedBits::from_bools(&[
+                true, true, true, true, true, true, true, true, true, false,
+            ]),
+            detail: None,
+        }];
+
+        let mut rng = RngChoice::from_seed(RngMode::Standard, 11);
+        let result = run_sampled_avalanche_beam_search(
+            &config.engine,
+            &BigUint::from(1u8),
+            &scored_inputs,
+            1,
+            &mut rng,
+        )
+        .expect("payload-only sampled avalanche scoring should succeed");
+
+        let selected = result
+            .selected_sample
+            .expect("sampled avalanche should retain one selected sample");
+        assert_eq!(selected.majority_vote_match_pct, 100.0);
+        assert_eq!(selected.top_beam_match_pct, Some(100.0));
+        assert_eq!(selected.best_match_pct, 100.0);
+    }
+
+    #[test]
     fn test_run_sampled_avalanche_beam_search_records_recursive_tier_statistics() {
         let mut config = Config::default();
         config.engine.avalanche_random_chacha20_inputs = true;
@@ -6986,6 +7071,7 @@ mod tests {
         let recursive = execute_recursive_avalanche_sample_from_indices(
             &config.engine,
             &[true, true, true],
+            &[true, true, true],
             &source_samples,
             &[1, 0],
             2,
@@ -7038,6 +7124,7 @@ mod tests {
 
         let recursive = execute_recursive_avalanche_sample_from_indices(
             &config.engine,
+            &[true, true, true],
             &[true, true, true],
             &source_samples,
             &[1, 0],
