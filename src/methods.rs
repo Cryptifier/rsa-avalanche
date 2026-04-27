@@ -265,12 +265,27 @@ fn lsb_zero_fitness(bits: &PackedBits, width: usize) -> usize {
 /// - `Vec<bool>`: Payload-only bits with the leading fitness slice removed.
 ///
 /// # Expected Output
-/// - Returns the payload slice used for final accuracy comparisons; no stdout/stderr output.
+/// - Returns the payload slice used for final accuracy comparisons and display output; no stdout/stderr output.
 fn extract_payload_bits_for_accuracy(engine: &EngineConfig, bits: &[bool]) -> Vec<bool> {
     let shift_bits = resolve_avalanche_fitness_shift_bits(engine).min(bits.len());
     let payload_width = resolve_plaintext_message_bit_width(engine);
     let payload_end = shift_bits.saturating_add(payload_width).min(bits.len());
     bits[shift_bits..payload_end].to_vec()
+}
+
+/// Converts the configured plaintext message into its payload-width bit vector.
+///
+/// # Parameters
+/// - `engine`: Engine configuration containing the plaintext payload width.
+/// - `message`: Plaintext message to convert.
+///
+/// # Returns
+/// - `Vec<bool>`: Plaintext payload bits without the fitness slice.
+///
+/// # Expected Output
+/// - Returns the payload-width message bits; no stdout/stderr output.
+fn payload_message_bits(engine: &EngineConfig, message: &BigUint) -> Vec<bool> {
+    biguint_to_bits_le(message, resolve_plaintext_message_bit_width(engine))
 }
 
 /// Runs the core RSA demo and analysis pipeline.
@@ -2281,7 +2296,7 @@ fn run_avalanche_search(
         },
     )?;
 
-    let message_bits = biguint_to_bits_le(message, bit_width);
+    let message_bits = payload_message_bits(engine, message);
     if !engine.analysis_batch_enable {
         println!(
             "Avalanche beam search top {} candidates (lsb0 order):",
@@ -2293,20 +2308,10 @@ fn run_avalanche_search(
                 .iter()
                 .map(|value| stored_beam_value_is_one(*value, beam_bit_one_threshold))
                 .collect();
-            let (_, matching_total) = count_matching_bits_le(&candidate_bits, &message_bits);
-            let match_pct = matching_total as f64 / bit_width as f64 * 100.0;
-            let candidate_ones = candidate_bits.iter().filter(|bit| **bit).count();
-            let matched_ones = candidate_bits
-                .iter()
-                .zip(message_bits.iter())
-                .filter(|(cand, msg)| **cand && **msg)
-                .count();
-            let ones_match_pct = if candidate_ones == 0 {
-                0.0
-            } else {
-                matched_ones as f64 / candidate_ones as f64 * 100.0
-            };
-            let candidate_hex = format_bits_hex_le(&candidate_bits);
+            let payload_candidate_bits = extract_payload_bits_for_accuracy(engine, &candidate_bits);
+            let (match_pct, ones_match_pct) =
+                compute_bit_match_percentages(&payload_candidate_bits, &message_bits);
+            let candidate_hex = format_bits_hex_le(&payload_candidate_bits);
             println!(
                 "Beam {} score {} match {}% ones-match {}% hex {}",
                 idx + 1,
@@ -2315,11 +2320,11 @@ fn run_avalanche_search(
                 format_beam_float(ones_match_pct, BEAM_PCT_DECIMALS),
                 candidate_hex
             );
-            let candidate_value = bits_le_to_biguint(&candidate_bits);
+            let candidate_value = bits_le_to_biguint(&payload_candidate_bits);
             println!(
                 "Beam {} bits: total {} biguint {}",
                 idx + 1,
-                candidate_bits.len(),
+                payload_candidate_bits.len(),
                 candidate_value.bits()
             );
         }
@@ -2330,7 +2335,8 @@ fn run_avalanche_search(
             .iter()
             .map(|value| stored_beam_value_is_one(*value, beam_bit_one_threshold))
             .collect();
-        let msb = top_bits.last().copied().unwrap_or(false);
+        let payload_top_bits = extract_payload_bits_for_accuracy(engine, &top_bits);
+        let msb = payload_top_bits.last().copied().unwrap_or(false);
         println!("Avalanche beam top MSB: {}", if msb { 1 } else { 0 });
     }
 
@@ -2366,8 +2372,9 @@ fn run_avalanche_search(
         (bits, result.log_prob)
     };
 
-    let mut viterbi_hex = to_hex(&bits_le_to_biguint(&viterbi_bits.0));
-    let hex_len = (bit_width + 3) / 4;
+    let payload_viterbi_bits = extract_payload_bits_for_accuracy(engine, &viterbi_bits.0);
+    let mut viterbi_hex = to_hex(&bits_le_to_biguint(&payload_viterbi_bits));
+    let hex_len = payload_viterbi_bits.len().div_ceil(4);
     if viterbi_hex.len() < hex_len {
         let padding = "0".repeat(hex_len - viterbi_hex.len());
         viterbi_hex = format!("{}{}", padding, viterbi_hex);
@@ -2377,7 +2384,7 @@ fn run_avalanche_search(
         format_beam_float(viterbi_bits.1, BEAM_SCORE_DECIMALS),
         viterbi_hex
     );
-    let viterbi_msb = viterbi_bits.0.last().copied().unwrap_or(false);
+    let viterbi_msb = payload_viterbi_bits.last().copied().unwrap_or(false);
     println!("Avalanche viterbi MSB: {}", if viterbi_msb { 1 } else { 0 });
 
     Ok(())
@@ -2518,12 +2525,23 @@ fn print_colored_hex_comparison(
     let max_len = reference_hex.len().max(candidate_hex.len());
     let reference_padded = pad_left_hex(&reference_hex, max_len);
     let candidate_padded = pad_left_hex(&candidate_hex, max_len);
+    let reference_output_label = format!("{} (hex)", reference_label);
+    let candidate_output_label = format!("{} (hex)", candidate_label);
+    let label_width = reference_output_label
+        .len()
+        .max(candidate_output_label.len());
 
     let reference_colored = colorize_hex_matches(&reference_padded, &candidate_padded);
     let candidate_colored = colorize_hex_matches(&candidate_padded, &reference_padded);
 
-    println!("{} (hex): {}", reference_label, reference_colored);
-    println!("{} (hex): {}", candidate_label, candidate_colored);
+    println!(
+        "{:<label_width$}: {}",
+        reference_output_label, reference_colored
+    );
+    println!(
+        "{:<label_width$}: {}",
+        candidate_output_label, candidate_colored
+    );
     println!("Hex match key: green = match, red = mismatch");
 }
 
@@ -4537,8 +4555,8 @@ fn finalize_avalanche_sample(
                 score: candidate.score,
                 match_pct,
                 ones_match_pct,
-                hex: format_bits_hex_le(&candidate_bits),
-                bit_width: candidate_bits.len(),
+                hex: format_bits_hex_le(&payload_candidate_bits),
+                bit_width: payload_candidate_bits.len(),
             }
         })
         .collect::<Vec<_>>();
@@ -4783,7 +4801,10 @@ fn execute_sampled_avalanche_sample(
                     }
                 })
                 .collect(),
-            majority_vote_bits: selected_sample.majority_vote_bits.clone(),
+            majority_vote_bits: extract_payload_bits_for_accuracy(
+                engine,
+                &selected_sample.majority_vote_bits,
+            ),
             majority_vote_ones_count: computed.majority_vote_ones_count,
             majority_vote_zeros_count: computed.majority_vote_zeros_count,
             majority_vote_probability_one: computed.majority_vote_probability_one,
@@ -5659,7 +5680,7 @@ fn run_r_candidate_accuracy_batches(
             majority_vote_ones_match_pct = Some(selected_sample.majority_vote_ones_match_pct);
             batch_top_match_percentages.push(selected_sample.best_match_pct);
 
-            let message_bits = biguint_to_bits_le(&message, selected_sample.best_bits.len());
+            let message_bits = payload_message_bits(engine, &message);
             if let Some(top_beam) = selected_sample.beam_results.first() {
                 let replace = match beam_max {
                     Some(ref current) => {
@@ -5678,7 +5699,10 @@ fn run_r_candidate_accuracy_batches(
                         average_score_pct: selected_sample.average_score_pct,
                         top_beam_score: selected_sample.top_beam_score,
                         beam_results: selected_sample.beam_results.clone(),
-                        best_bits: selected_sample.best_bits.clone(),
+                        best_bits: extract_payload_bits_for_accuracy(
+                            engine,
+                            &selected_sample.best_bits,
+                        ),
                         message_bits: message_bits.clone(),
                         batch_number,
                         sample_index: selected_sample.sample_index,
@@ -5698,7 +5722,10 @@ fn run_r_candidate_accuracy_batches(
             if replace_majority {
                 majority_vote_max = Some(MajorityVoteMaxCandidate {
                     average_score_pct: selected_sample.average_score_pct,
-                    majority_vote_bits: selected_sample.majority_vote_bits.clone(),
+                    majority_vote_bits: extract_payload_bits_for_accuracy(
+                        engine,
+                        &selected_sample.majority_vote_bits,
+                    ),
                     majority_vote_match_pct: selected_sample.majority_vote_match_pct,
                     majority_vote_ones_match_pct: selected_sample.majority_vote_ones_match_pct,
                     message_bits,
@@ -6678,6 +6705,57 @@ mod tests {
         assert_eq!(selected.majority_vote_match_pct, 100.0);
         assert_eq!(selected.top_beam_match_pct, Some(100.0));
         assert_eq!(selected.best_match_pct, 100.0);
+    }
+
+    #[test]
+    fn test_run_sampled_avalanche_beam_search_serializes_payload_only_display_bits() {
+        let mut config = Config::default();
+        config.engine.avalanche_statistics_collection = true;
+        config
+            .engine
+            .avalanche_combination_keep_all_samples_in_memory = true;
+        config.engine.avalanche_random_chacha20_inputs = true;
+        config.engine.avalanche_combination_samples = 1;
+        config.engine.avalanche_combination_size = 1;
+        config.engine.avalanche_combination_mixed_r_candidates = 0;
+        config.engine.avalanche_fitness_shift_bytes = 1;
+        config.engine.message.bits = 2;
+        config.engine.avalanche_beam_top_k = 1;
+
+        let scored_inputs = vec![ScoredAvalancheInput {
+            batch_candidate_index: 0,
+            message_index: 0,
+            r: BigUint::from(3u8),
+            x: BigUint::from(1u8),
+            score_match_pct: 80.0,
+            message_bits: PackedBits::from_bools(&[
+                true, true, true, true, true, true, true, true, true, false,
+            ]),
+            detail: Some(ScoredAvalancheInputDetail {
+                target_exponent: BigDecimal::from(1u8),
+                hbc_ciphertext_r: BigUint::from(1u8),
+                candidate_decryption: BigUint::from(1u8),
+            }),
+        }];
+
+        let mut rng = RngChoice::from_seed(RngMode::Standard, 17);
+        let result = run_sampled_avalanche_beam_search(
+            &config.engine,
+            &BigUint::from(1u8),
+            &scored_inputs,
+            1,
+            &mut rng,
+        )
+        .expect("payload-only sampled avalanche serialization should succeed");
+
+        let retained = result
+            .retained_samples
+            .first()
+            .expect("sampled avalanche should retain serialized sample");
+        assert_eq!(retained.majority_vote_bits, vec![true, false]);
+        assert_eq!(retained.beam_results.len(), 1);
+        assert_eq!(retained.beam_results[0].hex, "01");
+        assert_eq!(retained.beam_results[0].bit_width, 2);
     }
 
     #[test]
