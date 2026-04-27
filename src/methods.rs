@@ -131,7 +131,128 @@ fn resolve_decrypt_bit_width(
 /// # Expected Output
 /// - Returns at least `1`; no stdout/stderr output.
 fn resolve_avalanche_bit_width(engine: &EngineConfig) -> usize {
+    resolve_plaintext_message_bit_width(engine)
+        .saturating_add(resolve_avalanche_fitness_shift_bits(engine))
+        .max(1)
+}
+
+/// Resolves the configured plaintext bit width before any fitness shifting is applied.
+///
+/// # Parameters
+/// - `engine`: Engine configuration containing the configured message width.
+///
+/// # Returns
+/// - `usize`: Plaintext bit width derived directly from `engine.message.bits`.
+///
+/// # Expected Output
+/// - Returns at least `1`; no stdout/stderr output.
+fn resolve_plaintext_message_bit_width(engine: &EngineConfig) -> usize {
     engine.message.bits.max(1) as usize
+}
+
+/// Resolves the number of LSB fitness bits created by the power-of-two plaintext shift.
+///
+/// # Parameters
+/// - `engine`: Engine configuration containing the configured byte shift.
+///
+/// # Returns
+/// - `usize`: Number of zero-expected LSBs added to the plaintext.
+///
+/// # Expected Output
+/// - Returns a non-negative bit count; no stdout/stderr output.
+fn resolve_avalanche_fitness_shift_bits(engine: &EngineConfig) -> usize {
+    engine.avalanche_fitness_shift_bytes.saturating_mul(8)
+}
+
+/// Resolves the trailing-zero fitness window width capped to the effective avalanche width.
+///
+/// # Parameters
+/// - `engine`: Engine configuration containing the configured fitness window size.
+///
+/// # Returns
+/// - `usize`: Number of LSBs inspected by the fitness score.
+///
+/// # Expected Output
+/// - Returns at least `1`; no stdout/stderr output.
+fn resolve_avalanche_fitness_bit_width(engine: &EngineConfig) -> usize {
+    engine
+        .avalanche_fitness_bit_width
+        .max(1)
+        .min(resolve_avalanche_bit_width(engine).max(1))
+}
+
+/// Builds the anonymous plaintext transform used to create the fitness scoring slice.
+///
+/// # Parameters
+/// - `engine`: Engine configuration containing the configured byte shift.
+///
+/// # Returns
+/// - `Arc<dyn Fn(&BigUint) -> BigUint + Send + Sync>`: Closure that left-shifts plaintexts by the configured power of two.
+///
+/// # Expected Output
+/// - Returns a reusable in-memory closure; no stdout/stderr output.
+fn build_candidate_message_transform(
+    engine: &EngineConfig,
+) -> Arc<dyn Fn(&BigUint) -> BigUint + Send + Sync> {
+    let shift_bits = resolve_avalanche_fitness_shift_bits(engine);
+    Arc::new(move |message: &BigUint| {
+        if shift_bits == 0 {
+            message.clone()
+        } else {
+            message << shift_bits
+        }
+    })
+}
+
+/// Applies the configured plaintext fitness transform and validates the shifted message against `n`.
+///
+/// # Parameters
+/// - `engine`: Engine configuration containing the configured fitness shift.
+/// - `message`: Plaintext message before shifting.
+/// - `modulus`: RSA modulus that must still contain the shifted message intact.
+/// - `context`: Human-readable error label describing the caller.
+///
+/// # Returns
+/// - `Result<BigUint, Box<dyn Error>>`: Shifted plaintext ready for candidate scoring.
+///
+/// # Expected Output
+/// - Returns the shifted plaintext or an error when the transformed message would wrap modulo `n`.
+fn transform_message_for_candidate_scoring(
+    engine: &EngineConfig,
+    message: &BigUint,
+    modulus: &BigUint,
+    context: &str,
+) -> Result<BigUint, Box<dyn Error>> {
+    let transform = build_candidate_message_transform(engine);
+    let transformed = transform(message);
+    if !modulus.is_zero() && transformed >= *modulus {
+        return Err(format!(
+            "{} shifted message exceeds modulus: shifted={} modulus={} shift_bytes={}",
+            context, transformed, modulus, engine.avalanche_fitness_shift_bytes
+        )
+        .into());
+    }
+    Ok(transformed)
+}
+
+/// Counts consecutive zero bits starting at the least-significant bit up to a fixed width.
+///
+/// # Parameters
+/// - `bits`: Packed candidate bits scored from the least-significant side.
+/// - `width`: Maximum number of LSBs to inspect.
+///
+/// # Returns
+/// - `usize`: Trailing-zero run length capped to `width`.
+///
+/// # Expected Output
+/// - Returns the computed fitness value; no stdout/stderr output.
+fn lsb_zero_fitness(bits: &PackedBits, width: usize) -> usize {
+    let capped_width = width.min(bits.len());
+    let mut fitness = 0usize;
+    while fitness < capped_width && !bits.bit(fitness) {
+        fitness += 1;
+    }
+    fitness
 }
 
 /// Runs the core RSA demo and analysis pipeline.
@@ -1916,11 +2037,13 @@ fn build_avalanche_nodes_unique_d(
     }
 
     let bit_width = resolve_avalanche_bit_width(engine);
-    let base_ciphertext = message.modpow(&ctx.e, &ctx.n);
+    let avalanche_message =
+        transform_message_for_candidate_scoring(engine, message, &ctx.n, "analysis avalanche")?;
+    let base_ciphertext = avalanche_message.modpow(&ctx.e, &ctx.n);
 
     let use_distance = engine.use_hamming_distance;
     let mut seen: Vec<HashSet<BigUint>> = vec![HashSet::new(); candidates.len()];
-    let target_bits = use_distance.then(|| biguint_to_bits_le(message, bit_width));
+    let target_bits = use_distance.then(|| biguint_to_bits_le(&avalanche_message, bit_width));
     let mut collected_nodes = Vec::new();
 
     struct CandidateInstanceNode {
@@ -3043,9 +3166,14 @@ fn select_message(
 /// # Expected Output
 /// - Returns a non-zero value under `n` when `n` is non-zero; no side effects.
 fn random_message_under_n(engine: &EngineConfig, n: &BigUint, rng: &mut RngChoice) -> BigUint {
+    let transform = build_candidate_message_transform(engine);
     let mut target_bits = engine.message.bits.max(1);
     if !n.is_zero() {
-        target_bits = target_bits.min(n.bits().saturating_sub(1) as u32).max(1);
+        let shift_bits =
+            u64::try_from(resolve_avalanche_fitness_shift_bits(engine)).unwrap_or(u64::MAX);
+        target_bits = target_bits
+            .min(n.bits().saturating_sub(shift_bits.saturating_add(1)) as u32)
+            .max(1);
     }
 
     loop {
@@ -3053,7 +3181,7 @@ fn random_message_under_n(engine: &EngineConfig, n: &BigUint, rng: &mut RngChoic
         if candidate.is_zero() {
             continue;
         }
-        if n.is_zero() || candidate < *n {
+        if n.is_zero() || transform(&candidate) < *n {
             return candidate;
         }
     }
@@ -3086,6 +3214,21 @@ fn analysis_bit_width(
     bit_width.max(1)
 }
 
+/// Resolves the minimum candidate-modulus size required by the shifted Avalanche message width.
+///
+/// # Parameters
+/// - `engine`: Engine configuration containing the message and fitness-shift settings.
+///
+/// # Returns
+/// - `u64`: Minimum target bit length for generated r candidates.
+///
+/// # Expected Output
+/// - Returns a deterministic lower bound; no stdout/stderr output.
+fn minimum_r_candidate_bit_length(engine: &EngineConfig) -> u64 {
+    let doubled_width = resolve_avalanche_bit_width(engine).saturating_mul(2);
+    u64::try_from(doubled_width).unwrap_or(u64::MAX)
+}
+
 /// Builds `RCandidateSettings` from the engine configuration.
 ///
 /// # Parameters
@@ -3105,6 +3248,13 @@ fn build_r_candidate_settings(engine: &EngineConfig) -> RCandidateSettings {
             trimmed.parse::<BigUint>().ok()
         }
     });
+    let minimum_target_bit_length = minimum_r_candidate_bit_length(engine);
+    let target_bit_length = Some(
+        engine
+            .r_candidate_bit_length
+            .unwrap_or(minimum_target_bit_length)
+            .max(minimum_target_bit_length),
+    );
 
     RCandidateSettings {
         mode: engine.r_candidate_mode,
@@ -3123,7 +3273,7 @@ fn build_r_candidate_settings(engine: &EngineConfig) -> RCandidateSettings {
             .collect(),
         small_prime_factors_per_candidate: engine.r_candidate_small_prime_factors,
         max_factors_per_candidate: engine.r_candidate_max_factors,
-        target_bit_length: engine.r_candidate_bit_length,
+        target_bit_length,
         random_power_window: engine.r_candidate_random_power_window,
         target_exponent_minimum: engine.r_candidate_target_exponent_minimum.clone(),
         target_exponent: engine.r_candidate_target_exponent.clone(),
@@ -3712,6 +3862,152 @@ fn select_random_scored_inputs(
         .into_iter()
         .filter_map(|index| inputs.get(index).cloned())
         .collect()
+}
+
+type ScoredAvalanchePreprocessPass =
+    Arc<dyn Fn(Vec<ScoredAvalancheInput>) -> Vec<ScoredAvalancheInput> + Send + Sync>;
+
+/// Builds the anonymous scored-input fitness pass used before sampled Avalanche selection.
+///
+/// # Parameters
+/// - `engine`: Engine configuration containing the fitness-pass settings.
+///
+/// # Returns
+/// - `Option<ScoredAvalanchePreprocessPass>`: Closure that downselects `r` and `c^x` inputs, or `None` when disabled.
+///
+/// # Expected Output
+/// - Returns an in-memory closure when the fitness pass is enabled; no stdout/stderr output.
+fn build_scored_avalanche_fitness_pass(
+    engine: &EngineConfig,
+) -> Option<ScoredAvalanchePreprocessPass> {
+    if !engine.avalanche_fitness_scoring_pass {
+        return None;
+    }
+
+    let fitness_bit_width = resolve_avalanche_fitness_bit_width(engine);
+    let r_candidate_limit = engine.avalanche_fitness_r_candidate_limit;
+    let cx_candidate_limit = engine.avalanche_fitness_cx_candidate_limit;
+    Some(Arc::new(move |inputs| {
+        apply_scored_avalanche_fitness_pass(
+            inputs,
+            fitness_bit_width,
+            r_candidate_limit,
+            cx_candidate_limit,
+        )
+    }))
+}
+
+/// Applies the trailing-zero fitness pass to scored Avalanche inputs.
+///
+/// # Parameters
+/// - `inputs`: Flattened scored inputs to rank and downselect.
+/// - `fitness_bit_width`: Number of least-significant bits used for the trailing-zero fitness score.
+/// - `r_candidate_limit`: Maximum number of retained r-candidate groups; `0` keeps every group.
+/// - `cx_candidate_limit`: Maximum number of retained `c^x` inputs per r group; `0` keeps every input.
+///
+/// # Returns
+/// - `Vec<ScoredAvalancheInput>`: Fitness-ranked and truncated scored inputs.
+///
+/// # Expected Output
+/// - Returns the filtered pool in descending fitness order; no stdout/stderr output.
+fn apply_scored_avalanche_fitness_pass(
+    inputs: Vec<ScoredAvalancheInput>,
+    fitness_bit_width: usize,
+    r_candidate_limit: usize,
+    cx_candidate_limit: usize,
+) -> Vec<ScoredAvalancheInput> {
+    if inputs.is_empty() {
+        return inputs;
+    }
+
+    #[derive(Debug)]
+    struct RankedInput {
+        input: ScoredAvalancheInput,
+        fitness_score: usize,
+    }
+
+    #[derive(Debug)]
+    struct RankedGroup {
+        batch_candidate_index: usize,
+        best_fitness_score: usize,
+        total_fitness_score: usize,
+        best_match_score: f64,
+        inputs: Vec<RankedInput>,
+    }
+
+    let mut grouped = BTreeMap::<usize, Vec<ScoredAvalancheInput>>::new();
+    for input in inputs {
+        grouped
+            .entry(input.batch_candidate_index)
+            .or_default()
+            .push(input);
+    }
+
+    let mut ranked_groups = grouped
+        .into_iter()
+        .map(|(batch_candidate_index, group_inputs)| {
+            let mut ranked_inputs = group_inputs
+                .into_iter()
+                .map(|input| RankedInput {
+                    fitness_score: lsb_zero_fitness(&input.message_bits, fitness_bit_width),
+                    input,
+                })
+                .collect::<Vec<_>>();
+            ranked_inputs.sort_by(|left, right| {
+                right
+                    .fitness_score
+                    .cmp(&left.fitness_score)
+                    .then_with(|| {
+                        right
+                            .input
+                            .score_match_pct
+                            .total_cmp(&left.input.score_match_pct)
+                    })
+                    .then_with(|| left.input.message_index.cmp(&right.input.message_index))
+                    .then_with(|| left.input.x.cmp(&right.input.x))
+            });
+            if cx_candidate_limit > 0 && ranked_inputs.len() > cx_candidate_limit {
+                ranked_inputs.truncate(cx_candidate_limit);
+            }
+
+            let best_fitness_score = ranked_inputs
+                .first()
+                .map(|input| input.fitness_score)
+                .unwrap_or(0);
+            let total_fitness_score = ranked_inputs.iter().map(|input| input.fitness_score).sum();
+            let best_match_score = ranked_inputs
+                .iter()
+                .map(|input| input.input.score_match_pct)
+                .max_by(|left, right| left.total_cmp(right))
+                .unwrap_or(0.0);
+
+            RankedGroup {
+                batch_candidate_index,
+                best_fitness_score,
+                total_fitness_score,
+                best_match_score,
+                inputs: ranked_inputs,
+            }
+        })
+        .collect::<Vec<_>>();
+    ranked_groups.sort_by(|left, right| {
+        right
+            .best_fitness_score
+            .cmp(&left.best_fitness_score)
+            .then_with(|| right.total_fitness_score.cmp(&left.total_fitness_score))
+            .then_with(|| right.best_match_score.total_cmp(&left.best_match_score))
+            .then_with(|| left.batch_candidate_index.cmp(&right.batch_candidate_index))
+    });
+    if r_candidate_limit > 0 && ranked_groups.len() > r_candidate_limit {
+        ranked_groups.truncate(r_candidate_limit);
+    }
+
+    let retained_input_count = ranked_groups.iter().map(|group| group.inputs.len()).sum();
+    let mut retained_inputs = Vec::with_capacity(retained_input_count);
+    for group in ranked_groups {
+        retained_inputs.extend(group.inputs.into_iter().map(|input| input.input));
+    }
+    retained_inputs
 }
 
 /// Randomizes recursive-tier sample indices before grouping.
@@ -4604,18 +4900,37 @@ fn run_sampled_avalanche_beam_search(
         return Ok(SampledAvalancheBatchResult::default());
     }
 
+    let scored_inputs = if let Some(pass) = build_scored_avalanche_fitness_pass(engine) {
+        let preprocessed = pass(scored_inputs.to_vec());
+        println!(
+            "Avalanche fitness pass for batch {}: retained {} of {} scored inputs across up to {} r candidates and {} c^x inputs per r using {} LSB fitness bits",
+            batch_number,
+            preprocessed.len(),
+            scored_inputs.len(),
+            engine.avalanche_fitness_r_candidate_limit,
+            engine.avalanche_fitness_cx_candidate_limit,
+            resolve_avalanche_fitness_bit_width(engine)
+        );
+        preprocessed
+    } else {
+        scored_inputs.to_vec()
+    };
+    if scored_inputs.is_empty() {
+        return Ok(SampledAvalancheBatchResult::default());
+    }
+
     let message_bits = biguint_to_bits_le(message, scored_inputs[0].message_bits.len());
     let packed_message_bits = PackedBits::from_bools(&message_bits);
     let pruned_pool = if engine.avalanche_combination_hamming_distance_prune {
         prune_scored_inputs_by_hamming_distance_percentile(
-            scored_inputs,
+            &scored_inputs,
             &packed_message_bits,
             engine.avalanche_combination_hamming_distance_keep_percentile,
             engine.avalanche_combination_hamming_distance_outlier_preference_pct,
         )
     } else {
         HammingDistancePrunedPool {
-            selected_inputs: scored_inputs.to_vec(),
+            selected_inputs: scored_inputs.clone(),
             retained_inlier_count: scored_inputs.len(),
             available_outlier_count: 0,
             preferred_outlier_count: 0,
@@ -5110,13 +5425,13 @@ fn run_r_candidate_accuracy_batches(
             if msg.is_zero() {
                 return Err("analysis_batch fixed_message cannot be empty".into());
             }
-            if msg >= ctx.n {
-                return Err("analysis_batch fixed_message must be smaller than modulus n".into());
-            }
+            transform_message_for_candidate_scoring(engine, &msg, &ctx.n, "analysis_batch")?;
             msg
         };
+        let avalanche_message =
+            transform_message_for_candidate_scoring(engine, &message, &ctx.n, "analysis_batch")?;
         let messages = vec![message.clone(); message_count];
-        let base_ciphertext = message.modpow(&ctx.e, &ctx.n);
+        let base_ciphertext = avalanche_message.modpow(&ctx.e, &ctx.n);
         let mut ciphertexts = Vec::with_capacity(message_count);
         let mut shifted_ciphertexts = Vec::with_capacity(message_count);
         let mut e_x_values = Vec::with_capacity(message_count);
@@ -5151,7 +5466,7 @@ fn run_r_candidate_accuracy_batches(
         }
 
         let avalanche_bit_width = resolve_avalanche_bit_width(engine);
-        let avalanche_message_bits = biguint_to_bits_le(&message, avalanche_bit_width);
+        let avalanche_message_bits = biguint_to_bits_le(&avalanche_message, avalanche_bit_width);
         let batch_cx_total = u64::try_from(batch_candidates.len())
             .map_err(|_| "batch candidate count exceeds u64 range")?
             .checked_mul(
@@ -5286,7 +5601,7 @@ fn run_r_candidate_accuracy_batches(
         let mut batch_selected_sample_average_score_pct = None;
         let sampled_avalanche_result = run_sampled_avalanche_beam_search(
             engine,
-            &message,
+            &avalanche_message,
             &batch_scored_inputs,
             batch_number,
             rng,
@@ -5785,6 +6100,40 @@ mod tests {
     }
 
     #[test]
+    fn test_resolve_avalanche_bit_width_adds_fitness_shift_bits() {
+        let mut config = Config::default();
+        config.engine.message.bits = 64;
+        config.engine.avalanche_fitness_shift_bytes = 4;
+
+        assert_eq!(resolve_avalanche_bit_width(&config.engine), 96);
+        assert_eq!(resolve_avalanche_fitness_bit_width(&config.engine), 32);
+        assert_eq!(minimum_r_candidate_bit_length(&config.engine), 192);
+    }
+
+    #[test]
+    fn test_build_candidate_message_transform_shifts_message_and_preserves_payload_bits() {
+        let mut config = Config::default();
+        config.engine.avalanche_fitness_shift_bytes = 4;
+        let transform = build_candidate_message_transform(&config.engine);
+        let message = BigUint::from(0x1234_5678u64);
+        let transformed = transform(&message);
+
+        assert_eq!(transformed, &message << 32usize);
+        assert_eq!(&transformed >> 32usize, message);
+        assert_eq!(
+            &transformed & ((BigUint::one() << 32usize) - BigUint::one()),
+            BigUint::zero()
+        );
+    }
+
+    #[test]
+    fn test_lsb_zero_fitness_counts_trailing_zero_window() {
+        let bits = PackedBits::from_bools(&[false, false, false, true, true, false]);
+        assert_eq!(lsb_zero_fitness(&bits, 5), 3);
+        assert_eq!(lsb_zero_fitness(&bits, 2), 2);
+    }
+
+    #[test]
     fn test_truncated_match_percentage_uses_reference_width() {
         let candidate = BigUint::from(0b1111_0000u8);
         let reference = biguint_to_bits_le(&BigUint::from(0b1110_0000u8), 4);
@@ -5792,6 +6141,68 @@ mod tests {
 
         assert_eq!(candidate_bits, vec![false, false, false, false]);
         assert!((match_pct - 100.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn test_apply_scored_avalanche_fitness_pass_downselects_r_and_cx_candidates() {
+        let retained = apply_scored_avalanche_fitness_pass(
+            vec![
+                ScoredAvalancheInput {
+                    batch_candidate_index: 0,
+                    message_index: 0,
+                    r: BigUint::from(3u8),
+                    x: BigUint::from(1u8),
+                    score_match_pct: 70.0,
+                    message_bits: PackedBits::from_bools(&[false, false, false, false, true]),
+                    detail: None,
+                },
+                ScoredAvalancheInput {
+                    batch_candidate_index: 0,
+                    message_index: 1,
+                    r: BigUint::from(3u8),
+                    x: BigUint::from(3u8),
+                    score_match_pct: 60.0,
+                    message_bits: PackedBits::from_bools(&[false, true, false, false, true]),
+                    detail: None,
+                },
+                ScoredAvalancheInput {
+                    batch_candidate_index: 1,
+                    message_index: 0,
+                    r: BigUint::from(5u8),
+                    x: BigUint::from(1u8),
+                    score_match_pct: 65.0,
+                    message_bits: PackedBits::from_bools(&[false, false, false, true, true]),
+                    detail: None,
+                },
+                ScoredAvalancheInput {
+                    batch_candidate_index: 1,
+                    message_index: 1,
+                    r: BigUint::from(5u8),
+                    x: BigUint::from(3u8),
+                    score_match_pct: 55.0,
+                    message_bits: PackedBits::from_bools(&[false, false, true, true, true]),
+                    detail: None,
+                },
+                ScoredAvalancheInput {
+                    batch_candidate_index: 2,
+                    message_index: 0,
+                    r: BigUint::from(7u8),
+                    x: BigUint::from(1u8),
+                    score_match_pct: 90.0,
+                    message_bits: PackedBits::from_bools(&[true, true, true, true, true]),
+                    detail: None,
+                },
+            ],
+            4,
+            2,
+            1,
+        );
+
+        let retained_keys = retained
+            .iter()
+            .map(|input| (input.batch_candidate_index, input.message_index))
+            .collect::<Vec<_>>();
+        assert_eq!(retained_keys, vec![(0, 0), (1, 0)]);
     }
 
     #[test]
@@ -6118,6 +6529,70 @@ mod tests {
         assert_eq!(result.sample_count, 1);
         assert!(result.selected_sample.is_some());
         assert!(result.retained_samples.is_empty());
+    }
+
+    #[test]
+    fn test_run_sampled_avalanche_beam_search_applies_fitness_pass_before_sampling() {
+        let mut config = Config::default();
+        config.engine.avalanche_random_chacha20_inputs = true;
+        config.engine.avalanche_combination_samples = 1;
+        config.engine.avalanche_combination_size = 4;
+        config.engine.avalanche_combination_mixed_r_candidates = 0;
+        config.engine.avalanche_fitness_scoring_pass = true;
+        config.engine.avalanche_fitness_r_candidate_limit = 1;
+        config.engine.avalanche_fitness_cx_candidate_limit = 1;
+        config.engine.avalanche_fitness_bit_width = 4;
+        config.engine.message.bits = 5;
+
+        let scored_inputs = vec![
+            ScoredAvalancheInput {
+                batch_candidate_index: 0,
+                message_index: 0,
+                r: BigUint::from(3u8),
+                x: BigUint::from(1u8),
+                score_match_pct: 80.0,
+                message_bits: PackedBits::from_bools(&[false, false, false, false, true]),
+                detail: None,
+            },
+            ScoredAvalancheInput {
+                batch_candidate_index: 0,
+                message_index: 1,
+                r: BigUint::from(3u8),
+                x: BigUint::from(3u8),
+                score_match_pct: 70.0,
+                message_bits: PackedBits::from_bools(&[false, true, true, true, true]),
+                detail: None,
+            },
+            ScoredAvalancheInput {
+                batch_candidate_index: 1,
+                message_index: 0,
+                r: BigUint::from(5u8),
+                x: BigUint::from(1u8),
+                score_match_pct: 95.0,
+                message_bits: PackedBits::from_bools(&[false, false, true, true, true]),
+                detail: None,
+            },
+        ];
+
+        let mut rng = RngChoice::from_seed(RngMode::Standard, 7);
+        let result = run_sampled_avalanche_beam_search(
+            &config.engine,
+            &BigUint::zero(),
+            &scored_inputs,
+            1,
+            &mut rng,
+        )
+        .expect("fitness-preprocessed sampled avalanche should succeed");
+
+        assert_eq!(result.sample_count, 1);
+        let selected = result
+            .selected_sample
+            .expect("sampled avalanche should retain one selected sample");
+        assert_eq!(selected.input_count, 1);
+        assert_eq!(
+            selected.node.message_bits_vec(),
+            vec![false, false, false, false, true]
+        );
     }
 
     #[test]

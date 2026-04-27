@@ -948,6 +948,13 @@ fn build_r_candidate_settings(engine: &EngineConfig) -> RCandidateSettings {
             trimmed.parse::<BigUint>().ok()
         }
     });
+    let minimum_target_bit_length = minimum_r_candidate_bit_length(engine);
+    let target_bit_length = Some(
+        engine
+            .r_candidate_bit_length
+            .unwrap_or(minimum_target_bit_length)
+            .max(minimum_target_bit_length),
+    );
 
     RCandidateSettings {
         mode: engine.r_candidate_mode,
@@ -966,13 +973,31 @@ fn build_r_candidate_settings(engine: &EngineConfig) -> RCandidateSettings {
             .collect(),
         small_prime_factors_per_candidate: engine.r_candidate_small_prime_factors,
         max_factors_per_candidate: engine.r_candidate_max_factors,
-        target_bit_length: engine.r_candidate_bit_length,
+        target_bit_length,
         random_power_window: engine.r_candidate_random_power_window,
         target_exponent_minimum: engine.r_candidate_target_exponent_minimum.clone(),
         target_exponent: engine.r_candidate_target_exponent.clone(),
         retarget_partition_count: engine.r_candidate_retarget_partition_count,
         retarget_minimum_exponent: engine.r_candidate_retarget_minimum_exponent.clone(),
     }
+}
+
+/// Resolves the minimum r-candidate modulus width implied by the Avalanche plaintext width.
+///
+/// # Parameters
+/// - `engine`: Engine configuration containing the message width and fitness shift.
+///
+/// # Returns
+/// - `u64`: Minimum target bit length for generated r candidates.
+///
+/// # Expected Output
+/// - Returns a deterministic lower bound; no stdout/stderr output.
+fn minimum_r_candidate_bit_length(engine: &EngineConfig) -> u64 {
+    let shift_bits = engine.avalanche_fitness_shift_bytes.saturating_mul(8);
+    let doubled_width = (engine.message.bits.max(1) as usize)
+        .saturating_add(shift_bits)
+        .saturating_mul(2);
+    u64::try_from(doubled_width).unwrap_or(u64::MAX)
 }
 
 /// Computes the analysis bit width based on configuration and modulus bounds.

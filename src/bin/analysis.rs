@@ -299,6 +299,11 @@ fn main() -> Result<(), Box<dyn Error>> {
             .avalanche_combination_keep_all_samples_in_memory,
         avalanche_statistics_collection: config.engine.avalanche_statistics_collection,
         avalanche_random_chacha20_inputs: config.engine.avalanche_random_chacha20_inputs,
+        avalanche_fitness_scoring_pass: config.engine.avalanche_fitness_scoring_pass,
+        avalanche_fitness_shift_bytes: config.engine.avalanche_fitness_shift_bytes,
+        avalanche_fitness_bit_width: config.engine.avalanche_fitness_bit_width,
+        avalanche_fitness_r_candidate_limit: config.engine.avalanche_fitness_r_candidate_limit,
+        avalanche_fitness_cx_candidate_limit: config.engine.avalanche_fitness_cx_candidate_limit,
         bits_decrypt: args.bits_decrypt,
         r_candidate_target_exponent: args
             .r_candidate_target_exponent

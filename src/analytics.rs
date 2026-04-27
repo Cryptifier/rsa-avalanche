@@ -84,6 +84,16 @@ pub struct AnalyticsCliArgs {
     pub avalanche_statistics_collection: bool,
     /// Whether sampled avalanche used direct ChaCha20 input sampling instead of mixed-r combinations.
     pub avalanche_random_chacha20_inputs: bool,
+    /// Whether sampled avalanche applies the trailing-zero fitness preprocessing pass.
+    pub avalanche_fitness_scoring_pass: bool,
+    /// Number of bytes used to shift plaintexts before candidate scoring.
+    pub avalanche_fitness_shift_bytes: usize,
+    /// Number of least-significant bits inspected by the trailing-zero fitness score.
+    pub avalanche_fitness_bit_width: usize,
+    /// Maximum number of retained r-candidate groups after fitness preprocessing.
+    pub avalanche_fitness_r_candidate_limit: usize,
+    /// Maximum number of retained `c^x` inputs per r-candidate group after fitness preprocessing.
+    pub avalanche_fitness_cx_candidate_limit: usize,
     /// Expected bit width for decryptions.
     pub bits_decrypt: Option<u32>,
     /// Optional CLI override for speculative r-candidate target exponent.
@@ -127,6 +137,11 @@ pub(crate) struct AnalyticsCliInfo {
     avalanche_combination_keep_all_samples_in_memory: bool,
     avalanche_statistics_collection: bool,
     avalanche_random_chacha20_inputs: bool,
+    avalanche_fitness_scoring_pass: bool,
+    avalanche_fitness_shift_bytes: usize,
+    avalanche_fitness_bit_width: usize,
+    avalanche_fitness_r_candidate_limit: usize,
+    avalanche_fitness_cx_candidate_limit: usize,
     bits_decrypt: Option<u32>,
     r_candidate_target_exponent: Option<BigDecimal>,
     r_candidate_target_exponent_minimum: Option<BigDecimal>,
@@ -569,6 +584,11 @@ impl SessionAnalytics {
                 .avalanche_combination_keep_all_samples_in_memory,
             avalanche_statistics_collection: args.avalanche_statistics_collection,
             avalanche_random_chacha20_inputs: args.avalanche_random_chacha20_inputs,
+            avalanche_fitness_scoring_pass: args.avalanche_fitness_scoring_pass,
+            avalanche_fitness_shift_bytes: args.avalanche_fitness_shift_bytes,
+            avalanche_fitness_bit_width: args.avalanche_fitness_bit_width,
+            avalanche_fitness_r_candidate_limit: args.avalanche_fitness_r_candidate_limit,
+            avalanche_fitness_cx_candidate_limit: args.avalanche_fitness_cx_candidate_limit,
             bits_decrypt: args.bits_decrypt,
             r_candidate_target_exponent: args.r_candidate_target_exponent,
             r_candidate_target_exponent_minimum: args.r_candidate_target_exponent_minimum,

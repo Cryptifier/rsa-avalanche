@@ -154,6 +154,21 @@ pub struct EngineConfig {
     /// Whether sampled avalanche bypasses mixed-r combinations and samples raw scored inputs with ChaCha20.
     #[serde(default = "default_avalanche_random_chacha20_inputs")]
     pub avalanche_random_chacha20_inputs: bool,
+    /// Whether sampled avalanche applies the trailing-zero fitness pass before sampling.
+    #[serde(default = "default_avalanche_fitness_scoring_pass")]
+    pub avalanche_fitness_scoring_pass: bool,
+    /// Number of bytes to left-shift the plaintext before candidate scoring to create the LSB fitness slice.
+    #[serde(default = "default_avalanche_fitness_shift_bytes")]
+    pub avalanche_fitness_shift_bytes: usize,
+    /// Number of least-significant bits inspected when computing trailing-zero fitness.
+    #[serde(default = "default_avalanche_fitness_bit_width")]
+    pub avalanche_fitness_bit_width: usize,
+    /// Maximum number of r-candidate groups retained by the fitness pass; `0` keeps every group.
+    #[serde(default = "default_avalanche_fitness_r_candidate_limit")]
+    pub avalanche_fitness_r_candidate_limit: usize,
+    /// Maximum number of `c^x` inputs retained per r-candidate group by the fitness pass; `0` keeps every input.
+    #[serde(default = "default_avalanche_fitness_cx_candidate_limit")]
+    pub avalanche_fitness_cx_candidate_limit: usize,
     #[serde(default = "default_same_r_batch")]
     pub same_r_batch: bool,
     #[serde(default = "default_ciphertext_modify")]
@@ -327,6 +342,11 @@ impl Default for EngineConfig {
                 default_avalanche_combination_keep_all_samples_in_memory(),
             avalanche_statistics_collection: default_avalanche_statistics_collection(),
             avalanche_random_chacha20_inputs: default_avalanche_random_chacha20_inputs(),
+            avalanche_fitness_scoring_pass: default_avalanche_fitness_scoring_pass(),
+            avalanche_fitness_shift_bytes: default_avalanche_fitness_shift_bytes(),
+            avalanche_fitness_bit_width: default_avalanche_fitness_bit_width(),
+            avalanche_fitness_r_candidate_limit: default_avalanche_fitness_r_candidate_limit(),
+            avalanche_fitness_cx_candidate_limit: default_avalanche_fitness_cx_candidate_limit(),
             same_r_batch: default_same_r_batch(),
             ciphertext_modify: default_ciphertext_modify(),
             oracle_accuracy_threshold: default_oracle_accuracy_threshold(),
@@ -1081,6 +1101,76 @@ fn default_avalanche_combination_keep_all_samples_in_memory() -> bool {
 /// - Returns the default configuration value; no side effects.
 fn default_avalanche_statistics_collection() -> bool {
     true
+}
+
+/// Default flag for enabling the trailing-zero fitness preprocessing pass.
+///
+/// # Parameters
+/// - None.
+///
+/// # Returns
+/// - `bool`: Default enable state for the fitness preprocessing pass.
+///
+/// # Expected Output
+/// - Returns a constant default value; no side effects.
+fn default_avalanche_fitness_scoring_pass() -> bool {
+    false
+}
+
+/// Default byte shift used to create the fitness slice ahead of the original message bits.
+///
+/// # Parameters
+/// - None.
+///
+/// # Returns
+/// - `usize`: Default byte shift applied to plaintexts before candidate scoring.
+///
+/// # Expected Output
+/// - Returns a constant default value; no side effects.
+fn default_avalanche_fitness_shift_bytes() -> usize {
+    0
+}
+
+/// Default trailing-zero fitness window width.
+///
+/// # Parameters
+/// - None.
+///
+/// # Returns
+/// - `usize`: Default number of LSBs scored by the fitness pass.
+///
+/// # Expected Output
+/// - Returns a constant default value; no side effects.
+fn default_avalanche_fitness_bit_width() -> usize {
+    32
+}
+
+/// Default cap on retained r-candidate groups for the fitness pass.
+///
+/// # Parameters
+/// - None.
+///
+/// # Returns
+/// - `usize`: Default r-group retention limit, where `0` disables truncation.
+///
+/// # Expected Output
+/// - Returns a constant default value; no side effects.
+fn default_avalanche_fitness_r_candidate_limit() -> usize {
+    0
+}
+
+/// Default cap on retained `c^x` inputs per r-candidate group for the fitness pass.
+///
+/// # Parameters
+/// - None.
+///
+/// # Returns
+/// - `usize`: Default per-group retention limit, where `0` disables truncation.
+///
+/// # Expected Output
+/// - Returns a constant default value; no side effects.
+fn default_avalanche_fitness_cx_candidate_limit() -> usize {
+    0
 }
 
 /// Default flag for using the same r candidate across a batch.

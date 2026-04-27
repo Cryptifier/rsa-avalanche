@@ -53,11 +53,17 @@
     "r_candidate_mode": "small_primes",
     "r_candidate_small_primes": [117, 1009, 1103, 1913],
     "r_candidate_small_prime_factors": 3,
+    "r_candidate_bit_length": 192,
     "r_candidate_random_power_window": true,
     "r_candidate_target_exponent_minimum": 0.7500, // Lower bound for sampled retarget exponents.
     "r_candidate_target_exponent": 0.8500, // Upper bound for sampled retarget exponents.
     "r_candidate_retarget_partition_count": 3,
     "r_candidate_retarget_minimum_exponent": 0.20,
+    "avalanche_fitness_scoring_pass": true,
+    "avalanche_fitness_shift_bytes": 4,
+    "avalanche_fitness_bit_width": 32,
+    "avalanche_fitness_r_candidate_limit": 16,
+    "avalanche_fitness_cx_candidate_limit": 8,
     // Beam search keeps a short candidate list and interprets per-bit
     // probabilities above the threshold as bit 1.
     "beam_bit_one_threshold": 0.5,
@@ -101,10 +107,10 @@
     "same_r_batch": false,
     "ciphertext_modify": true,
     "message": {
-      // Random 128-bit plaintexts are used for scoring; fixed_message only
+      // Random 64-bit plaintexts are used for scoring; fixed_message only
       // matters when is_random is set to false.
       "is_random": true,
-      "bits": 128,
+      "bits": 64,
       "fixed_message": "HeloWrld12345678"
     }
   }
