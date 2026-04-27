@@ -27,11 +27,10 @@ use rsademo::helpers::{
     stored_beam_value_is_one,
 };
 use rsademo::math::{compute_totient, mod_inverse, random_biguint_bits, to_hex};
-use rsademo::r_candidates::{
-    RCandidateSettings, generate_r_candidates_batch, retarget_r_candidates_for_speculative_oracles,
-};
+use rsademo::methods::build_r_candidate_settings;
+use rsademo::r_candidates::prepare_r_candidates_batch;
 use rsademo::rng::{RngChoice, RngMode};
-use rsademo::search::{beam_search_top_k_with_progress, viterbi_decode};
+use rsademo::search::beam_search_top_k_with_progress;
 
 const DEFAULT_DEMO_BATCH_SIZE: u64 = 1000;
 
@@ -39,7 +38,11 @@ const DEFAULT_DEMO_BATCH_SIZE: u64 = 1000;
 #[command(name = "demo", about = "Speculative RSA decrypt demo", author, version)]
 struct Args {
     /// Path to a JSON/JSON5 config file
-    #[arg(short = 'c', long, default_value = "config/rsa_config.json")]
+    #[arg(
+        short = 'c',
+        long,
+        default_value = "config/rsa_config_small_batch.json"
+    )]
     config: String,
 
     /// Encrypt a plaintext (hex string) using the config RSA key
@@ -83,6 +86,7 @@ struct Args {
 struct DemoContext {
     n: BigUint,
     e: BigUint,
+    key_bit_width: u64,
 }
 
 #[derive(Clone, Debug)]
@@ -257,8 +261,13 @@ fn build_demo_context(config: &Config) -> Result<DemoContext, Box<dyn Error>> {
         .ok_or("config.rsa_keypair.q must be set")?;
     let n = &p * &q;
     let e = BigUint::from(config.rsa_keypair.e);
+    let key_bit_width = p.bits().saturating_add(q.bits());
 
-    Ok(DemoContext { n, e })
+    Ok(DemoContext {
+        n,
+        e,
+        key_bit_width,
+    })
 }
 
 /// Resolves the ciphertext input from CLI or config.
@@ -451,19 +460,9 @@ fn run_speculative_decrypt(
     let engine = &config.engine;
     let mut rng = RngChoice::from_entropy(RngMode::Crypto)?;
 
-    let settings = build_r_candidate_settings(engine);
+    let settings = build_r_candidate_settings(engine, ctx.key_bit_width);
     let candidate_batch_size = engine.process_count.max(engine.process_min_count).max(1) as usize;
-    let mut candidates =
-        generate_r_candidates_batch(&ctx.n, &settings, &mut rng, candidate_batch_size);
-    retarget_r_candidates_for_speculative_oracles(
-        &ctx.n,
-        &mut candidates,
-        &settings.target_exponent_minimum,
-        &settings.target_exponent,
-        settings.retarget_partition_count,
-        &settings.retarget_minimum_exponent,
-        &mut rng,
-    );
+    let candidates = prepare_r_candidates_batch(&ctx.n, &settings, &mut rng, candidate_batch_size)?;
     if candidates.is_empty() {
         return Err("no r candidates generated for demo".into());
     }
@@ -780,104 +779,28 @@ fn run_avalanche_beam_search(
         },
     )?;
 
-    println!(
-        "Avalanche beam search top {} candidates (lsb0 order):",
-        beam_result.beam.len()
-    );
-    for (idx, candidate) in beam_result.beam.iter().enumerate() {
-        let candidate_bits: Vec<bool> = candidate
+    let top = beam_result.beam.first().cloned().map(|candidate| {
+        let bits = candidate
             .vector
             .iter()
             .map(|value| stored_beam_value_is_one(*value, beam_bit_one_threshold))
-            .collect();
-        let mut candidate_hex = to_hex(&bits_le_to_biguint(&candidate_bits));
+            .collect::<Vec<_>>();
+        let mut hex = to_hex(&bits_le_to_biguint(&bits));
         let hex_len = (bit_width + 3) / 4;
-        if candidate_hex.len() < hex_len {
-            let padding = "0".repeat(hex_len - candidate_hex.len());
-            candidate_hex = format!("{}{}", padding, candidate_hex);
+        if hex.len() < hex_len {
+            let padding = "0".repeat(hex_len - hex.len());
+            hex = format!("{}{}", padding, hex);
         }
         println!(
-            "Beam {} score {} hex {}",
-            idx + 1,
+            "Attempting decrypt with top beam-search candidate: score {} hex {}",
             format_beam_float(candidate.score, BEAM_SCORE_DECIMALS),
-            candidate_hex
+            hex
         );
-        let candidate_value = bits_le_to_biguint(&candidate_bits);
-        println!(
-            "Beam {} bits: total {} biguint {}",
-            idx + 1,
-            candidate_bits.len(),
-            candidate_value.bits()
-        );
-    }
-    if let Some(top) = beam_result.beam.first() {
-        let top_bits: Vec<bool> = top
-            .vector
-            .iter()
-            .map(|value| stored_beam_value_is_one(*value, beam_bit_one_threshold))
-            .collect();
-        let msb = top_bits.last().copied().unwrap_or(false);
-        println!("Avalanche beam top MSB: {}", if msb { 1 } else { 0 });
-    }
-
-    let viterbi_bits = {
-        let observations: Vec<usize> = (0..bit_width).collect();
-        let start_log_probs = vec![0.5f64.ln(), 0.5f64.ln()];
-        let transition_log_probs = vec![
-            vec![0.5f64.ln(), 0.5f64.ln()],
-            vec![0.5f64.ln(), 0.5f64.ln()],
-        ];
-        let emission_zero: Vec<f64> = beam_probabilities
-            .iter()
-            .map(|bias| {
-                let p = bias.clamp(1e-12, 1.0 - 1e-12);
-                (1.0 - p).ln()
-            })
-            .collect();
-        let emission_one: Vec<f64> = beam_probabilities
-            .iter()
-            .map(|bias| {
-                let p = bias.clamp(1e-12, 1.0 - 1e-12);
-                p.ln()
-            })
-            .collect();
-        let emission_log_probs = vec![emission_zero, emission_one];
-        let result = viterbi_decode(
-            &observations,
-            &start_log_probs,
-            &transition_log_probs,
-            &emission_log_probs,
-        )?;
-        let bits: Vec<bool> = result.path.iter().map(|state| *state == 1).collect();
-        (bits, result.log_prob)
-    };
-
-    let mut viterbi_hex = to_hex(&bits_le_to_biguint(&viterbi_bits.0));
-    let hex_len = (bit_width + 3) / 4;
-    if viterbi_hex.len() < hex_len {
-        let padding = "0".repeat(hex_len - viterbi_hex.len());
-        viterbi_hex = format!("{}{}", padding, viterbi_hex);
-    }
-    println!(
-        "Avalanche viterbi decode (lsb0 order): log_prob {} hex {}",
-        format_beam_float(viterbi_bits.1, BEAM_SCORE_DECIMALS),
-        viterbi_hex
-    );
-    let viterbi_msb = viterbi_bits.0.last().copied().unwrap_or(false);
-    println!("Avalanche viterbi MSB: {}", if viterbi_msb { 1 } else { 0 });
-
-    let top = beam_result
-        .beam
-        .first()
-        .cloned()
-        .map(|candidate| BeamCandidateBits {
+        BeamCandidateBits {
             score: candidate.score,
-            bits: candidate
-                .vector
-                .iter()
-                .map(|value| stored_beam_value_is_one(*value, beam_bit_one_threshold))
-                .collect(),
-        });
+            bits,
+        }
+    });
     Ok(top)
 }
 
@@ -930,76 +853,6 @@ fn compute_stats(values: &[f64]) -> Option<StatSummary> {
 }
 
 /// Builds `RCandidateSettings` from the engine configuration.
-///
-/// # Parameters
-/// - `engine`: Engine configuration containing candidate fields.
-///
-/// # Returns
-/// - `RCandidateSettings`: Fully populated candidate settings.
-///
-/// # Expected Output
-/// - Returns a settings struct; no side effects.
-fn build_r_candidate_settings(engine: &EngineConfig) -> RCandidateSettings {
-    let override_best_r = engine.override_best_r.as_ref().and_then(|raw| {
-        let trimmed = raw.trim();
-        if trimmed.is_empty() {
-            None
-        } else {
-            trimmed.parse::<BigUint>().ok()
-        }
-    });
-    let minimum_target_bit_length = minimum_r_candidate_bit_length(engine);
-    let target_bit_length = Some(
-        engine
-            .r_candidate_bit_length
-            .unwrap_or(minimum_target_bit_length)
-            .max(minimum_target_bit_length),
-    );
-
-    RCandidateSettings {
-        mode: engine.r_candidate_mode,
-        override_best_r,
-        process_min_factor: BigUint::from(engine.process_min_factor),
-        process_count: engine.process_count,
-        process_min_count: engine.process_min_count,
-        process_scale: engine.process_scale,
-        reuse_r_candidates_path: engine.reuse_r_candidates_path.clone(),
-        reuse_r_candidates: engine.reuse_r_candidates,
-        reuse_r_candidates_append_only: engine.reuse_r_candidates_append_only,
-        small_primes: engine
-            .r_candidate_small_primes
-            .iter()
-            .map(|p| BigUint::from(*p))
-            .collect(),
-        small_prime_factors_per_candidate: engine.r_candidate_small_prime_factors,
-        max_factors_per_candidate: engine.r_candidate_max_factors,
-        target_bit_length,
-        random_power_window: engine.r_candidate_random_power_window,
-        target_exponent_minimum: engine.r_candidate_target_exponent_minimum.clone(),
-        target_exponent: engine.r_candidate_target_exponent.clone(),
-        retarget_partition_count: engine.r_candidate_retarget_partition_count,
-        retarget_minimum_exponent: engine.r_candidate_retarget_minimum_exponent.clone(),
-    }
-}
-
-/// Resolves the minimum r-candidate modulus width implied by the Avalanche plaintext width.
-///
-/// # Parameters
-/// - `engine`: Engine configuration containing the message width and fitness shift.
-///
-/// # Returns
-/// - `u64`: Minimum target bit length for generated r candidates.
-///
-/// # Expected Output
-/// - Returns a deterministic lower bound; no stdout/stderr output.
-fn minimum_r_candidate_bit_length(engine: &EngineConfig) -> u64 {
-    let shift_bits = engine.avalanche_fitness_shift_bytes.saturating_mul(8);
-    let doubled_width = (engine.message.bits.max(1) as usize)
-        .saturating_add(shift_bits)
-        .saturating_mul(2);
-    u64::try_from(doubled_width).unwrap_or(u64::MAX)
-}
-
 /// Computes the analysis bit width based on configuration and modulus bounds.
 ///
 /// # Parameters

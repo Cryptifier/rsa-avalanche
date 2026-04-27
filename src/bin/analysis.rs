@@ -42,7 +42,11 @@ struct Args {
     crypto_rng: bool,
 
     /// Path to a JSON config matching the original rsa_demo.sage schema
-    #[arg(short = 'c', long, default_value = "config/rsa_config.json")]
+    #[arg(
+        short = 'c',
+        long,
+        default_value = "config/rsa_config_small_batch.json"
+    )]
     config: String,
 
     /// Run extended analysis tests and sufficiency checks

@@ -4,8 +4,8 @@
   "rsa_keypair": {
     "generate": false,
     "e": 65537,
-    "p": "58628584552695041836585949440309667269439478958531434173586684659894660406667",
-    "q": "64301897341371723258256695021518757714143539632887023240380348270756059529701"
+    "p": "3030152311446024058741",
+    "q": "4262327550688715209573"
   },
   "polynomial_fields": {
     // Coordinate-generation fields shared with the other small/medium configs so
@@ -46,10 +46,8 @@
     // Reuse a precomputed grid of scored r candidates so this config measures
     // the small-batch avalanche pipeline instead of live r generation.
     "reuse_r_candidates": true,
-    "reuse_r_candidates_path": "data/rgen_output.csv",
+    "reuse_r_candidates_path": "data/rgen_grid/rgen_grid_pct_5.csv",
     "reuse_r_candidates_append_only": false,
-    "reuse_retargeted_r_candidates": false,
-    "reuse_retargeted_r_candidates_path_prefix": "data/rgen_retargeted",
     // Build speculative r values from products of these small primes, then
     // retarget the product with the exponent window below.
     "r_candidate_mode": "small_primes",
@@ -57,8 +55,8 @@
     "r_candidate_small_prime_factors": 3,
     "r_candidate_bit_length": 192,
     "r_candidate_random_power_window": true,
-    "r_candidate_target_exponent_minimum": 0.750, // Lower bound for sampled retarget exponents.
-    "r_candidate_target_exponent": 0.850, // Upper bound for sampled retarget exponents.
+    "r_candidate_target_exponent_minimum": 1.300, // Lower bound for sampled retarget exponents.
+    "r_candidate_target_exponent": 1.450, // Upper bound for sampled retarget exponents.
     "r_candidate_retarget_partition_count": 3,
     "r_candidate_retarget_minimum_exponent": 0.20,
     "avalanche_fitness_scoring_pass": true,
@@ -87,10 +85,10 @@
     // each selected r still contributes all of its sampled c^x variants.
     "avalanche_combination_mixed_r_candidates": 64,
     "avalanche_combination_samples": 500000, // N: number of sampled combinations evaluated by avalanche per batch.
-    "avalanche_combination_size": 128, // Number of scored items taken in each sampled combination.
+    "avalanche_combination_size": 64, // Number of scored items taken in each sampled combination.
     "avalanche_combination_pool_size": 100000, // Legacy compatibility field; runtime sampling now always uses the full batch-sized pool.
-    "avalanche_combination_recursion_depth": 1, // Run one recursive Avalanche tier on top of the sampled-input tier.
-    "avalanche_combination_recursive_group_size": 128, // Number of prior-tier sample outputs grouped into each recursive Avalanche call.
+    "avalanche_combination_recursion_depth": 2, // Run one recursive Avalanche tier on top of the sampled-input tier.
+    "avalanche_combination_recursive_group_size": 64, // Number of prior-tier sample outputs grouped into each recursive Avalanche call.
     "avalanche_combination_recursive_resample_count": 100000, // 0 preserves one-pass regrouping; set >0 to resample prior-tier outputs to a target count.
     // Hamming-distance pruning keeps a central percentile band of scored items
     // before sampling, then optionally adds some tail outliers back in.
@@ -112,7 +110,7 @@
       // Random 64-bit plaintexts are used for scoring; fixed_message only
       // matters when is_random is set to false.
       "is_random": true,
-      "bits": 128,
+      "bits": 64,
       "fixed_message": "HeloWrld12345678"
     }
   }

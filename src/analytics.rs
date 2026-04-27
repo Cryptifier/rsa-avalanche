@@ -10,8 +10,7 @@ use serde_json::{Map, Value};
 
 use crate::logs::{LogError, LogWriter, write_session_start};
 use crate::r_candidates::{
-    RCandidate, RCandidateMode, RCandidateSettings, generate_r_candidates_batch,
-    retarget_r_candidates_for_speculative_oracles,
+    RCandidate, RCandidateMode, RCandidateSettings, prepare_r_candidates_batch,
 };
 use crate::rng::RngChoice;
 
@@ -870,33 +869,26 @@ pub fn generate_r_candidates_with_analytics(
     analytics: &Arc<Mutex<SessionAnalytics>>,
 ) -> Vec<RCandidate> {
     let start = std::time::Instant::now();
-    let mut candidates = generate_r_candidates_batch(n, settings, rng, batch_size);
-    if settings.reuse_r_candidates
-        && settings.retarget_partition_count > 0
-        && !candidates.is_empty()
-        && candidates.len() < batch_size
-    {
-        let source_count = candidates.len();
-        candidates = candidates
-            .iter()
-            .cloned()
-            .cycle()
-            .take(batch_size)
-            .collect();
-        println!(
-            "Expanded {} reused r candidates to {} retarget inputs before retargeting",
-            source_count, batch_size
-        );
-    }
-    retarget_r_candidates_for_speculative_oracles(
-        n,
-        &mut candidates,
-        &settings.target_exponent_minimum,
-        &settings.target_exponent,
-        settings.retarget_partition_count,
-        &settings.retarget_minimum_exponent,
-        rng,
-    );
+    let candidates = match prepare_r_candidates_batch(n, settings, rng, batch_size) {
+        Ok(candidates) => candidates,
+        Err(err) => {
+            println!("Failed to prepare r candidates: {}", err);
+            Vec::new()
+        }
+    };
+    let mode = if settings.reuse_retargeted_r_candidates {
+        "retargeted_reuse".to_string()
+    } else {
+        match settings.mode {
+            RCandidateMode::Factoring => "factoring".to_string(),
+            RCandidateMode::SmallPrimes => "small_primes".to_string(),
+        }
+    };
+    let reuse_path = if settings.reuse_retargeted_r_candidates {
+        settings.reuse_retargeted_r_candidates_path.clone()
+    } else {
+        settings.reuse_r_candidates_path.clone()
+    };
     let duration = start.elapsed();
 
     let candidate_entries = candidates
@@ -917,20 +909,15 @@ pub fn generate_r_candidates_with_analytics(
         })
         .collect::<Vec<_>>();
 
-    let mode = match settings.mode {
-        RCandidateMode::Factoring => "factoring",
-        RCandidateMode::SmallPrimes => "small_primes",
-    };
-
     if let Ok(mut guard) = analytics.lock() {
         guard.push_r_candidate_batch(RCandidateBatchAnalytics {
             context: context.to_string(),
-            mode: mode.to_string(),
+            mode,
             target_count: batch_size.max(1),
             generated_count: candidates.len(),
             duration_ms: duration.as_millis(),
-            reuse_path: settings.reuse_r_candidates_path.clone(),
-            reuse_enabled: settings.reuse_r_candidates,
+            reuse_path,
+            reuse_enabled: settings.reuse_r_candidates || settings.reuse_retargeted_r_candidates,
             reuse_append_only: settings.reuse_r_candidates_append_only,
             min_factor: settings.process_min_factor.clone(),
             process_scale: settings.process_scale,

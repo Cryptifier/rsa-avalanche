@@ -11,7 +11,8 @@ use rand::RngCore;
 use rand::seq::SliceRandom;
 use rayon::prelude::*;
 use serde::Deserialize;
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
+use std::error::Error;
 use std::fs::{self, OpenOptions};
 use std::io::{BufRead, BufReader, Write};
 use std::sync::{
@@ -78,6 +79,8 @@ pub struct RCandidateSettings {
     pub reuse_r_candidates_path: String,
     pub reuse_r_candidates: bool,
     pub reuse_r_candidates_append_only: bool,
+    pub reuse_retargeted_r_candidates: bool,
+    pub reuse_retargeted_r_candidates_path: String,
     pub small_primes: Vec<BigUint>,
     pub small_prime_factors_per_candidate: usize,
     pub max_factors_per_candidate: usize,
@@ -142,6 +145,225 @@ pub fn generate_r_candidates_batch(
     batch_settings.process_count = target;
     batch_settings.process_min_count = target;
     generate_r_candidates(n, &batch_settings, rng)
+}
+
+/// Resolves the keyed cache path for pre-retargeted r candidates.
+///
+/// # Parameters
+/// - `path_prefix`: File prefix configured for the retargeted cache family.
+/// - `key_bit_width`: Bit width of the original RSA key used to namespace the cache file.
+///
+/// # Returns
+/// - `String`: Derived cache path ending in `_<bits>.csv`.
+///
+/// # Expected Output
+/// - Returns a deterministic file path; no stdout/stderr output.
+pub fn resolve_retargeted_r_candidates_path(path_prefix: &str, key_bit_width: u64) -> String {
+    format!(
+        "{}_{}.csv",
+        path_prefix.trim_end_matches(".csv"),
+        key_bit_width
+    )
+}
+
+/// Writes r candidates to a CSV file, optionally appending to an existing file.
+///
+/// # Parameters
+/// - `path`: Output CSV path.
+/// - `entries`: Candidate entries to write.
+/// - `append`: Whether to append instead of overwriting.
+/// - `header_lines`: Comment header lines to include when creating a new file.
+///
+/// # Returns
+/// - `Result<usize, Box<dyn Error>>`: Number of candidates written.
+///
+/// # Expected Output
+/// - Writes to disk at `path`; may create or append the file.
+pub fn write_candidates_csv(
+    path: &str,
+    entries: &[RCandidate],
+    append: bool,
+    header_lines: &[String],
+) -> Result<usize, Box<dyn Error>> {
+    let needs_header = if append {
+        fs::metadata(path)
+            .map(|meta| meta.len() == 0)
+            .unwrap_or(true)
+    } else {
+        true
+    };
+
+    let mut file = if append {
+        OpenOptions::new().create(true).append(true).open(path)?
+    } else {
+        OpenOptions::new()
+            .create(true)
+            .truncate(true)
+            .write(true)
+            .open(path)?
+    };
+
+    if needs_header {
+        for line in header_lines {
+            writeln!(file, "{line}")?;
+        }
+    }
+
+    for candidate in entries {
+        let factors_str = format_factors_csv(&candidate.factors);
+        writeln!(
+            file,
+            "{},{},{}",
+            candidate.r, candidate.target_exponent, factors_str
+        )?;
+    }
+
+    Ok(entries.len())
+}
+
+/// Loads candidates from a keyed retargeted cache file and validates the modulus binding.
+///
+/// # Parameters
+/// - `path`: Cache file path to read.
+/// - `expected_modulus`: RSA modulus expected to own the cache file.
+///
+/// # Returns
+/// - `Result<Vec<RCandidate>, Box<dyn Error>>`: Parsed candidates when the cache is valid.
+///
+/// # Expected Output
+/// - Reads the cache file and returns an error on key mismatches or invalid rows.
+pub fn load_retargeted_r_candidates(
+    path: &str,
+    expected_modulus: &BigUint,
+) -> Result<Vec<RCandidate>, Box<dyn Error>> {
+    let loaded = load_candidate_file(path)?;
+    let expected_modulus_text = expected_modulus.to_string();
+    let Some(stored_modulus) = loaded.metadata.get("n") else {
+        return Err(format!(
+            "retargeted reuse file {path} is missing # n metadata and cannot be tied to a single key"
+        )
+        .into());
+    };
+    if stored_modulus != &expected_modulus_text {
+        return Err(
+            format!("retargeted reuse file {path} was generated for a different modulus").into(),
+        );
+    }
+    Ok(loaded.entries)
+}
+
+/// Builds retargeted candidates from an existing reuse CSV and rewrites them in place.
+///
+/// # Parameters
+/// - `n`: RSA modulus used for retargeting.
+/// - `settings`: Candidate settings containing the source reuse path and retargeting window.
+/// - `rng`: Random number generator used for shuffling and retarget sampling.
+/// - `target_count`: Number of retargeted candidates to produce.
+///
+/// # Returns
+/// - `Result<Vec<RCandidate>, Box<dyn Error>>`: Retargeted candidate list or an error when the source file is unusable.
+///
+/// # Expected Output
+/// - Loads the source reuse file, prints reuse/retarget progress, and returns retargeted candidates.
+pub fn generate_retargeted_r_candidates_batch(
+    n: &BigUint,
+    settings: &RCandidateSettings,
+    rng: &mut RngChoice,
+    target_count: usize,
+) -> Result<Vec<RCandidate>, Box<dyn Error>> {
+    let count = target_count.max(1);
+    let reuse_path = settings.reuse_r_candidates_path.as_str();
+    println!(
+        "Loading base r candidates for retargeting from {}",
+        reuse_path
+    );
+    let mut loaded = load_reuse_candidates(reuse_path);
+    if loaded.is_empty() {
+        return Err(format!("no base r candidates loaded from {reuse_path}").into());
+    }
+    loaded.shuffle(rng);
+    println!(
+        "Loaded {} base r candidates for retarget cache generation",
+        loaded.len()
+    );
+
+    let mut retarget_inputs = loaded
+        .iter()
+        .cloned()
+        .cycle()
+        .take(count)
+        .collect::<Vec<_>>();
+    retarget_r_candidates_for_speculative_oracles(
+        n,
+        &mut retarget_inputs,
+        &settings.target_exponent_minimum,
+        &settings.target_exponent,
+        settings.retarget_partition_count,
+        &settings.retarget_minimum_exponent,
+        rng,
+    );
+    Ok(retarget_inputs)
+}
+
+/// Prepares a batch of speculative r candidates, optionally loading a keyed retargeted cache.
+///
+/// # Parameters
+/// - `n`: RSA modulus used for candidate generation and cache validation.
+/// - `settings`: Candidate settings controlling reuse, retargeting, and cache paths.
+/// - `rng`: Random number generator used for sampling and shuffling.
+/// - `batch_size`: Target number of candidates to prepare.
+///
+/// # Returns
+/// - `Result<Vec<RCandidate>, Box<dyn Error>>`: Prepared candidate batch or an error when cache loading fails.
+///
+/// # Expected Output
+/// - May print reuse and retarget progress logs; no file output.
+pub fn prepare_r_candidates_batch(
+    n: &BigUint,
+    settings: &RCandidateSettings,
+    rng: &mut RngChoice,
+    batch_size: usize,
+) -> Result<Vec<RCandidate>, Box<dyn Error>> {
+    if settings.reuse_retargeted_r_candidates {
+        println!(
+            "Reuse enabled; loading retargeted r candidates from {}",
+            settings.reuse_retargeted_r_candidates_path
+        );
+        let mut candidates =
+            load_retargeted_r_candidates(&settings.reuse_retargeted_r_candidates_path, n)?;
+        candidates.shuffle(rng);
+        candidates.truncate(batch_size.max(1));
+        return Ok(candidates);
+    }
+
+    let mut candidates = generate_r_candidates_batch(n, settings, rng, batch_size);
+    if settings.reuse_r_candidates
+        && settings.retarget_partition_count > 0
+        && !candidates.is_empty()
+        && candidates.len() < batch_size
+    {
+        let source_count = candidates.len();
+        candidates = candidates
+            .iter()
+            .cloned()
+            .cycle()
+            .take(batch_size)
+            .collect();
+        println!(
+            "Expanded {} reused r candidates to {} retarget inputs before retargeting",
+            source_count, batch_size
+        );
+    }
+    retarget_r_candidates_for_speculative_oracles(
+        n,
+        &mut candidates,
+        &settings.target_exponent_minimum,
+        &settings.target_exponent,
+        settings.retarget_partition_count,
+        &settings.retarget_minimum_exponent,
+        rng,
+    );
+    Ok(candidates)
 }
 
 /// Generates `r` candidates from a ciphertext stream using `r = c^x mod n`.
@@ -857,6 +1079,14 @@ pub fn generate_r_candidates_via_factoring(
 
 /// Loads previously generated `r` candidates from a CSV file.
 ///
+#[derive(Debug)]
+struct LoadedCandidateFile {
+    metadata: BTreeMap<String, String>,
+    entries: Vec<RCandidate>,
+}
+
+/// Loads reusable r candidates from a CSV file.
+///
 /// # Parameters
 /// - `path`: Path to the reuse CSV file.
 ///
@@ -865,18 +1095,42 @@ pub fn generate_r_candidates_via_factoring(
 ///
 /// # Expected Output
 /// - Returns an empty list on missing/invalid files; may print parsing errors.
-fn load_reuse_candidates(path: &str) -> Vec<RCandidate> {
+pub fn load_reuse_candidates(path: &str) -> Vec<RCandidate> {
+    match load_candidate_file(path) {
+        Ok(loaded) => loaded.entries,
+        Err(err) => {
+            println!("Failed to load reuse file {}: {}", path, err);
+            Vec::new()
+        }
+    }
+}
+
+/// Parses a candidate CSV file and returns both metadata and candidate entries.
+///
+/// # Parameters
+/// - `path`: Path to the candidate CSV file.
+///
+/// # Returns
+/// - `Result<LoadedCandidateFile, Box<dyn Error>>`: Parsed metadata and entries.
+///
+/// # Expected Output
+/// - Reads the file and may print row-level parse errors before returning.
+fn load_candidate_file(path: &str) -> Result<LoadedCandidateFile, Box<dyn Error>> {
     let file = match fs::File::open(path) {
         Ok(f) => f,
         Err(err) => {
             if err.kind() != std::io::ErrorKind::NotFound {
                 println!("Failed to open reuse file {}: {}", path, err);
             }
-            return Vec::new();
+            return Ok(LoadedCandidateFile {
+                metadata: BTreeMap::new(),
+                entries: Vec::new(),
+            });
         }
     };
 
     let reader = BufReader::new(file);
+    let mut metadata = BTreeMap::new();
     let mut entries = Vec::new();
 
     for (idx, line) in reader.lines().enumerate() {
@@ -893,13 +1147,25 @@ fn load_reuse_candidates(path: &str) -> Vec<RCandidate> {
         };
 
         let line = line.trim();
-        if line.is_empty() || line.starts_with('#') {
+        if line.is_empty() {
+            continue;
+        }
+        if let Some(comment) = line.strip_prefix('#') {
+            if let Some((key, value)) = comment.trim().split_once('=') {
+                metadata.insert(key.trim().to_string(), value.trim().to_string());
+            }
             continue;
         }
 
-        let mut parts = line.splitn(2, ',');
+        let mut parts = line.splitn(3, ',');
         let r_str = parts.next().unwrap_or("").trim();
-        let factors_str = parts.next().unwrap_or("").trim();
+        let second = parts.next().unwrap_or("").trim();
+        let third = parts.next().unwrap_or("").trim();
+        let (target_exponent_str, factors_str) = if third.is_empty() {
+            ("0", second)
+        } else {
+            (second, third)
+        };
 
         if r_str.is_empty() || factors_str.is_empty() {
             println!(
@@ -922,6 +1188,19 @@ fn load_reuse_candidates(path: &str) -> Vec<RCandidate> {
             }
         };
 
+        let target_exponent = match target_exponent_str.parse::<BigDecimal>() {
+            Ok(exponent) => exponent,
+            Err(err) => {
+                println!(
+                    "Skipping line {} in reuse file: invalid target exponent '{}': {}",
+                    idx + 1,
+                    target_exponent_str,
+                    err
+                );
+                continue;
+            }
+        };
+
         let Some(factors) = parse_factors_csv(factors_str) else {
             println!(
                 "Skipping line {} in reuse file: invalid factors '{}': expected p^e;...",
@@ -931,10 +1210,14 @@ fn load_reuse_candidates(path: &str) -> Vec<RCandidate> {
             continue;
         };
 
-        entries.push(RCandidate::new(r, factors));
+        entries.push(RCandidate {
+            r,
+            factors,
+            target_exponent,
+        });
     }
 
-    entries
+    Ok(LoadedCandidateFile { metadata, entries })
 }
 
 /// Appends newly generated `r` candidates to a reuse CSV file.
@@ -1194,6 +1477,79 @@ mod tests {
     }
 
     #[test]
+    fn test_load_reuse_candidates_parses_target_exponent_column() {
+        let path = temp_path("load_target_exponent");
+        let content = "# n=3233\n105,0.875,3^1;5^1;7^1\n";
+        fs::write(&path, content).expect("write failed");
+        let entries = load_reuse_candidates(path.to_str().unwrap());
+        assert_eq!(entries.len(), 1);
+        assert_eq!(
+            entries[0].target_exponent,
+            BigDecimal::parse_bytes(b"0.875", 10).expect("valid exponent")
+        );
+        let _ = fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_resolve_retargeted_r_candidates_path_uses_key_bits() {
+        assert_eq!(
+            resolve_retargeted_r_candidates_path("data/rgen_retargeted", 512),
+            "data/rgen_retargeted_512.csv"
+        );
+    }
+
+    #[test]
+    fn test_load_retargeted_r_candidates_rejects_mismatched_modulus() {
+        let path = temp_path("retargeted_mismatch");
+        let content = "# n=9999\n105,0.875,3^1;5^1;7^1\n";
+        fs::write(&path, content).expect("write failed");
+        let err = load_retargeted_r_candidates(path.to_str().unwrap(), &BigUint::from(3233u32))
+            .expect_err("cache should reject mismatched modulus");
+        assert!(err.to_string().contains("different modulus"));
+        let _ = fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_prepare_r_candidates_batch_uses_retargeted_cache() {
+        let path = temp_path("retargeted_prepare");
+        let content = "# n=3233\n105,0.875,3^1;5^1;7^1\n";
+        fs::write(&path, content).expect("write failed");
+        let settings = RCandidateSettings {
+            mode: RCandidateMode::SmallPrimes,
+            override_best_r: None,
+            process_min_factor: BigUint::from(3u8),
+            process_count: 1,
+            process_min_count: 1,
+            process_scale: 8,
+            reuse_r_candidates_path: "data/rgen_output.csv".to_string(),
+            reuse_r_candidates: false,
+            reuse_r_candidates_append_only: false,
+            reuse_retargeted_r_candidates: true,
+            reuse_retargeted_r_candidates_path: path.to_string_lossy().to_string(),
+            small_primes: vec![3u8, 5u8, 7u8].into_iter().map(BigUint::from).collect(),
+            small_prime_factors_per_candidate: 3,
+            max_factors_per_candidate: 6,
+            target_bit_length: Some(16),
+            random_power_window: false,
+            target_exponent_minimum: BigDecimal::parse_bytes(b"0.8", 10).expect("valid exponent"),
+            target_exponent: BigDecimal::parse_bytes(b"0.9", 10).expect("valid exponent"),
+            retarget_partition_count: 3,
+            retarget_minimum_exponent: BigDecimal::parse_bytes(b"0.45", 10)
+                .expect("valid minimum exponent"),
+        };
+        let mut rng = RngChoice::from_seed(RngMode::Standard, 99);
+        let candidates =
+            prepare_r_candidates_batch(&BigUint::from(3233u32), &settings, &mut rng, 1)
+                .expect("prepare cache batch failed");
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(
+            candidates[0].target_exponent,
+            BigDecimal::parse_bytes(b"0.875", 10).expect("valid exponent")
+        );
+        let _ = fs::remove_file(&path);
+    }
+
+    #[test]
     fn test_append_reuse_candidates_writes() {
         let path = temp_path("append");
         let entries = vec![RCandidate::new(
@@ -1229,6 +1585,8 @@ mod tests {
             reuse_r_candidates_path: "".to_string(),
             reuse_r_candidates: false,
             reuse_r_candidates_append_only: false,
+            reuse_retargeted_r_candidates: false,
+            reuse_retargeted_r_candidates_path: "".to_string(),
             small_primes: vec![3u8, 5u8, 7u8, 11u8]
                 .into_iter()
                 .map(BigUint::from)
@@ -1274,6 +1632,8 @@ mod tests {
             reuse_r_candidates_path: "".to_string(),
             reuse_r_candidates: false,
             reuse_r_candidates_append_only: false,
+            reuse_retargeted_r_candidates: false,
+            reuse_retargeted_r_candidates_path: "".to_string(),
             small_primes: vec![3u8, 5u8].into_iter().map(BigUint::from).collect(),
             small_prime_factors_per_candidate: 3,
             max_factors_per_candidate: 4,
@@ -1302,6 +1662,8 @@ mod tests {
             reuse_r_candidates_path: "".to_string(),
             reuse_r_candidates: false,
             reuse_r_candidates_append_only: false,
+            reuse_retargeted_r_candidates: false,
+            reuse_retargeted_r_candidates_path: "".to_string(),
             small_primes: vec![3u8, 5u8, 7u8].into_iter().map(BigUint::from).collect(),
             small_prime_factors_per_candidate: 3,
             max_factors_per_candidate: 4,
@@ -1330,6 +1692,8 @@ mod tests {
             reuse_r_candidates_path: "".to_string(),
             reuse_r_candidates: false,
             reuse_r_candidates_append_only: false,
+            reuse_retargeted_r_candidates: false,
+            reuse_retargeted_r_candidates_path: "".to_string(),
             small_primes: Vec::new(),
             small_prime_factors_per_candidate: 3,
             max_factors_per_candidate: 6,
@@ -1359,6 +1723,8 @@ mod tests {
             reuse_r_candidates_path: "".to_string(),
             reuse_r_candidates: false,
             reuse_r_candidates_append_only: false,
+            reuse_retargeted_r_candidates: false,
+            reuse_retargeted_r_candidates_path: "".to_string(),
             small_primes: Vec::new(),
             small_prime_factors_per_candidate: 3,
             max_factors_per_candidate: 6,
@@ -1390,6 +1756,8 @@ mod tests {
             reuse_r_candidates_path: "".to_string(),
             reuse_r_candidates: false,
             reuse_r_candidates_append_only: false,
+            reuse_retargeted_r_candidates: false,
+            reuse_retargeted_r_candidates_path: "".to_string(),
             small_primes: Vec::new(),
             small_prime_factors_per_candidate: 3,
             max_factors_per_candidate: 6,
@@ -1468,6 +1836,8 @@ mod tests {
             reuse_r_candidates_path: "".to_string(),
             reuse_r_candidates: false,
             reuse_r_candidates_append_only: false,
+            reuse_retargeted_r_candidates: false,
+            reuse_retargeted_r_candidates_path: "".to_string(),
             small_primes: Vec::new(),
             small_prime_factors_per_candidate: 3,
             max_factors_per_candidate: 6,

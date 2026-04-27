@@ -55,7 +55,7 @@ use crate::math::{
     bit_length, choose_exponent, compute_totient, mod_inverse, random_biguint_bits,
     random_prime_with_bits, shannon_entropy_bit, to_hex,
 };
-use crate::r_candidates::{RCandidate, RCandidateSettings};
+use crate::r_candidates::{RCandidate, RCandidateSettings, resolve_retargeted_r_candidates_path};
 use crate::rng::{RngChoice, RngMode};
 use crate::search::{beam_search_top_k, beam_search_top_k_with_progress, viterbi_decode};
 use num_bigint::BigUint;
@@ -454,6 +454,7 @@ pub fn run_demo(
         phi: phi.clone(),
         e: e.clone(),
         d: d.clone(),
+        key_bit_width: p.bits().saturating_add(q.bits()),
     };
 
     if args.tests {
@@ -1310,7 +1311,7 @@ fn build_oracle_candidates(
     rng: &mut RngChoice,
     analytics: &Arc<Mutex<SessionAnalytics>>,
 ) -> Result<Vec<OracleCandidate>, Box<dyn Error>> {
-    let settings = build_r_candidate_settings(engine);
+    let settings = build_r_candidate_settings(engine, ctx.key_bit_width);
     let batch_size = engine.process_count.max(engine.process_min_count).max(1) as usize;
     let candidates = generate_r_candidates_with_analytics(
         "analysis_oracle_candidates",
@@ -3370,13 +3371,17 @@ fn minimum_r_candidate_bit_length(engine: &EngineConfig) -> u64 {
 ///
 /// # Parameters
 /// - `engine`: Engine configuration containing candidate fields.
+/// - `configured_key_bit_width`: Bit width of the original RSA key used to key retargeted-cache files.
 ///
 /// # Returns
 /// - `RCandidateSettings`: Fully populated candidate settings.
 ///
 /// # Expected Output
 /// - Returns a settings struct; no side effects.
-fn build_r_candidate_settings(engine: &EngineConfig) -> RCandidateSettings {
+pub fn build_r_candidate_settings(
+    engine: &EngineConfig,
+    configured_key_bit_width: u64,
+) -> RCandidateSettings {
     let override_best_r = engine.override_best_r.as_ref().and_then(|raw| {
         let trimmed = raw.trim();
         if trimmed.is_empty() {
@@ -3403,6 +3408,11 @@ fn build_r_candidate_settings(engine: &EngineConfig) -> RCandidateSettings {
         reuse_r_candidates_path: engine.reuse_r_candidates_path.clone(),
         reuse_r_candidates: engine.reuse_r_candidates,
         reuse_r_candidates_append_only: engine.reuse_r_candidates_append_only,
+        reuse_retargeted_r_candidates: engine.reuse_retargeted_r_candidates,
+        reuse_retargeted_r_candidates_path: resolve_retargeted_r_candidates_path(
+            &engine.reuse_retargeted_r_candidates_path_prefix,
+            configured_key_bit_width,
+        ),
         small_primes: engine
             .r_candidate_small_primes
             .iter()
@@ -3428,6 +3438,7 @@ struct RSAContext {
     phi: BigUint,
     e: BigUint,
     d: BigUint,
+    key_bit_width: u64,
 }
 
 /// Counts matching bits between two values (total and LSB run).
@@ -5534,7 +5545,7 @@ fn run_r_candidate_accuracy_batches(
             "off"
         },
     );
-    let settings = build_r_candidate_settings(engine);
+    let settings = build_r_candidate_settings(engine, ctx.key_bit_width);
     let candidates = generate_r_candidates_with_analytics(
         "analysis_batch_accuracy",
         &ctx.n,
@@ -6245,7 +6256,15 @@ mod tests {
         let e = choose_exponent(3, &phi);
         let d = mod_inverse(&e, &phi).expect("missing inverse");
 
-        let ctx = RSAContext { p, q, n, phi, e, d };
+        let ctx = RSAContext {
+            key_bit_width: p.bits().saturating_add(q.bits()),
+            p,
+            q,
+            n,
+            phi,
+            e,
+            d,
+        };
         let base_ciphertext = BigUint::from(17u8);
         let candidate_phi = BigUint::from(10u8);
         let phi_values = vec![&candidate_phi];

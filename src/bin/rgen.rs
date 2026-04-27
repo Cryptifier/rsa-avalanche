@@ -4,8 +4,8 @@
 use std::{
     collections::HashSet,
     error::Error,
-    fs::{self, OpenOptions},
-    io::{BufRead, BufReader, Write},
+    fs,
+    io::{BufRead, BufReader},
 };
 
 use clap::{Parser, ValueEnum};
@@ -14,6 +14,8 @@ use rsademo::config::{Config, EngineConfig, load_config};
 use rsademo::math::random_prime_with_bits;
 use rsademo::r_candidates::{
     RCandidate, RCandidateMode, RCandidateSettings, generate_r_candidates,
+    generate_retargeted_r_candidates_batch, resolve_retargeted_r_candidates_path,
+    write_candidates_csv,
 };
 use rsademo::rng::{RngChoice, RngMode};
 
@@ -25,8 +27,12 @@ use rsademo::rng::{RngChoice, RngMode};
     version
 )]
 struct Args {
-    /// Path to a JSON/JSON5 config file (defaults to config/rsa_config.json)
-    #[arg(short = 'c', long, default_value = "config/rsa_config.json")]
+    /// Path to a JSON/JSON5 config file (defaults to config/rsa_config_small_batch.json)
+    #[arg(
+        short = 'c',
+        long,
+        default_value = "config/rsa_config_small_batch.json"
+    )]
     config: String,
 
     /// Output CSV path (defaults to config reuse_r_candidates_path)
@@ -108,6 +114,10 @@ struct Args {
     /// Override candidate r to factor directly
     #[arg(long, value_name = "R")]
     override_r: Option<String>,
+
+    /// Load the base reuse CSV, retarget up to `--count` samples with ChaCha20, and write a keyed retarget cache CSV
+    #[arg(long)]
+    retargeted: bool,
 }
 
 #[derive(Clone, Debug, ValueEnum)]
@@ -153,7 +163,7 @@ fn main() -> Result<(), Box<dyn Error>> {
 /// # Expected Output
 /// - Prints generation details and writes or appends to the output CSV.
 fn run_rgen(args: Args, config: Config) -> Result<(), Box<dyn Error>> {
-    let rng_mode = if args.crypto_rng {
+    let rng_mode = if args.retargeted || args.crypto_rng {
         RngMode::Crypto
     } else {
         RngMode::Standard
@@ -163,29 +173,48 @@ fn run_rgen(args: Args, config: Config) -> Result<(), Box<dyn Error>> {
         None => RngChoice::from_entropy(rng_mode)?,
     };
 
-    let output_path = args
-        .output
-        .clone()
-        .unwrap_or_else(|| config.engine.reuse_r_candidates_path.clone());
-
     let modulus = resolve_modulus(&args, &config, &mut rng)?;
+    let key_bit_width = resolve_key_bit_width(&args, &config, modulus.as_ref())?;
+    let output_path = if let Some(path) = args.output.clone() {
+        path
+    } else if args.retargeted {
+        resolve_retargeted_r_candidates_path(
+            &config.engine.reuse_retargeted_r_candidates_path_prefix,
+            key_bit_width,
+        )
+    } else {
+        config.engine.reuse_r_candidates_path.clone()
+    };
     let target_bit_length_override = resolve_target_bit_length_override(&args, modulus.as_ref())?;
     let settings = build_r_candidate_settings(
         &config.engine,
         &args,
         &output_path,
         target_bit_length_override,
+        key_bit_width,
     )?;
 
-    if settings.mode == RCandidateMode::Factoring && modulus.is_none() {
+    if (settings.mode == RCandidateMode::Factoring || args.retargeted) && modulus.is_none() {
         return Err(
-            "factoring mode requires --n, --p/--q, --bits, or config/rsa_config.json with p and q"
+            "factoring mode requires --n, --p/--q, --bits, or config/rsa_config_small_batch.json with p and q"
                 .into(),
         );
     }
 
     let n_for_generation = modulus.clone().unwrap_or_else(|| BigUint::from(1u8));
-    let candidates = generate_r_candidates(&n_for_generation, &settings, &mut rng);
+    let candidates = if args.retargeted {
+        generate_retargeted_r_candidates_batch(
+            &n_for_generation,
+            &settings,
+            &mut rng,
+            settings
+                .process_count
+                .max(settings.process_min_count)
+                .max(1) as usize,
+        )?
+    } else {
+        generate_r_candidates(&n_for_generation, &settings, &mut rng)
+    };
 
     if candidates.is_empty() {
         return Err("no r candidates generated".into());
@@ -202,7 +231,13 @@ fn run_rgen(args: Args, config: Config) -> Result<(), Box<dyn Error>> {
         return Ok(());
     }
 
-    let header = build_header_lines(modulus.as_ref(), &settings, candidates.len());
+    let header = build_header_lines(
+        modulus.as_ref(),
+        &settings,
+        candidates.len(),
+        args.retargeted,
+        key_bit_width,
+    );
     let written = write_candidates_csv(&output_path, &candidates, args.append, &header)?;
 
     if args.append {
@@ -214,6 +249,12 @@ fn run_rgen(args: Args, config: Config) -> Result<(), Box<dyn Error>> {
         println!(
             "Generated {} r candidates, skipped {} duplicates, wrote {} to {} (mode: {:?})",
             total_generated, skipped, written, output_path, settings.mode
+        );
+    }
+    if args.retargeted {
+        println!(
+            "Retargeted cache generation used ChaCha20 and wrote keyed cache {}",
+            output_path
         );
     }
 
@@ -293,6 +334,7 @@ fn resolve_modulus(
 /// - `args`: CLI arguments that override defaults.
 /// - `output_path`: Output file path used for reuse metadata.
 /// - `target_bit_length_override`: Optional target bit length override from percent-based settings.
+/// - `key_bit_width`: Bit width of the original RSA key used to derive the retargeted cache path.
 ///
 /// # Returns
 /// - `Result<RCandidateSettings, Box<dyn Error>>`: Fully populated settings.
@@ -304,6 +346,7 @@ fn build_r_candidate_settings(
     args: &Args,
     output_path: &str,
     target_bit_length_override: Option<u64>,
+    key_bit_width: u64,
 ) -> Result<RCandidateSettings, Box<dyn Error>> {
     let override_best_r = if let Some(ref raw) = args.override_r {
         Some(parse_biguint_arg(raw)?)
@@ -349,9 +392,18 @@ fn build_r_candidate_settings(
         process_count,
         process_min_count,
         process_scale: args.scale.unwrap_or(engine.process_scale),
-        reuse_r_candidates_path: output_path.to_string(),
+        reuse_r_candidates_path: if args.retargeted {
+            engine.reuse_r_candidates_path.clone()
+        } else {
+            output_path.to_string()
+        },
         reuse_r_candidates: false,
         reuse_r_candidates_append_only: false,
+        reuse_retargeted_r_candidates: false,
+        reuse_retargeted_r_candidates_path: resolve_retargeted_r_candidates_path(
+            &engine.reuse_retargeted_r_candidates_path_prefix,
+            key_bit_width,
+        ),
         small_primes: small_primes.into_iter().map(BigUint::from).collect(),
         small_prime_factors_per_candidate: args
             .small_prime_factors
@@ -367,6 +419,40 @@ fn build_r_candidate_settings(
         retarget_partition_count: engine.r_candidate_retarget_partition_count,
         retarget_minimum_exponent: engine.r_candidate_retarget_minimum_exponent.clone(),
     })
+}
+
+/// Resolves the original RSA key bit width used to namespace retargeted cache files.
+///
+/// # Parameters
+/// - `args`: CLI arguments that may override key material.
+/// - `config`: Loaded configuration for fallback key material.
+/// - `modulus`: Resolved modulus when available.
+///
+/// # Returns
+/// - `Result<u64, Box<dyn Error>>`: Key bit width for the current run.
+///
+/// # Expected Output
+/// - Returns a deterministic bit width or an error when no key material is available.
+fn resolve_key_bit_width(
+    args: &Args,
+    config: &Config,
+    modulus: Option<&BigUint>,
+) -> Result<u64, Box<dyn Error>> {
+    if let (Some(p_raw), Some(q_raw)) = (args.p.as_ref(), args.q.as_ref()) {
+        let p = parse_biguint_arg(p_raw)?;
+        let q = parse_biguint_arg(q_raw)?;
+        return Ok(p.bits().saturating_add(q.bits()));
+    }
+    if let Some(bits) = args.bits {
+        return Ok(u64::from(bits).saturating_mul(2));
+    }
+    if let (Some(p), Some(q)) = (config.rsa_keypair.p.as_ref(), config.rsa_keypair.q.as_ref()) {
+        return Ok(p.bits().saturating_add(q.bits()));
+    }
+    if let Some(modulus) = modulus {
+        return Ok(modulus.bits());
+    }
+    Err("unable to resolve key bit width for retargeted cache naming".into())
 }
 
 /// Resolves a target bit length override from the modulus and percent flag.
@@ -405,57 +491,6 @@ fn resolve_target_bit_length_override(
     }
 
     Ok(Some(target))
-}
-
-/// Writes r candidates to a CSV file, optionally appending.
-///
-/// # Parameters
-/// - `path`: Output CSV path.
-/// - `entries`: Candidate entries to write.
-/// - `append`: Whether to append instead of overwriting.
-/// - `header_lines`: Comment header lines to include when creating a new file.
-///
-/// # Returns
-/// - `Result<usize, Box<dyn Error>>`: Number of candidates written.
-///
-/// # Expected Output
-/// - Writes to disk at `path`; may create or append the file.
-fn write_candidates_csv(
-    path: &str,
-    entries: &[RCandidate],
-    append: bool,
-    header_lines: &[String],
-) -> Result<usize, Box<dyn Error>> {
-    let needs_header = if append {
-        fs::metadata(path)
-            .map(|meta| meta.len() == 0)
-            .unwrap_or(true)
-    } else {
-        true
-    };
-
-    let mut file = if append {
-        OpenOptions::new().create(true).append(true).open(path)?
-    } else {
-        OpenOptions::new()
-            .create(true)
-            .truncate(true)
-            .write(true)
-            .open(path)?
-    };
-
-    if needs_header {
-        for line in header_lines {
-            writeln!(file, "{line}")?;
-        }
-    }
-
-    for candidate in entries {
-        let factors_str = format_factors_csv(&candidate.factors);
-        writeln!(file, "{},{factors_str}", candidate.r)?;
-    }
-
-    Ok(entries.len())
 }
 
 /// Deduplicates candidates against an existing CSV file (when appending).
@@ -566,6 +601,8 @@ fn load_existing_candidate_keys(path: &str) -> Result<HashSet<String>, Box<dyn E
 /// - `modulus`: Optional modulus used for factoring mode.
 /// - `settings`: Candidate generation settings.
 /// - `count`: Number of candidates generated.
+/// - `retargeted`: Whether the header describes a keyed retargeted-cache file.
+/// - `key_bit_width`: Bit width of the original RSA key associated with the output file.
 ///
 /// # Returns
 /// - `Vec<String>`: Header lines starting with `#`.
@@ -576,15 +613,30 @@ fn build_header_lines(
     modulus: Option<&BigUint>,
     settings: &RCandidateSettings,
     count: usize,
+    retargeted: bool,
+    key_bit_width: u64,
 ) -> Vec<String> {
     let mut lines = Vec::new();
-    lines.push("# rgen data/r_candidates.csv".to_string());
+    lines.push(if retargeted {
+        "# rgen data/retargeted_r_candidates.csv".to_string()
+    } else {
+        "# rgen data/r_candidates.csv".to_string()
+    });
     lines.push(format!("# mode={}", mode_label(settings.mode)));
     lines.push(format!("# count={}", count));
+    lines.push(format!("# key_bits={}", key_bit_width));
+    lines.push(format!("# retargeted={}", retargeted));
 
     if let Some(n) = modulus {
         lines.push(format!("# n={}", n));
         lines.push(format!("# n_bits={}", n.bits()));
+    }
+
+    if retargeted {
+        lines.push(format!(
+            "# source_reuse_path={}",
+            settings.reuse_r_candidates_path
+        ));
     }
 
     if settings.mode == RCandidateMode::Factoring {
@@ -637,24 +689,6 @@ fn build_header_lines(
     }
 
     lines
-}
-
-/// Formats a factor list as `p^e;...` for CSV output.
-///
-/// # Parameters
-/// - `factors`: Factor list to format.
-///
-/// # Returns
-/// - `String`: CSV-friendly factor string (empty for no factors).
-///
-/// # Expected Output
-/// - Returns a formatted string; no side effects.
-fn format_factors_csv(factors: &[(BigUint, u64)]) -> String {
-    factors
-        .iter()
-        .map(|(p, e)| format!("{}^{}", p, e))
-        .collect::<Vec<_>>()
-        .join(";")
 }
 
 /// Parses a BigUint CLI argument (decimal or 0x-prefixed hex).
@@ -723,7 +757,7 @@ mod tests {
 
     fn base_args() -> Args {
         Args {
-            config: "config/rsa_config.json".to_string(),
+            config: "config/rsa_config_small_batch.json".to_string(),
             output: None,
             append: false,
             seed: None,
@@ -744,6 +778,7 @@ mod tests {
             r_bits: None,
             r_bits_percent: None,
             random_power_window: false,
+            retargeted: false,
         }
     }
 
@@ -780,8 +815,9 @@ mod tests {
         args.max_factors = Some(12);
         args.r_bits = Some(80);
 
-        let settings = build_r_candidate_settings(&engine, &args, "data/r_candidates.csv", None)
-            .expect("settings failed");
+        let settings =
+            build_r_candidate_settings(&engine, &args, "data/r_candidates.csv", None, 512)
+                .expect("settings failed");
         assert_eq!(settings.process_count, 10);
         assert_eq!(settings.process_min_count, 8);
         assert_eq!(settings.process_min_factor, BigUint::from(13u64));
@@ -800,6 +836,17 @@ mod tests {
     }
 
     #[test]
+    fn test_resolve_key_bit_width_prefers_configured_primes() {
+        let mut config = Config::default();
+        config.rsa_keypair.generate = false;
+        config.rsa_keypair.p = Some(BigUint::from(1u8) << 255);
+        config.rsa_keypair.q = Some(BigUint::from(1u8) << 255);
+        let args = base_args();
+        let key_bits = resolve_key_bit_width(&args, &config, None).expect("key width failed");
+        assert_eq!(key_bits, 512);
+    }
+
+    #[test]
     fn test_build_header_lines_small_primes_metadata() {
         let settings = RCandidateSettings {
             mode: RCandidateMode::SmallPrimes,
@@ -811,6 +858,8 @@ mod tests {
             reuse_r_candidates_path: "data/r_candidates.csv".to_string(),
             reuse_r_candidates: false,
             reuse_r_candidates_append_only: false,
+            reuse_retargeted_r_candidates: false,
+            reuse_retargeted_r_candidates_path: "data/rgen_retargeted_512.csv".to_string(),
             small_primes: vec![3u8, 5u8, 7u8].into_iter().map(BigUint::from).collect(),
             small_prime_factors_per_candidate: 3,
             max_factors_per_candidate: 6,
@@ -825,9 +874,11 @@ mod tests {
                 .expect("valid minimum exponent"),
         };
 
-        let lines = build_header_lines(None, &settings, 2);
+        let lines = build_header_lines(None, &settings, 2, false, 512);
         let joined = lines.join("\n");
         assert!(joined.contains("mode=small_primes"));
+        assert!(joined.contains("key_bits=512"));
+        assert!(joined.contains("retargeted=false"));
         assert!(joined.contains("small_primes=3,5,7"));
         assert!(joined.contains("target_exponent_minimum=0.8"));
         assert!(joined.contains("target_exponent=2.005"));
@@ -850,6 +901,8 @@ mod tests {
             reuse_r_candidates_path: "data/r_candidates.csv".to_string(),
             reuse_r_candidates: false,
             reuse_r_candidates_append_only: false,
+            reuse_retargeted_r_candidates: false,
+            reuse_retargeted_r_candidates_path: "data/rgen_retargeted_512.csv".to_string(),
             small_primes: Vec::new(),
             small_prime_factors_per_candidate: 3,
             max_factors_per_candidate: 6,
@@ -864,11 +917,46 @@ mod tests {
                 .expect("valid minimum exponent"),
         };
 
-        let lines = build_header_lines(Some(&BigUint::from(10_000u64)), &settings, 2);
+        let lines = build_header_lines(Some(&BigUint::from(10_000u64)), &settings, 2, false, 512);
         let joined = lines.join("\n");
         assert!(joined.contains("mode=factoring"));
         assert!(joined.contains("random_power_window=true"));
         assert!(joined.contains("random_power_window_exponent_range=0.8..=0.9"));
+    }
+
+    #[test]
+    fn test_build_header_lines_retargeted_metadata() {
+        let settings = RCandidateSettings {
+            mode: RCandidateMode::SmallPrimes,
+            override_best_r: None,
+            process_min_factor: BigUint::from(3u8),
+            process_count: 2,
+            process_min_count: 1,
+            process_scale: 8,
+            reuse_r_candidates_path: "data/rgen_output.csv".to_string(),
+            reuse_r_candidates: false,
+            reuse_r_candidates_append_only: false,
+            reuse_retargeted_r_candidates: false,
+            reuse_retargeted_r_candidates_path: "data/rgen_retargeted_512.csv".to_string(),
+            small_primes: vec![3u8, 5u8, 7u8].into_iter().map(BigUint::from).collect(),
+            small_prime_factors_per_candidate: 3,
+            max_factors_per_candidate: 6,
+            target_bit_length: Some(64),
+            random_power_window: false,
+            target_exponent_minimum: bigdecimal::BigDecimal::parse_bytes(b"0.8", 10)
+                .expect("valid exponent"),
+            target_exponent: bigdecimal::BigDecimal::parse_bytes(b"0.9", 10)
+                .expect("valid exponent"),
+            retarget_partition_count: 3,
+            retarget_minimum_exponent: bigdecimal::BigDecimal::parse_bytes(b"0.45", 10)
+                .expect("valid minimum exponent"),
+        };
+
+        let lines = build_header_lines(Some(&BigUint::from(3233u32)), &settings, 2, true, 512);
+        let joined = lines.join("\n");
+        assert!(joined.contains("retargeted=true"));
+        assert!(joined.contains("source_reuse_path=data/rgen_output.csv"));
+        assert!(joined.contains("n=3233"));
     }
 
     #[test]

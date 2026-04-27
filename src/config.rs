@@ -198,6 +198,10 @@ pub struct EngineConfig {
     pub reuse_r_candidates: bool,
     #[serde(default = "default_reuse_r_candidates_append_only")]
     pub reuse_r_candidates_append_only: bool,
+    #[serde(default = "default_reuse_retargeted_r_candidates")]
+    pub reuse_retargeted_r_candidates: bool,
+    #[serde(default = "default_reuse_retargeted_r_candidates_path_prefix")]
+    pub reuse_retargeted_r_candidates_path_prefix: String,
     #[serde(default = "default_r_candidate_mode")]
     pub r_candidate_mode: RCandidateMode,
     #[serde(default = "default_r_candidate_small_primes")]
@@ -359,6 +363,9 @@ impl Default for EngineConfig {
             reuse_r_candidates_path: default_reuse_r_candidates_path(),
             reuse_r_candidates: default_reuse_r_candidates(),
             reuse_r_candidates_append_only: default_reuse_r_candidates_append_only(),
+            reuse_retargeted_r_candidates: default_reuse_retargeted_r_candidates(),
+            reuse_retargeted_r_candidates_path_prefix:
+                default_reuse_retargeted_r_candidates_path_prefix(),
             r_candidate_mode: default_r_candidate_mode(),
             r_candidate_small_primes: default_r_candidate_small_primes(),
             r_candidate_small_prime_factors: default_r_candidate_small_prime_factors(),
@@ -1325,6 +1332,34 @@ fn default_reuse_r_candidates_path() -> String {
 /// - Returns a constant default value; no side effects.
 fn default_reuse_r_candidates_append_only() -> bool {
     false
+}
+
+/// Default flag for reading pre-retargeted r candidates from a keyed cache file.
+///
+/// # Parameters
+/// - None.
+///
+/// # Returns
+/// - `bool`: Default retargeted-cache reuse setting.
+///
+/// # Expected Output
+/// - Returns a constant default value; no side effects.
+fn default_reuse_retargeted_r_candidates() -> bool {
+    false
+}
+
+/// Default path prefix for keyed retargeted r-candidate cache files.
+///
+/// # Parameters
+/// - None.
+///
+/// # Returns
+/// - `String`: Default retargeted-cache path prefix.
+///
+/// # Expected Output
+/// - Returns a constant default value; no side effects.
+fn default_reuse_retargeted_r_candidates_path_prefix() -> String {
+    "data/rgen_retargeted".to_string()
 }
 
 /// Default r candidate generation mode.

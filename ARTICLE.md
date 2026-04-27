@@ -55,6 +55,8 @@ HBC(\widetilde{c}_{r,x}^{d_{r,x}} \bmod r, N, r)
 \bmod N.
 ```
 
+Here, **HBC** means **homomorphic base conversion**. In this method, HBC is the transformation that moves a value from one modulus domain into another related modulus domain without discarding the algebraic structure needed for the next step. The first HBC maps the RSA ciphertext view from the original modulus $N$ into the candidate modulus $r$, and the second HBC maps the candidate decryption result back into the original modulus domain for comparison with the target message. HBC is therefore the bridge that lets alternate moduli produce usable, bit-biased message estimates instead of unrelated residues.
+
 Each $\widehat{m}_{r,x}$ is a noisy plaintext estimate. If the plaintext width is $W$ bits, its quality can be expressed as
 
 ```math
