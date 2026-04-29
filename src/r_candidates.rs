@@ -443,7 +443,7 @@ pub fn generate_r_candidates_from_small_primes(
         .max(min_small_factors + 1);
 
     let mut collected: Vec<RCandidate> = Vec::new();
-    let mut seen: HashSet<String> = HashSet::new();
+    let mut seen: HashSet<BigUint> = HashSet::new();
 
     let load_reuse = settings.reuse_r_candidates && !settings.reuse_r_candidates_append_only;
     let append_reuse = settings.reuse_r_candidates || settings.reuse_r_candidates_append_only;
@@ -454,7 +454,7 @@ pub fn generate_r_candidates_from_small_primes(
         let mut loaded = load_reuse_candidates(reuse_path);
         loaded.shuffle(rng);
         for candidate in loaded {
-            if seen.insert(candidate.r.to_string()) {
+            if seen.insert(candidate.r.clone()) {
                 collected.push(candidate);
                 if collected.len() >= target_count {
                     println!(
@@ -550,7 +550,7 @@ pub fn generate_r_candidates_from_small_primes(
         if collected.len() >= target_count {
             break;
         }
-        if seen.insert(entry.r.to_string()) {
+        if seen.insert(entry.r.clone()) {
             new_candidates.push(entry.clone());
             collected.push(entry);
         }
@@ -889,15 +889,15 @@ fn next_probable_prime_after(prime: &BigUint) -> BigUint {
 fn uniquify_retarget_update(
     r: &mut BigUint,
     factors: &mut Vec<(BigUint, u64)>,
-    seen: &mut HashSet<String>,
+    seen: &mut HashSet<BigUint>,
 ) {
     if factors.is_empty() {
-        seen.insert(r.to_string());
+        seen.insert(r.clone());
         return;
     }
 
     loop {
-        if seen.insert(r.to_string()) {
+        if seen.insert(r.clone()) {
             return;
         }
 
@@ -955,8 +955,8 @@ pub fn generate_r_candidates_via_factoring(
     let target_count = count as usize;
 
     let mut collected: Vec<RCandidate> = Vec::new();
-    let mut seen: HashSet<String> = HashSet::new();
-    let reserved = Arc::new(Mutex::new(HashSet::<String>::new()));
+    let mut seen: HashSet<BigUint> = HashSet::new();
+    let reserved = Arc::new(Mutex::new(HashSet::<BigUint>::new()));
 
     let load_reuse = settings.reuse_r_candidates && !settings.reuse_r_candidates_append_only;
     let append_reuse = settings.reuse_r_candidates || settings.reuse_r_candidates_append_only;
@@ -967,7 +967,7 @@ pub fn generate_r_candidates_via_factoring(
         let mut loaded = load_reuse_candidates(reuse_path);
         loaded.shuffle(rng);
         for candidate in loaded {
-            let key = candidate.r.to_string();
+            let key = candidate.r.clone();
             if seen.insert(key.clone()) {
                 if let Ok(mut guard) = reserved.lock() {
                     guard.insert(key);
@@ -1023,7 +1023,7 @@ pub fn generate_r_candidates_via_factoring(
             let mut local_rng = RngChoice::from_seed(rng.mode(), seed);
             let upper = factoring_candidate_upper_bound(n, &scale, idx, settings, &mut local_rng);
             let candidate = random_biguint_below(&upper, &mut local_rng) + BigUint::one();
-            let candidate_key = candidate.to_string();
+            let candidate_key = candidate.clone();
             let Ok(mut reserved_guard) = reserved.lock() else {
                 return None;
             };
@@ -1062,7 +1062,7 @@ pub fn generate_r_candidates_via_factoring(
 
     let mut new_candidates = Vec::new();
     for candidate in generated {
-        if seen.insert(candidate.r.to_string()) {
+        if seen.insert(candidate.r.clone()) {
             new_candidates.push(candidate);
         }
     }
