@@ -1,6 +1,7 @@
 *.log
 *.logs
 *.lock
+!Cargo.lock
 target/
 images/
 enciphered_bins_frames/

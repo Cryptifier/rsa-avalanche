@@ -776,6 +776,13 @@ fn collect_invertible_ciphertext_variants(
     let mut variants = Vec::with_capacity(count);
     let mut next_instance_idx = 0usize;
     let thread_chunk_floor = rayon::current_num_threads().saturating_mul(8).max(32);
+    let accepted_total =
+        u64::try_from(count).map_err(|_| format!("{context} count exceeds u64 range"))?;
+    let accepted_done = AtomicU64::new(0);
+    let progress_started_at = Instant::now();
+    let progress_next_log_at_ms =
+        AtomicU64::new(Duration::from_secs(5).as_millis().min(u128::from(u64::MAX)) as u64);
+    let progress_label = format!("{context} ciphertext variants");
     while variants.len() < count {
         let remaining = count.saturating_sub(variants.len());
         let search_width = remaining.saturating_mul(4).max(thread_chunk_floor).max(1);
@@ -798,6 +805,15 @@ fn collect_invertible_ciphertext_variants(
                     base_ciphertext.modpow(&x, &ctx.n)
                 };
                 let shifted = maybe_shift_ciphertext(ctx, &ciphertext, shift);
+                let done = accepted_done.fetch_add(1, Ordering::Relaxed) + 1;
+                log_parallel_progress_every_interval(
+                    done.min(accepted_total),
+                    accepted_total,
+                    &progress_started_at,
+                    &progress_next_log_at_ms,
+                    &progress_label,
+                    Duration::from_secs(5),
+                );
                 Ok::<_, String>(Some(CiphertextVariant {
                     x,
                     e_x,
@@ -816,6 +832,14 @@ fn collect_invertible_ciphertext_variants(
             }
         }
     }
+    log_parallel_progress_every_interval(
+        accepted_total,
+        accepted_total,
+        &progress_started_at,
+        &progress_next_log_at_ms,
+        &progress_label,
+        Duration::from_secs(5),
+    );
 
     Ok(variants)
 }
@@ -3461,12 +3485,6 @@ fn count_matching_bits(a: &BigUint, b: &BigUint) -> (usize, usize) {
     matching_bit_counts_bytes_le(&a_bytes, &b_bytes, min_len)
 }
 
-/// Computes a derived value used in homomorphic base conversion flows.
-///
-/// # Parameters
-/// - `x`: Input value.
-/// - `p`: Modulus base.
-/// - `y`: Exponent parameter.
 /// Applies the homomorphic base conversion formula.
 ///
 /// # Parameters
@@ -3480,11 +3498,7 @@ fn count_matching_bits(a: &BigUint, b: &BigUint) -> (usize, usize) {
 /// # Expected Output
 /// - Returns the base-converted value; no side effects.
 fn homomorphic_base_conversion(x: &BigUint, r: &BigUint, p: &BigUint) -> BigUint {
-    let y = x % p;
-    let z = p % r;
-    let q = (&y / p) * &z;
-    let reduced = if &y >= p { &y - q } else { y.clone() };
-    reduced % r
+    (x % p) % r
 }
 
 /// Dispatches between base conversion and division-based conversion.
@@ -4169,6 +4183,51 @@ fn apply_scored_avalanche_fitness_pass(
             .then_with(|| right.best_match_score.total_cmp(&left.best_match_score))
             .then_with(|| left.batch_candidate_index.cmp(&right.batch_candidate_index))
     });
+    if let Some(best_r_group) = ranked_groups.first() {
+        println!(
+            "Avalanche fitness maxima: best r candidate batch-index {} fitness {} total-fitness {} best-match {}%",
+            best_r_group.batch_candidate_index,
+            best_r_group.best_fitness_score,
+            best_r_group.total_fitness_score,
+            format_beam_float(best_r_group.best_match_score, BEAM_PCT_DECIMALS),
+        );
+    }
+    if let Some((best_cx_group, best_cx_input)) = ranked_groups
+        .iter()
+        .flat_map(|group| group.inputs.iter().map(move |input| (group, input)))
+        .max_by(|(left_group, left_input), (right_group, right_input)| {
+            left_input
+                .fitness_score
+                .cmp(&right_input.fitness_score)
+                .then_with(|| {
+                    left_input
+                        .input
+                        .score_match_pct
+                        .total_cmp(&right_input.input.score_match_pct)
+                })
+                .then_with(|| {
+                    right_group
+                        .batch_candidate_index
+                        .cmp(&left_group.batch_candidate_index)
+                })
+                .then_with(|| {
+                    right_input
+                        .input
+                        .message_index
+                        .cmp(&left_input.input.message_index)
+                })
+                .then_with(|| right_input.input.x.cmp(&left_input.input.x))
+        })
+    {
+        println!(
+            "Avalanche fitness maxima: best c^x candidate batch-index {} message-index {} x {} fitness {} match {}%",
+            best_cx_group.batch_candidate_index,
+            best_cx_input.input.message_index,
+            best_cx_input.input.x,
+            best_cx_input.fitness_score,
+            format_beam_float(best_cx_input.input.score_match_pct, BEAM_PCT_DECIMALS),
+        );
+    }
     if r_candidate_limit > 0 && ranked_groups.len() > r_candidate_limit {
         ranked_groups.truncate(r_candidate_limit);
     }
@@ -5560,17 +5619,36 @@ fn run_r_candidate_accuracy_batches(
 
     let y = engine.rabin_exponent as u32;
     let e_big = ctx.e.clone();
+    let prepared_total =
+        u64::try_from(candidates.len()).map_err(|_| "candidate count exceeds u64 range")?;
+    let prepared_started_at = Instant::now();
+    let prepared_done = AtomicU64::new(0);
+    let prepared_next_log_at_ms =
+        AtomicU64::new(Duration::from_secs(5).as_millis().min(u128::from(u64::MAX)) as u64);
+    println!(
+        "Preparing {} retargeted r candidates for accuracy batch scoring",
+        candidates.len()
+    );
     let prepared = candidates
         .into_par_iter()
         .filter_map(|candidate| {
             let phi_new = compute_totient(&candidate.factors);
-            let d_new = mod_inverse(&e_big, &phi_new)?;
-            Some(AccuracyCandidate {
+            let prepared_candidate = mod_inverse(&e_big, &phi_new).map(|d_new| AccuracyCandidate {
                 r: candidate.r,
                 phi_new,
                 d_new,
                 target_exponent: candidate.target_exponent,
-            })
+            });
+            let done = prepared_done.fetch_add(1, Ordering::Relaxed) + 1;
+            log_parallel_progress_every_interval(
+                done,
+                prepared_total,
+                &prepared_started_at,
+                &prepared_next_log_at_ms,
+                "Accuracy batch candidate preparation",
+                Duration::from_secs(5),
+            );
+            prepared_candidate
         })
         .collect::<Vec<_>>();
 
@@ -5662,6 +5740,9 @@ fn run_r_candidate_accuracy_batches(
             .ok_or("c^x progress total overflowed u64")?;
         let batch_cx_done = AtomicU64::new(0);
         let batch_cx_next_pct = AtomicU64::new(10);
+        let batch_cx_started_at = Instant::now();
+        let batch_cx_next_log_at_ms =
+            AtomicU64::new(Duration::from_secs(5).as_millis().min(u128::from(u64::MAX)) as u64);
         let batch_cx_label = format!("Accuracy batch {} c^x candidates", batch_number);
         let keep_sample_details = engine.avalanche_statistics_collection
             && engine.avalanche_combination_keep_all_samples_in_memory;
@@ -5739,6 +5820,14 @@ fn run_r_candidate_accuracy_batches(
                             batch_cx_total,
                             &batch_cx_next_pct,
                             &batch_cx_label,
+                        );
+                        log_parallel_progress_every_interval(
+                            done,
+                            batch_cx_total,
+                            &batch_cx_started_at,
+                            &batch_cx_next_log_at_ms,
+                            &batch_cx_label,
+                            Duration::from_secs(5),
                         );
                     }
 
