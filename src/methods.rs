@@ -776,6 +776,13 @@ fn collect_invertible_ciphertext_variants(
     let mut variants = Vec::with_capacity(count);
     let mut next_instance_idx = 0usize;
     let thread_chunk_floor = rayon::current_num_threads().saturating_mul(8).max(32);
+    let accepted_total =
+        u64::try_from(count).map_err(|_| format!("{context} count exceeds u64 range"))?;
+    let accepted_done = AtomicU64::new(0);
+    let progress_started_at = Instant::now();
+    let progress_next_log_at_ms =
+        AtomicU64::new(Duration::from_secs(5).as_millis().min(u128::from(u64::MAX)) as u64);
+    let progress_label = format!("{context} ciphertext variants");
     while variants.len() < count {
         let remaining = count.saturating_sub(variants.len());
         let search_width = remaining.saturating_mul(4).max(thread_chunk_floor).max(1);
@@ -798,6 +805,15 @@ fn collect_invertible_ciphertext_variants(
                     base_ciphertext.modpow(&x, &ctx.n)
                 };
                 let shifted = maybe_shift_ciphertext(ctx, &ciphertext, shift);
+                let done = accepted_done.fetch_add(1, Ordering::Relaxed) + 1;
+                log_parallel_progress_every_interval(
+                    done.min(accepted_total),
+                    accepted_total,
+                    &progress_started_at,
+                    &progress_next_log_at_ms,
+                    &progress_label,
+                    Duration::from_secs(5),
+                );
                 Ok::<_, String>(Some(CiphertextVariant {
                     x,
                     e_x,
@@ -816,6 +832,14 @@ fn collect_invertible_ciphertext_variants(
             }
         }
     }
+    log_parallel_progress_every_interval(
+        accepted_total,
+        accepted_total,
+        &progress_started_at,
+        &progress_next_log_at_ms,
+        &progress_label,
+        Duration::from_secs(5),
+    );
 
     Ok(variants)
 }
@@ -5716,6 +5740,9 @@ fn run_r_candidate_accuracy_batches(
             .ok_or("c^x progress total overflowed u64")?;
         let batch_cx_done = AtomicU64::new(0);
         let batch_cx_next_pct = AtomicU64::new(10);
+        let batch_cx_started_at = Instant::now();
+        let batch_cx_next_log_at_ms =
+            AtomicU64::new(Duration::from_secs(5).as_millis().min(u128::from(u64::MAX)) as u64);
         let batch_cx_label = format!("Accuracy batch {} c^x candidates", batch_number);
         let keep_sample_details = engine.avalanche_statistics_collection
             && engine.avalanche_combination_keep_all_samples_in_memory;
@@ -5793,6 +5820,14 @@ fn run_r_candidate_accuracy_batches(
                             batch_cx_total,
                             &batch_cx_next_pct,
                             &batch_cx_label,
+                        );
+                        log_parallel_progress_every_interval(
+                            done,
+                            batch_cx_total,
+                            &batch_cx_started_at,
+                            &batch_cx_next_log_at_ms,
+                            &batch_cx_label,
+                            Duration::from_secs(5),
                         );
                     }
 
