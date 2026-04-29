@@ -521,29 +521,68 @@ pub fn generate_r_candidates_from_small_primes(
     }
 
     let found = Arc::new(AtomicUsize::new(0));
+    let generation_started_at = Instant::now();
+    let attempts_done = Arc::new(AtomicU64::new(0));
+    let next_progress_log_at_ms = Arc::new(AtomicU64::new(
+        Duration::from_secs(5)
+            .as_millis()
+            .min(u128::from(u64::MAX)) as u64,
+    ));
+    let total_attempts = u64::try_from(seeds.len()).unwrap_or(u64::MAX);
+    let target_generation_count = u64::try_from(remaining).unwrap_or(u64::MAX);
+    println!(
+        "Generating {} r candidates from small primes over {} attempts",
+        remaining,
+        seeds.len()
+    );
     let generated = seeds
         .into_par_iter()
         .filter_map(|seed| {
             if found.load(Ordering::Relaxed) >= remaining {
                 return None;
             }
-            let mut local_rng = RngChoice::from_seed(rng.mode(), seed);
-            let candidate = build_small_primes_candidate(
-                target_bits,
-                min_large_bits,
-                &min_large_value,
-                &primes,
-                min_small_factors,
-                max_factors,
-                &mut local_rng,
-            )?;
-            let prev = found.fetch_add(1, Ordering::Relaxed);
-            if prev >= remaining {
-                return None;
-            }
-            Some(candidate)
+            let result = (|| {
+                let mut local_rng = RngChoice::from_seed(rng.mode(), seed);
+                let candidate = build_small_primes_candidate(
+                    target_bits,
+                    min_large_bits,
+                    &min_large_value,
+                    &primes,
+                    min_small_factors,
+                    max_factors,
+                    &mut local_rng,
+                )?;
+                let prev = found.fetch_add(1, Ordering::Relaxed);
+                if prev >= remaining {
+                    None
+                } else {
+                    Some(candidate)
+                }
+            })();
+            let attempts_count = attempts_done.fetch_add(1, Ordering::Relaxed) + 1;
+            let accepted_count =
+                u64::try_from(found.load(Ordering::Relaxed).min(remaining)).unwrap_or(u64::MAX);
+            log_generation_status_every_interval(
+                attempts_count,
+                total_attempts,
+                accepted_count,
+                target_generation_count,
+                &generation_started_at,
+                &next_progress_log_at_ms,
+                "Small-primes r candidate generation",
+                Duration::from_secs(5),
+            );
+            result
         })
         .collect::<Vec<_>>();
+    println!(
+        "Small-primes r candidate generation progress: accepted {}/{} attempts {}/{} elapsed {:.1}s",
+        found.load(Ordering::Relaxed).min(remaining),
+        remaining,
+        attempts_done.load(Ordering::Relaxed),
+        total_attempts,
+        generation_started_at.elapsed().as_secs_f64(),
+    );
 
     let mut new_candidates = Vec::new();
     for entry in generated {
@@ -570,6 +609,65 @@ const RANDOM_POWER_WINDOW_MIN_UNITS: u64 = 800;
 const RANDOM_POWER_WINDOW_MAX_UNITS: u64 = 900;
 const RANDOM_POWER_WINDOW_SCALE_UNITS: u64 = 1000;
 const RETARGET_EXPONENT_SCALE_UNITS: u64 = 1000;
+
+/// Logs r-candidate generation status at fixed wall-clock intervals.
+///
+/// # Parameters
+/// - `attempts_done`: Number of generation attempts processed so far.
+/// - `total_attempts`: Total number of generation attempts scheduled.
+/// - `accepted_count`: Number of provisional candidates accepted so far.
+/// - `target_count`: Target number of candidates requested for the run.
+/// - `start`: Start time of the generation phase.
+/// - `next_log_at_ms`: Shared elapsed-millisecond deadline for the next status print.
+/// - `label`: Human-readable label for the generation phase.
+/// - `interval`: Minimum duration between progress prints.
+///
+/// # Returns
+/// - `()`: This function returns nothing.
+///
+/// # Expected Output
+/// - Prints periodic status updates to stdout while generation is running.
+fn log_generation_status_every_interval(
+    attempts_done: u64,
+    total_attempts: u64,
+    accepted_count: u64,
+    target_count: u64,
+    start: &Instant,
+    next_log_at_ms: &AtomicU64,
+    label: &str,
+    interval: Duration,
+) {
+    let elapsed_ms = start.elapsed().as_millis().min(u128::from(u64::MAX)) as u64;
+    let interval_ms = interval.as_millis().min(u128::from(u64::MAX)) as u64;
+    let generation_complete = accepted_count >= target_count || attempts_done >= total_attempts;
+    loop {
+        let scheduled_ms = next_log_at_ms.load(Ordering::Relaxed);
+        if !generation_complete && elapsed_ms < scheduled_ms {
+            return;
+        }
+
+        let next_deadline_ms = if generation_complete {
+            u64::MAX
+        } else {
+            scheduled_ms.saturating_add(interval_ms)
+        };
+        if next_log_at_ms
+            .compare_exchange(
+                scheduled_ms,
+                next_deadline_ms,
+                Ordering::SeqCst,
+                Ordering::Relaxed,
+            )
+            .is_ok()
+        {
+            println!(
+                "{label} progress: accepted {accepted_count}/{target_count} attempts {attempts_done}/{total_attempts} elapsed {:.1}s",
+                start.elapsed().as_secs_f64(),
+            );
+            return;
+        }
+    }
+}
 
 /// Builds a single r candidate from distinct small primes and generated larger primes.
 ///
@@ -887,27 +985,32 @@ fn next_probable_prime_after(prime: &BigUint) -> BigUint {
 /// # Expected Output
 /// - Mutates `r` and `factors` until `r` is unique within `seen`; no stdout/stderr output.
 fn uniquify_retarget_update(
-    r: &mut BigUint,
-    factors: &mut Vec<(BigUint, u64)>,
-    seen: &mut HashSet<BigUint>,
-) {
+    mut r: BigUint,
+    mut factors: Vec<(BigUint, u64)>,
+    seen: &Arc<Mutex<HashSet<BigUint>>>,
+) -> (BigUint, Vec<(BigUint, u64)>) {
     if factors.is_empty() {
-        seen.insert(r.clone());
-        return;
+        let mut guard = seen.lock().expect("retarget uniqueness set lock poisoned");
+        guard.insert(r.clone());
+        return (r, factors);
     }
 
     loop {
-        if seen.insert(r.clone()) {
-            return;
+        let inserted = {
+            let mut guard = seen.lock().expect("retarget uniqueness set lock poisoned");
+            guard.insert(r.clone())
+        };
+        if inserted {
+            return (r, factors);
         }
 
         let last_idx = factors.len() - 1;
         factors[last_idx].0 = next_probable_prime_after(&factors[last_idx].0);
-        let normalized = coalesce_factors(std::mem::take(factors));
-        *r = normalized
+        let normalized = coalesce_factors(factors);
+        r = normalized
             .iter()
             .fold(BigUint::one(), |acc, (p, e)| acc * p.pow(*e as u32));
-        *factors = normalized;
+        factors = normalized;
     }
 }
 
@@ -1011,6 +1114,15 @@ pub fn generate_r_candidates_via_factoring(
     }
 
     println!("Generating r candidates... {} attempts", seeds.len());
+    let generation_started_at = Instant::now();
+    let attempts_done = Arc::new(AtomicU64::new(0));
+    let next_progress_log_at_ms = Arc::new(AtomicU64::new(
+        Duration::from_secs(5)
+            .as_millis()
+            .min(u128::from(u64::MAX)) as u64,
+    ));
+    let total_attempts = u64::try_from(seeds.len()).unwrap_or(u64::MAX);
+    let target_generation_count = u64::try_from(target_count).unwrap_or(u64::MAX);
 
     let generated = seeds
         .into_par_iter()
@@ -1020,45 +1132,71 @@ pub fn generate_r_candidates_via_factoring(
                 return None;
             }
 
-            let mut local_rng = RngChoice::from_seed(rng.mode(), seed);
-            let upper = factoring_candidate_upper_bound(n, &scale, idx, settings, &mut local_rng);
-            let candidate = random_biguint_below(&upper, &mut local_rng) + BigUint::one();
-            let candidate_key = candidate.clone();
-            let Ok(mut reserved_guard) = reserved.lock() else {
-                return None;
-            };
-            if !reserved_guard.insert(candidate_key) {
-                return None;
-            }
-            drop(reserved_guard);
-            if is_probable_prime_big(&candidate) {
-                println!("Skipping prime r candidate: {}", candidate);
-                return None;
-            }
-            let deadline = Instant::now() + Duration::from_millis(5000);
-            let Some(factors) = factor_composite_with_timeout(&candidate, &mut local_rng, deadline)
-            else {
-                return None;
-            };
-            if factors.len() < 3 {
-                return None;
-            }
-            if factors.iter().any(|(p, _)| p < &min_factor) {
-                return None;
-            }
+            let result = (|| {
+                let mut local_rng = RngChoice::from_seed(rng.mode(), seed);
+                let upper =
+                    factoring_candidate_upper_bound(n, &scale, idx, settings, &mut local_rng);
+                let candidate = random_biguint_below(&upper, &mut local_rng) + BigUint::one();
+                let candidate_key = candidate.clone();
+                let Ok(mut reserved_guard) = reserved.lock() else {
+                    return None;
+                };
+                if !reserved_guard.insert(candidate_key) {
+                    return None;
+                }
+                drop(reserved_guard);
+                if is_probable_prime_big(&candidate) {
+                    println!("Skipping prime r candidate: {}", candidate);
+                    return None;
+                }
+                let deadline = Instant::now() + Duration::from_millis(5000);
+                let Some(factors) =
+                    factor_composite_with_timeout(&candidate, &mut local_rng, deadline)
+                else {
+                    return None;
+                };
+                if factors.len() < 3 {
+                    return None;
+                }
+                if factors.iter().any(|(p, _)| p < &min_factor) {
+                    return None;
+                }
 
-            let prev = found.fetch_add(1, Ordering::Relaxed);
-            if prev >= target_count {
-                return None;
-            }
+                let prev = found.fetch_add(1, Ordering::Relaxed);
+                if prev >= target_count {
+                    return None;
+                }
 
-            println!(
-                "Generated r candidate: {}, factors {:?}",
-                candidate, factors
+                println!(
+                    "Generated r candidate: {}, factors {:?}",
+                    candidate, factors
+                );
+                Some(RCandidate::new(candidate, factors))
+            })();
+            let attempts_count = attempts_done.fetch_add(1, Ordering::Relaxed) + 1;
+            let accepted_count = u64::try_from(found.load(Ordering::Relaxed).min(target_count))
+                .unwrap_or(u64::MAX);
+            log_generation_status_every_interval(
+                attempts_count,
+                total_attempts,
+                accepted_count,
+                target_generation_count,
+                &generation_started_at,
+                &next_progress_log_at_ms,
+                "Factoring r candidate generation",
+                Duration::from_secs(5),
             );
-            Some(RCandidate::new(candidate, factors))
+            result
         })
         .collect::<Vec<_>>();
+    println!(
+        "Factoring r candidate generation progress: accepted {}/{} attempts {}/{} elapsed {:.1}s",
+        found.load(Ordering::Relaxed).min(target_count),
+        target_count,
+        attempts_done.load(Ordering::Relaxed),
+        total_attempts,
+        generation_started_at.elapsed().as_secs_f64(),
+    );
 
     let mut new_candidates = Vec::new();
     for candidate in generated {
@@ -1236,6 +1374,7 @@ fn append_reuse_candidates(path: &str, entries: &[RCandidate]) {
         return;
     }
 
+    println!("Appending {} r candidates to reuse file {}", entries.len(), path);
     let mut file = match OpenOptions::new().create(true).append(true).open(path) {
         Ok(f) => f,
         Err(err) => {
@@ -1244,7 +1383,10 @@ fn append_reuse_candidates(path: &str, entries: &[RCandidate]) {
         }
     };
 
-    for candidate in entries {
+    let append_started_at = Instant::now();
+    let append_total = entries.len();
+    let mut next_log_at_secs = 5u64;
+    for (idx, candidate) in entries.iter().enumerate() {
         let factors_str = format_factors_csv(&candidate.factors);
         if let Err(err) = writeln!(file, "{},{}", candidate.r, factors_str) {
             println!(
@@ -1253,7 +1395,24 @@ fn append_reuse_candidates(path: &str, entries: &[RCandidate]) {
             );
             break;
         }
+        let written = idx + 1;
+        let elapsed_secs = append_started_at.elapsed().as_secs();
+        if elapsed_secs >= next_log_at_secs && written < append_total {
+            println!(
+                "Reuse file append progress: wrote {}/{} elapsed {:.1}s",
+                written,
+                append_total,
+                append_started_at.elapsed().as_secs_f64(),
+            );
+            next_log_at_secs += 5;
+        }
     }
+    println!(
+        "Reuse file append progress: wrote {}/{} elapsed {:.1}s",
+        append_total,
+        append_total,
+        append_started_at.elapsed().as_secs_f64(),
+    );
 }
 
 /// Retargets candidates using random decimal exponent partitions.
@@ -1348,35 +1507,57 @@ pub fn retarget_r_candidates_for_speculative_oracles(
         started_at.elapsed().as_secs_f64(),
     );
 
-    let mut seen = HashSet::with_capacity(candidates.len());
+    let seen = Arc::new(Mutex::new(HashSet::with_capacity(candidates.len())));
     let uniquify_started_at = Instant::now();
-    let mut next_uniquify_log_secs = 5u64;
-    for (candidate, update) in candidates.iter_mut().zip(updates) {
-        let Some((mut r, mut factors, sampled_target_exponent)) = update else {
-            continue;
-        };
-        uniquify_retarget_update(&mut r, &mut factors, &mut seen);
-        candidate.r = r;
-        candidate.factors = factors;
-        candidate.target_exponent = sampled_target_exponent;
+    let uniquify_completed = AtomicUsize::new(0);
+    let next_uniquify_log_secs = AtomicU64::new(5);
+    candidates
+        .par_iter_mut()
+        .zip(updates.into_par_iter())
+        .for_each(|(candidate, update)| {
+            if let Some((r, factors, sampled_target_exponent)) = update {
+                let (r, factors) = uniquify_retarget_update(r, factors, &seen);
+                candidate.r = r;
+                candidate.factors = factors;
+                candidate.target_exponent = sampled_target_exponent;
+            }
 
-        let completed_count = seen.len();
-        let elapsed_secs = uniquify_started_at.elapsed().as_secs();
-        if elapsed_secs >= next_uniquify_log_secs && completed_count < total_candidates {
-            let percent = (completed_count as f64 / total_candidates as f64) * 100.0;
-            println!(
-                "Retarget uniqueness progress: {:.2}% ({}/{}) elapsed {:.1}s",
-                percent,
-                completed_count,
-                total_candidates,
-                uniquify_started_at.elapsed().as_secs_f64(),
-            );
-            next_uniquify_log_secs += 5;
-        }
-    }
+            let completed_count = uniquify_completed.fetch_add(1, Ordering::Relaxed) + 1;
+            let elapsed_secs = uniquify_started_at.elapsed().as_secs();
+            loop {
+                let next_log_secs = next_uniquify_log_secs.load(Ordering::Relaxed);
+                if completed_count != total_candidates && elapsed_secs < next_log_secs {
+                    break;
+                }
+                let updated_next_log_secs = if completed_count == total_candidates {
+                    u64::MAX
+                } else {
+                    next_log_secs + 5
+                };
+                if next_uniquify_log_secs
+                    .compare_exchange(
+                        next_log_secs,
+                        updated_next_log_secs,
+                        Ordering::Relaxed,
+                        Ordering::Relaxed,
+                    )
+                    .is_ok()
+                {
+                    let percent = (completed_count as f64 / total_candidates as f64) * 100.0;
+                    println!(
+                        "Retarget uniqueness progress: {:.2}% ({}/{}) elapsed {:.1}s",
+                        percent,
+                        completed_count,
+                        total_candidates,
+                        uniquify_started_at.elapsed().as_secs_f64(),
+                    );
+                    break;
+                }
+            }
+        });
     println!(
         "Retarget uniqueness progress: 100.00% ({}/{}) elapsed {:.1}s",
-        seen.len(),
+        uniquify_completed.load(Ordering::Relaxed),
         total_candidates,
         uniquify_started_at.elapsed().as_secs_f64(),
     );
