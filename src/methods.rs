@@ -4159,6 +4159,51 @@ fn apply_scored_avalanche_fitness_pass(
             .then_with(|| right.best_match_score.total_cmp(&left.best_match_score))
             .then_with(|| left.batch_candidate_index.cmp(&right.batch_candidate_index))
     });
+    if let Some(best_r_group) = ranked_groups.first() {
+        println!(
+            "Avalanche fitness maxima: best r candidate batch-index {} fitness {} total-fitness {} best-match {}%",
+            best_r_group.batch_candidate_index,
+            best_r_group.best_fitness_score,
+            best_r_group.total_fitness_score,
+            format_beam_float(best_r_group.best_match_score, BEAM_PCT_DECIMALS),
+        );
+    }
+    if let Some((best_cx_group, best_cx_input)) = ranked_groups
+        .iter()
+        .flat_map(|group| group.inputs.iter().map(move |input| (group, input)))
+        .max_by(|(left_group, left_input), (right_group, right_input)| {
+            left_input
+                .fitness_score
+                .cmp(&right_input.fitness_score)
+                .then_with(|| {
+                    left_input
+                        .input
+                        .score_match_pct
+                        .total_cmp(&right_input.input.score_match_pct)
+                })
+                .then_with(|| {
+                    right_group
+                        .batch_candidate_index
+                        .cmp(&left_group.batch_candidate_index)
+                })
+                .then_with(|| {
+                    right_input
+                        .input
+                        .message_index
+                        .cmp(&left_input.input.message_index)
+                })
+                .then_with(|| right_input.input.x.cmp(&left_input.input.x))
+        })
+    {
+        println!(
+            "Avalanche fitness maxima: best c^x candidate batch-index {} message-index {} x {} fitness {} match {}%",
+            best_cx_group.batch_candidate_index,
+            best_cx_input.input.message_index,
+            best_cx_input.input.x,
+            best_cx_input.fitness_score,
+            format_beam_float(best_cx_input.input.score_match_pct, BEAM_PCT_DECIMALS),
+        );
+    }
     if r_candidate_limit > 0 && ranked_groups.len() > r_candidate_limit {
         ranked_groups.truncate(r_candidate_limit);
     }
@@ -5550,17 +5595,36 @@ fn run_r_candidate_accuracy_batches(
 
     let y = engine.rabin_exponent as u32;
     let e_big = ctx.e.clone();
+    let prepared_total =
+        u64::try_from(candidates.len()).map_err(|_| "candidate count exceeds u64 range")?;
+    let prepared_started_at = Instant::now();
+    let prepared_done = AtomicU64::new(0);
+    let prepared_next_log_at_ms =
+        AtomicU64::new(Duration::from_secs(5).as_millis().min(u128::from(u64::MAX)) as u64);
+    println!(
+        "Preparing {} retargeted r candidates for accuracy batch scoring",
+        candidates.len()
+    );
     let prepared = candidates
         .into_par_iter()
         .filter_map(|candidate| {
             let phi_new = compute_totient(&candidate.factors);
-            let d_new = mod_inverse(&e_big, &phi_new)?;
-            Some(AccuracyCandidate {
+            let prepared_candidate = mod_inverse(&e_big, &phi_new).map(|d_new| AccuracyCandidate {
                 r: candidate.r,
                 phi_new,
                 d_new,
                 target_exponent: candidate.target_exponent,
-            })
+            });
+            let done = prepared_done.fetch_add(1, Ordering::Relaxed) + 1;
+            log_parallel_progress_every_interval(
+                done,
+                prepared_total,
+                &prepared_started_at,
+                &prepared_next_log_at_ms,
+                "Accuracy batch candidate preparation",
+                Duration::from_secs(5),
+            );
+            prepared_candidate
         })
         .collect::<Vec<_>>();
 

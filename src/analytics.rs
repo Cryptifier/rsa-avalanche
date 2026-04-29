@@ -1,8 +1,12 @@
 use bigdecimal::BigDecimal;
+use rayon::prelude::*;
 use std::fs::File;
 use std::io::BufWriter;
-use std::sync::{Arc, Mutex};
-use std::time::{Duration, SystemTime};
+use std::sync::{
+    Arc, Mutex,
+    atomic::{AtomicU64, Ordering},
+};
+use std::time::{Duration, Instant, SystemTime};
 
 use num_bigint::BigUint;
 use serde::Serialize;
@@ -891,8 +895,17 @@ pub fn generate_r_candidates_with_analytics(
     };
     let duration = start.elapsed();
 
+    let candidate_entry_total = u64::try_from(candidates.len()).unwrap_or(u64::MAX);
+    let candidate_entry_started_at = Instant::now();
+    let candidate_entry_done = AtomicU64::new(0);
+    let candidate_entry_next_log_at_ms =
+        AtomicU64::new(Duration::from_secs(5).as_millis().min(u128::from(u64::MAX)) as u64);
+    println!(
+        "Preparing analytics metadata for {} r candidates",
+        candidates.len()
+    );
     let candidate_entries = candidates
-        .iter()
+        .par_iter()
         .map(|candidate| RCandidateEntry {
             r: candidate.r.clone(),
             r_bits: candidate.r.bits(),
@@ -906,6 +919,45 @@ pub fn generate_r_candidates_with_analytics(
                     prime_bits: p.bits(),
                 })
                 .collect(),
+        })
+        .map(|entry| {
+            let done = candidate_entry_done.fetch_add(1, Ordering::Relaxed) + 1;
+            let elapsed_ms = candidate_entry_started_at
+                .elapsed()
+                .as_millis()
+                .min(u128::from(u64::MAX)) as u64;
+            let interval_ms = Duration::from_secs(5)
+                .as_millis()
+                .min(u128::from(u64::MAX)) as u64;
+            loop {
+                let scheduled_ms = candidate_entry_next_log_at_ms.load(Ordering::Relaxed);
+                if done != candidate_entry_total && elapsed_ms < scheduled_ms {
+                    break;
+                }
+
+                let next_deadline_ms = if done == candidate_entry_total {
+                    u64::MAX
+                } else {
+                    scheduled_ms.saturating_add(interval_ms)
+                };
+                if candidate_entry_next_log_at_ms
+                    .compare_exchange(
+                        scheduled_ms,
+                        next_deadline_ms,
+                        Ordering::SeqCst,
+                        Ordering::Relaxed,
+                    )
+                    .is_ok()
+                {
+                    let percent = (done as f64 / candidate_entry_total as f64) * 100.0;
+                    println!(
+                        "Analytics metadata progress: {:.5}% ({}/{})",
+                        percent, done, candidate_entry_total
+                    );
+                    break;
+                }
+            }
+            entry
         })
         .collect::<Vec<_>>();
 

@@ -1349,6 +1349,8 @@ pub fn retarget_r_candidates_for_speculative_oracles(
     );
 
     let mut seen = HashSet::with_capacity(candidates.len());
+    let uniquify_started_at = Instant::now();
+    let mut next_uniquify_log_secs = 5u64;
     for (candidate, update) in candidates.iter_mut().zip(updates) {
         let Some((mut r, mut factors, sampled_target_exponent)) = update else {
             continue;
@@ -1357,7 +1359,27 @@ pub fn retarget_r_candidates_for_speculative_oracles(
         candidate.r = r;
         candidate.factors = factors;
         candidate.target_exponent = sampled_target_exponent;
+
+        let completed_count = seen.len();
+        let elapsed_secs = uniquify_started_at.elapsed().as_secs();
+        if elapsed_secs >= next_uniquify_log_secs && completed_count < total_candidates {
+            let percent = (completed_count as f64 / total_candidates as f64) * 100.0;
+            println!(
+                "Retarget uniqueness progress: {:.2}% ({}/{}) elapsed {:.1}s",
+                percent,
+                completed_count,
+                total_candidates,
+                uniquify_started_at.elapsed().as_secs_f64(),
+            );
+            next_uniquify_log_secs += 5;
+        }
     }
+    println!(
+        "Retarget uniqueness progress: 100.00% ({}/{}) elapsed {:.1}s",
+        seen.len(),
+        total_candidates,
+        uniquify_started_at.elapsed().as_secs_f64(),
+    );
 }
 
 /// Parses a `p^e;...` factor list from CSV form.
