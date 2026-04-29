@@ -1004,20 +1004,6 @@ fn bits_le_to_biguint(bits: &[bool]) -> BigUint {
     BigUint::from_bytes_le(&bytes)
 }
 
-/// Computes a derived value used in homomorphic base conversion flows.
-///
-/// # Parameters
-/// - `x`: Input value.
-/// - `p`: Modulus base.
-/// - `y`: Exponent parameter.
-/// - `apply_mod`: Whether to apply modulus at the end.
-/// - `use_other_root`: Whether to use the alternate square root branch.
-///
-/// # Returns
-/// - `BigUint`: Derived value based on modular square roots and exponentiation.
-///
-/// # Expected Output
-/// - Returns a computed `BigUint`; no side effects.
 /// Applies the homomorphic base conversion formula.
 ///
 /// # Parameters
@@ -1031,11 +1017,7 @@ fn bits_le_to_biguint(bits: &[bool]) -> BigUint {
 /// # Expected Output
 /// - Returns the base-converted value; no side effects.
 fn homomorphic_base_conversion(x: &BigUint, r: &BigUint, p: &BigUint) -> BigUint {
-    let y = x % p;
-    let z = p % r;
-    let q = (&y / p) * &z;
-    let reduced = if &y >= p { &y - q } else { y.clone() };
-    reduced % r
+    (x % p) % r
 }
 
 /// Dispatches between base conversion and division-based conversion.

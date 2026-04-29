@@ -3461,12 +3461,6 @@ fn count_matching_bits(a: &BigUint, b: &BigUint) -> (usize, usize) {
     matching_bit_counts_bytes_le(&a_bytes, &b_bytes, min_len)
 }
 
-/// Computes a derived value used in homomorphic base conversion flows.
-///
-/// # Parameters
-/// - `x`: Input value.
-/// - `p`: Modulus base.
-/// - `y`: Exponent parameter.
 /// Applies the homomorphic base conversion formula.
 ///
 /// # Parameters
@@ -3480,11 +3474,7 @@ fn count_matching_bits(a: &BigUint, b: &BigUint) -> (usize, usize) {
 /// # Expected Output
 /// - Returns the base-converted value; no side effects.
 fn homomorphic_base_conversion(x: &BigUint, r: &BigUint, p: &BigUint) -> BigUint {
-    let y = x % p;
-    let z = p % r;
-    let q = (&y / p) * &z;
-    let reduced = if &y >= p { &y - q } else { y.clone() };
-    reduced % r
+    (x % p) % r
 }
 
 /// Dispatches between base conversion and division-based conversion.
