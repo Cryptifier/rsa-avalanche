@@ -1,0 +1,6 @@
+format: rsa-public-key-v1
+algorithm: RSA
+public_exponent: "<decimal public exponent e>"
+modulus: "<decimal modulus n>"
+bit_lengths:
+  modulus_bits: 112

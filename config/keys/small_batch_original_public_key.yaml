@@ -1,0 +1,6 @@
+format: rsa-public-key-v1
+algorithm: RSA
+public_exponent: '65537'
+modulus: '12915501679859480667750241440843407877527593'
+bit_lengths:
+  modulus_bits: 144

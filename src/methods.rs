@@ -46,7 +46,9 @@ use crate::avalanche::{
     sort_candidates_by_hamming_distance,
 };
 use crate::combiner::majority_vote_with_distribution;
-use crate::config::{Config, EngineConfig};
+use crate::config::{
+    Config, EngineConfig, RsaKeyFileFormat, load_rsa_key_material_from_config_keyfile,
+};
 use crate::helpers::{
     PackedBits, format_beam_float, hamming_distance_packed_bytes, matching_bit_counts_bytes_le,
     normalize_avalanche_biases, spread_normalized_avalanche_biases, stored_beam_value_is_one,
@@ -325,6 +327,102 @@ fn validate_message_width_under_modulus(
     Ok(())
 }
 
+#[derive(Clone, Debug)]
+enum RoundtripVerification {
+    Full {
+        p: BigUint,
+        q: BigUint,
+        phi: BigUint,
+        d: BigUint,
+    },
+    Peek {
+        d: BigUint,
+    },
+}
+
+/// Returns whether the active RSA key configuration uses a public keyfile without inline primes.
+///
+/// # Parameters
+/// - `config`: Loaded configuration driving the current analysis or demo run.
+///
+/// # Returns
+/// - `bool`: `true` when the active key material comes from a public keyfile without hydrated primes.
+///
+/// # Expected Output
+/// - Returns the derived mode flag; no stdout/stderr output.
+fn uses_public_keyfile_only(config: &Config) -> bool {
+    !config.rsa_keypair.generate
+        && config.rsa_keypair.modulus.is_some()
+        && config.rsa_keypair.p.is_none()
+        && config.rsa_keypair.q.is_none()
+}
+
+/// Loads the optional private verification key referenced by a public-key config.
+///
+/// # Parameters
+/// - `config`: Loaded configuration that may reference `rsa_keypair.private_keyfile`.
+/// - `expected_modulus`: Public modulus that the private peek file must match.
+/// - `expected_exponent`: Public exponent that the private peek file must match.
+///
+/// # Returns
+/// - `Result<Option<RoundtripVerification>, Box<dyn Error>>`: Optional private verification handle.
+///
+/// # Expected Output
+/// - Reads the configured private keyfile when present; no stdout/stderr output on success.
+fn load_private_keyfile_peek(
+    config: &Config,
+    expected_modulus: &BigUint,
+    expected_exponent: &BigUint,
+) -> Result<Option<RoundtripVerification>, Box<dyn Error>> {
+    let private_keyfile = config.rsa_keypair.private_keyfile.trim();
+    if private_keyfile.is_empty() {
+        return Ok(None);
+    }
+
+    let config_path = config
+        .source_path
+        .as_deref()
+        .ok_or("relative rsa_keypair.private_keyfile requires a loaded config path")?;
+    let material = load_rsa_key_material_from_config_keyfile(config_path, private_keyfile)?;
+    if material.format != RsaKeyFileFormat::PrivateKeyV1 {
+        return Err(format!(
+            "rsa_keypair.private_keyfile must reference an rsa-private-key-v1 file, got {:?}",
+            material.format
+        )
+        .into());
+    }
+    if material.modulus != *expected_modulus {
+        return Err(
+            "rsa_keypair.private_keyfile modulus does not match rsa_keypair.keyfile".into(),
+        );
+    }
+
+    if BigUint::from(material.public_exponent) != *expected_exponent {
+        return Err(
+            "rsa_keypair.private_keyfile public exponent does not match rsa_keypair.keyfile".into(),
+        );
+    }
+
+    let d = material
+        .private_exponent
+        .ok_or("rsa_keypair.private_keyfile is missing private_exponent")?;
+    Ok(Some(RoundtripVerification::Peek { d }))
+}
+
+/// Returns whether public-key-only analysis should prefer beam score over private-match ordering.
+///
+/// # Parameters
+/// - `config`: Loaded configuration driving the current analysis or demo run.
+///
+/// # Returns
+/// - `bool`: `true` when the run uses only a public keyfile without a private verification peek.
+///
+/// # Expected Output
+/// - Returns the derived ordering flag; no stdout/stderr output.
+fn prefer_public_key_beam_score_ordering(config: &Config) -> bool {
+    uses_public_keyfile_only(config) && config.rsa_keypair.private_keyfile.trim().is_empty()
+}
+
 /// Runs the core RSA demo and analysis pipeline.
 ///
 /// # Parameters
@@ -342,13 +440,28 @@ pub fn run_demo(
     config: Config,
     analytics: &Arc<Mutex<SessionAnalytics>>,
 ) -> Result<(), Box<dyn Error>> {
+    let public_key_mode = uses_public_keyfile_only(&config);
+    let prefer_beam_score_ordering = prefer_public_key_beam_score_ordering(&config);
     with_analytics(analytics, |a| {
         a.mark_feature("keypair", true);
         a.mark_feature("message_select", true);
-        a.mark_feature("rsa_roundtrip", true);
+        a.mark_feature("rsa_roundtrip", !public_key_mode);
         a.mark_feature("information_sufficiency", args.tests);
         a.mark_feature("r_candidate_accuracy", config.engine.analysis_batch_enable);
         a.set_feature_stat("rsa_roundtrip", "shift_enabled", json!(args.shift));
+        a.set_feature_stat(
+            "rsa_roundtrip",
+            "mode",
+            json!(if public_key_mode {
+                if config.rsa_keypair.private_keyfile.trim().is_empty() {
+                    "public_keyfile_only"
+                } else {
+                    "public_keyfile_with_private_peek"
+                }
+            } else {
+                "private_roundtrip"
+            }),
+        );
     });
 
     let rng_start = Instant::now();
@@ -366,44 +479,64 @@ pub fn run_demo(
     });
 
     let key_start = Instant::now();
-    let (p, q): (BigUint, BigUint) = if config.rsa_keypair.generate {
+    let start_e = if args.public_exponent != 65_537 {
+        args.public_exponent
+    } else {
+        config.rsa_keypair.e
+    };
+    let (n, e, key_bit_width, roundtrip_verification): (
+        BigUint,
+        BigUint,
+        u64,
+        Option<RoundtripVerification>,
+    ) = if config.rsa_keypair.generate {
         let p = random_prime_with_bits(args.bits, &mut rng);
         let mut q = random_prime_with_bits(args.bits, &mut rng);
         while q == p {
             q = random_prime_with_bits(args.bits, &mut rng);
         }
-        (p, q)
+        let one = BigUint::one();
+        let n = &p * &q;
+        let phi = (&p - &one) * (&q - &one);
+        let e = choose_exponent(start_e, &phi);
+        let d = mod_inverse(&e, &phi)
+            .ok_or("public exponent is not invertible; try a different size or exponent")?;
+        (
+            n,
+            e,
+            p.bits().saturating_add(q.bits()),
+            Some(RoundtripVerification::Full { p, q, phi, d }),
+        )
+    } else if let (Some(p), Some(q)) = (config.rsa_keypair.p.clone(), config.rsa_keypair.q.clone())
+    {
+        let one = BigUint::one();
+        let n = &p * &q;
+        let phi = (&p - &one) * (&q - &one);
+        let e = choose_exponent(start_e, &phi);
+        let d = mod_inverse(&e, &phi)
+            .ok_or("public exponent is not invertible; try a different size or exponent")?;
+        (
+            n,
+            e,
+            p.bits().saturating_add(q.bits()),
+            Some(RoundtripVerification::Full { p, q, phi, d }),
+        )
     } else {
-        let p = config
+        let n = config
             .rsa_keypair
-            .p
+            .modulus
             .clone()
-            .ok_or("config.rsa_keypair.p must be set when generate is false, or rsa_keypair.keyfile must provide it")?;
-        let q = config
-            .rsa_keypair
-            .q
-            .clone()
-            .ok_or("config.rsa_keypair.q must be set when generate is false, or rsa_keypair.keyfile must provide it")?;
-        (p, q)
+            .ok_or("config.rsa_keypair.keyfile must provide a modulus when generate is false and no inline primes are configured")?;
+        let e = BigUint::from(start_e);
+        let roundtrip_verification = load_private_keyfile_peek(&config, &n, &e)?;
+        (n.clone(), e, n.bits(), roundtrip_verification)
     };
     with_analytics(analytics, |a| {
         a.record_step("keypair_select", key_start.elapsed());
         a.record_feature_duration("keypair", key_start.elapsed());
     });
 
-    let one = BigUint::one();
-    let n = &p * &q;
-    let phi = (&p - &one) * (&q - &one);
-
     let exponent_start = Instant::now();
-    let start_e = if args.public_exponent != 65_537 {
-        args.public_exponent
-    } else {
-        config.rsa_keypair.e
-    };
-    let e = choose_exponent(start_e, &phi);
-    let d = mod_inverse(&e, &phi)
-        .ok_or("public exponent is not invertible; try a different size or exponent")?;
     with_analytics(analytics, |a| {
         a.record_step("keypair_derive", exponent_start.elapsed())
     });
@@ -421,40 +554,65 @@ pub fn run_demo(
         a.record_feature_duration("message_select", message_start.elapsed());
     });
 
-    let roundtrip_start = Instant::now();
     let ciphertext = message.modpow(&e, &n);
-    let recovered = ciphertext.modpow(&d, &n);
+    let recovered = if let Some(verification) = roundtrip_verification.as_ref() {
+        let roundtrip_start = Instant::now();
+        let recovered = match verification {
+            RoundtripVerification::Full { d, .. } | RoundtripVerification::Peek { d } => {
+                ciphertext.modpow(d, &n)
+            }
+        };
+        if recovered != message {
+            return Err("RSA round trip failed".into());
+        }
+        if !public_key_mode {
+            with_analytics(analytics, |a| {
+                a.record_step("rsa_roundtrip", roundtrip_start.elapsed());
+                a.record_feature_duration("rsa_roundtrip", roundtrip_start.elapsed());
+            });
+        }
+        Some(recovered)
+    } else {
+        with_analytics(analytics, |a| {
+            a.add_feature_note(
+                "rsa_roundtrip",
+                "skipped round-trip verification because the active rsa_keypair.keyfile is public-only",
+            );
+        });
+        None
+    };
 
-    if recovered != message {
-        return Err("RSA round trip failed".into());
+    if let Some(RoundtripVerification::Full { p, q, phi, d }) = roundtrip_verification.as_ref() {
+        println!("Prime p ({} bits): {p}", bit_length(p));
+        println!("Prime q ({} bits): {q}", bit_length(q));
+        println!("Modulus n ({} bits): {n}", n.bits());
+        println!("phi(n): {phi}");
+        println!("Public exponent e: {e}");
+        println!("Private exponent d: {d}");
+    } else {
+        println!("Modulus n ({} bits): {n}", n.bits());
+        println!("Public exponent e: {e}");
     }
-    with_analytics(analytics, |a| {
-        a.record_step("rsa_roundtrip", roundtrip_start.elapsed());
-        a.record_feature_duration("rsa_roundtrip", roundtrip_start.elapsed());
-    });
-
-    println!("Prime p ({} bits): {p}", bit_length(&p));
-    println!("Prime q ({} bits): {q}", bit_length(&q));
-    println!("Modulus n ({} bits): {n}", n.bits());
-    println!("phi(n): {phi}");
-    println!("Public exponent e: {e}");
-    println!("Private exponent d: {d}");
     println!("Plaintext (hex): {}", to_hex(&message));
     println!("Ciphertext (hex): {}", to_hex(&ciphertext));
-    println!("Recovered (hex): {}", to_hex(&recovered));
+    if let Some(recovered) = recovered.as_ref() {
+        if public_key_mode {
+            println!("Peek recovered (hex): {}", to_hex(recovered));
+        } else {
+            println!("Recovered (hex): {}", to_hex(recovered));
+        }
+    } else {
+        println!("RSA round-trip verification: skipped (public keyfile only)");
+    }
 
     if let Some(seed) = args.seed {
         println!("RNG seed: {seed}");
     }
 
     let ctx = RSAContext {
-        p: p.clone(),
-        q: q.clone(),
         n: n.clone(),
-        phi: phi.clone(),
         e: e.clone(),
-        d: d.clone(),
-        key_bit_width: p.bits().saturating_add(q.bits()),
+        key_bit_width,
     };
 
     if args.tests {
@@ -495,9 +653,14 @@ pub fn run_demo(
 
     if config.engine.analysis_batch_enable {
         let batch_start = Instant::now();
-        if let Err(err) =
-            run_r_candidate_accuracy_batches(&ctx, &config.engine, &mut rng, analytics, args.shift)
-        {
+        if let Err(err) = run_r_candidate_accuracy_batches(
+            &ctx,
+            &config.engine,
+            &mut rng,
+            analytics,
+            args.shift,
+            prefer_beam_score_ordering,
+        ) {
             with_analytics(analytics, |a| {
                 a.add_feature_note("r_candidate_accuracy", &format!("failed: {}", err));
                 a.record_feature_duration("r_candidate_accuracy", batch_start.elapsed());
@@ -3450,15 +3613,10 @@ pub fn build_r_candidate_settings(
     }
 }
 
-#[allow(dead_code)]
 #[derive(Clone, Debug)]
 struct RSAContext {
-    p: BigUint,
-    q: BigUint,
     n: BigUint,
-    phi: BigUint,
     e: BigUint,
-    d: BigUint,
     key_bit_width: u64,
 }
 
@@ -3736,6 +3894,46 @@ struct MajorityVoteMaxCandidate {
     tier_index: usize,
 }
 
+/// Determines whether a beam-search candidate should replace the current run maximum.
+///
+/// # Parameters
+/// - `current`: Current run maximum candidate, if any.
+/// - `top_beam`: Top-ranked beam result from the candidate sample.
+/// - `sample`: Selected sample that produced `top_beam`.
+/// - `prefer_beam_score_ordering`: Whether beam score should outrank known match percentage.
+///
+/// # Returns
+/// - `bool`: `true` when the candidate should become the new run maximum.
+///
+/// # Expected Output
+/// - Returns the selection decision; no stdout/stderr output.
+fn should_replace_beam_max_candidate(
+    current: Option<&BeamMaxCandidate>,
+    top_beam: &AvalancheCombinationBeamResult,
+    sample: &SelectedAvalancheSample,
+    prefer_beam_score_ordering: bool,
+) -> bool {
+    match current {
+        Some(current) if prefer_beam_score_ordering => {
+            sample.top_beam_score > current.top_beam_score
+                || (sample.top_beam_score == current.top_beam_score
+                    && sample.average_score_pct > current.average_score_pct)
+                || (sample.top_beam_score == current.top_beam_score
+                    && sample.average_score_pct == current.average_score_pct
+                    && top_beam.match_pct > current.beam_match_pct)
+        }
+        Some(current) => {
+            top_beam.match_pct > current.beam_match_pct
+                || (top_beam.match_pct == current.beam_match_pct
+                    && sample.top_beam_score > current.top_beam_score)
+                || (top_beam.match_pct == current.beam_match_pct
+                    && sample.top_beam_score == current.top_beam_score
+                    && sample.average_score_pct > current.average_score_pct)
+        }
+        None => true,
+    }
+}
+
 #[derive(Clone, Debug)]
 struct ScoredAvalancheInputDetail {
     target_exponent: BigDecimal,
@@ -3904,20 +4102,55 @@ impl Default for SampledAvalancheBatchResult {
     }
 }
 
+/// Determines whether a recursive Avalanche sample should replace the current selected sample.
+///
+/// # Parameters
+/// - `current`: Current selected sample, if any.
+/// - `candidate`: Candidate sample being considered for selection.
+/// - `prefer_beam_score_ordering`: Whether selection should prioritize beam score over match percentage.
+///
+/// # Returns
+/// - `bool`: `true` when the candidate should become the new selected sample.
+///
+/// # Expected Output
+/// - Returns the selection decision; no stdout/stderr output.
+fn should_replace_selected_sample(
+    current: Option<&SelectedAvalancheSample>,
+    candidate: &SelectedAvalancheSample,
+    prefer_beam_score_ordering: bool,
+) -> bool {
+    match current {
+        Some(current) if prefer_beam_score_ordering => {
+            candidate.top_beam_score > current.top_beam_score
+                || (candidate.top_beam_score == current.top_beam_score
+                    && candidate.average_score_pct > current.average_score_pct)
+                || (candidate.top_beam_score == current.top_beam_score
+                    && candidate.average_score_pct == current.average_score_pct
+                    && candidate.best_match_pct > current.best_match_pct)
+        }
+        Some(current) => {
+            candidate.best_match_pct > current.best_match_pct
+                || (candidate.best_match_pct == current.best_match_pct
+                    && candidate.top_beam_score > current.top_beam_score)
+                || (candidate.best_match_pct == current.best_match_pct
+                    && candidate.top_beam_score == current.top_beam_score
+                    && candidate.average_score_pct > current.average_score_pct)
+        }
+        None => true,
+    }
+}
+
 impl SampledAvalancheBatchResult {
-    fn update_selected_sample_ref(&mut self, candidate: &SelectedAvalancheSample) {
-        let replace = match self.selected_sample.as_ref() {
-            Some(current) => {
-                candidate.best_match_pct > current.best_match_pct
-                    || (candidate.best_match_pct == current.best_match_pct
-                        && candidate.top_beam_score > current.top_beam_score)
-                    || (candidate.best_match_pct == current.best_match_pct
-                        && candidate.top_beam_score == current.top_beam_score
-                        && candidate.average_score_pct > current.average_score_pct)
-            }
-            None => true,
-        };
-        if replace {
+    fn update_selected_sample_ref(
+        &mut self,
+        candidate: &SelectedAvalancheSample,
+        prefer_beam_score_ordering: bool,
+    ) {
+        if should_replace_selected_sample(
+            self.selected_sample.as_ref(),
+            candidate,
+            prefer_beam_score_ordering,
+        ) {
             self.selected_sample = Some(candidate.clone());
         }
     }
@@ -5119,6 +5352,7 @@ fn execute_recursive_avalanche_sample_from_indices(
 /// - `message`: Original plaintext payload used for scoring and to derive the widened reference.
 /// - `scored_inputs`: Scored candidate decryptions available for sampling.
 /// - `batch_number`: One-based batch index used for progress logging.
+/// - `prefer_beam_score_ordering`: Whether selection should prefer beam score over known match percentage.
 /// - `rng`: Random number generator for combination sampling.
 ///
 /// # Returns
@@ -5131,6 +5365,7 @@ fn run_sampled_avalanche_beam_search(
     payload_message: &BigUint,
     scored_inputs: &[ScoredAvalancheInput],
     batch_number: usize,
+    prefer_beam_score_ordering: bool,
     rng: &mut RngChoice,
 ) -> Result<SampledAvalancheBatchResult, Box<dyn Error>> {
     if engine.avalanche_combination_samples == 0 {
@@ -5546,7 +5781,7 @@ fn run_sampled_avalanche_beam_search(
     }
 
     for sample in &current_tier_samples {
-        reduced.update_selected_sample_ref(sample);
+        reduced.update_selected_sample_ref(sample, prefer_beam_score_ordering);
     }
     reduced.final_tier_samples = current_tier_samples;
     Ok(reduced)
@@ -5560,6 +5795,7 @@ fn run_sampled_avalanche_beam_search(
 /// - `rng`: Random number generator for candidate and message sampling.
 /// - `analytics`: Session analytics accumulator receiving batch data.
 /// - `shift`: Whether to shift ciphertext by encrypted 2 before conversion.
+/// - `prefer_beam_score_ordering`: Whether public-key-only analysis should rank selected results by beam score.
 /// # Returns
 /// - `Result<(), Box<dyn Error>>`: `Ok(())` on success or an error on invalid configuration.
 ///
@@ -5572,6 +5808,7 @@ fn run_r_candidate_accuracy_batches(
     rng: &mut RngChoice,
     analytics: &Arc<Mutex<SessionAnalytics>>,
     shift: bool,
+    prefer_beam_score_ordering: bool,
 ) -> Result<(), Box<dyn Error>> {
     if !engine.analysis_batch_enable {
         return Ok(());
@@ -5909,6 +6146,7 @@ fn run_r_candidate_accuracy_batches(
             &message,
             &batch_scored_inputs,
             batch_number,
+            prefer_beam_score_ordering,
             rng,
         )?;
         total_avalanche_evaluated_candidates += sampled_avalanche_result.evaluated_candidates;
@@ -5946,18 +6184,12 @@ fn run_r_candidate_accuracy_batches(
                     Some(&top_beam.hex),
                 )
                 .map_err(|err| -> Box<dyn Error> { err.into() })?;
-                let replace = match beam_max {
-                    Some(ref current) => {
-                        top_beam.match_pct > current.beam_match_pct
-                            || (top_beam.match_pct == current.beam_match_pct
-                                && selected_sample.top_beam_score > current.top_beam_score)
-                            || (top_beam.match_pct == current.beam_match_pct
-                                && selected_sample.top_beam_score == current.top_beam_score
-                                && selected_sample.average_score_pct > current.average_score_pct)
-                    }
-                    None => true,
-                };
-                if replace {
+                if should_replace_beam_max_candidate(
+                    beam_max.as_ref(),
+                    top_beam,
+                    selected_sample,
+                    prefer_beam_score_ordering,
+                ) {
                     beam_max = Some(BeamMaxCandidate {
                         beam_match_pct: top_beam.match_pct,
                         average_score_pct: selected_sample.average_score_pct,
@@ -6372,16 +6604,11 @@ mod tests {
         let n = &p * &q;
         let phi = (&p - BigUint::one()) * (&q - BigUint::one());
         let e = choose_exponent(3, &phi);
-        let d = mod_inverse(&e, &phi).expect("missing inverse");
 
         let ctx = RSAContext {
             key_bit_width: p.bits().saturating_add(q.bits()),
-            p,
-            q,
             n,
-            phi,
             e,
-            d,
         };
         let base_ciphertext = BigUint::from(17u8);
         let candidate_phi = BigUint::from(10u8);
@@ -6907,6 +7134,7 @@ mod tests {
             &BigUint::from(1u8),
             &scored_inputs,
             1,
+            false,
             &mut rng,
         )
         .expect_err("invalid percentile should be rejected");
@@ -6945,6 +7173,7 @@ mod tests {
             &BigUint::from(1u8),
             &scored_inputs,
             1,
+            false,
             &mut rng,
         )
         .expect_err("invalid outlier preference percentage should be rejected");
@@ -6991,6 +7220,7 @@ mod tests {
             &BigUint::from(1u8),
             &scored_inputs,
             1,
+            false,
             &mut rng,
         )
         .expect("ChaCha20 direct-input mode should not require mixed-r combinations");
@@ -7049,6 +7279,7 @@ mod tests {
             &BigUint::zero(),
             &scored_inputs,
             1,
+            false,
             &mut rng,
         )
         .expect("fitness-preprocessed sampled avalanche should succeed");
@@ -7093,6 +7324,7 @@ mod tests {
             &BigUint::from(1u8),
             &scored_inputs,
             1,
+            false,
             &mut rng,
         )
         .expect("payload-only sampled avalanche scoring should succeed");
@@ -7142,6 +7374,7 @@ mod tests {
             &BigUint::from(1u8),
             &scored_inputs,
             1,
+            false,
             &mut rng,
         )
         .expect("payload-only sampled avalanche serialization should succeed");
@@ -7211,6 +7444,7 @@ mod tests {
             &BigUint::from(1u8),
             &scored_inputs,
             1,
+            false,
             &mut rng,
         )
         .expect("recursive sampled avalanche should succeed");
@@ -7284,6 +7518,7 @@ mod tests {
             &BigUint::from(1u8),
             &scored_inputs,
             1,
+            false,
             &mut rng,
         )
         .expect("sampled avalanche without statistics should succeed");
@@ -7330,6 +7565,7 @@ mod tests {
             &BigUint::from(1u8),
             &scored_inputs,
             1,
+            false,
             &mut rng,
         )
         .expect("recursive sampled avalanche with retained samples should succeed");
@@ -7434,6 +7670,96 @@ mod tests {
     }
 
     #[test]
+    fn test_should_replace_selected_sample_prefers_match_pct_by_default() {
+        let current = SelectedAvalancheSample {
+            sample_index: 1,
+            tier_index: 1,
+            input_count: 2,
+            average_score_pct: 60.0,
+            beam_results: Vec::new(),
+            majority_vote_bits: vec![true],
+            majority_vote_match_pct: 60.0,
+            majority_vote_ones_match_pct: 60.0,
+            best_bits: vec![true],
+            top_beam_score: 0.80,
+            top_beam_match_pct: Some(60.0),
+            best_match_pct: 60.0,
+            node: AvalancheNode::new(vec![true], vec![0.0]),
+        };
+        let candidate = SelectedAvalancheSample {
+            sample_index: 2,
+            tier_index: 1,
+            input_count: 2,
+            average_score_pct: 55.0,
+            beam_results: Vec::new(),
+            majority_vote_bits: vec![false],
+            majority_vote_match_pct: 75.0,
+            majority_vote_ones_match_pct: 75.0,
+            best_bits: vec![false],
+            top_beam_score: 0.20,
+            top_beam_match_pct: Some(75.0),
+            best_match_pct: 75.0,
+            node: AvalancheNode::new(vec![false], vec![0.0]),
+        };
+
+        assert!(should_replace_selected_sample(
+            Some(&current),
+            &candidate,
+            false,
+        ));
+        assert!(!should_replace_selected_sample(
+            Some(&current),
+            &candidate,
+            true,
+        ));
+    }
+
+    #[test]
+    fn test_should_replace_selected_sample_prefers_beam_score_in_public_mode() {
+        let current = SelectedAvalancheSample {
+            sample_index: 1,
+            tier_index: 1,
+            input_count: 2,
+            average_score_pct: 60.0,
+            beam_results: Vec::new(),
+            majority_vote_bits: vec![true],
+            majority_vote_match_pct: 60.0,
+            majority_vote_ones_match_pct: 60.0,
+            best_bits: vec![true],
+            top_beam_score: 0.30,
+            top_beam_match_pct: Some(90.0),
+            best_match_pct: 90.0,
+            node: AvalancheNode::new(vec![true], vec![0.0]),
+        };
+        let candidate = SelectedAvalancheSample {
+            sample_index: 2,
+            tier_index: 1,
+            input_count: 2,
+            average_score_pct: 65.0,
+            beam_results: Vec::new(),
+            majority_vote_bits: vec![false],
+            majority_vote_match_pct: 55.0,
+            majority_vote_ones_match_pct: 55.0,
+            best_bits: vec![false],
+            top_beam_score: 0.90,
+            top_beam_match_pct: Some(55.0),
+            best_match_pct: 55.0,
+            node: AvalancheNode::new(vec![false], vec![0.0]),
+        };
+
+        assert!(should_replace_selected_sample(
+            Some(&current),
+            &candidate,
+            true,
+        ));
+        assert!(!should_replace_selected_sample(
+            Some(&current),
+            &candidate,
+            false,
+        ));
+    }
+
+    #[test]
     fn test_run_sampled_avalanche_beam_search_discards_stored_sample_biases() {
         let mut config = Config::default();
         config.engine.avalanche_random_chacha20_inputs = true;
@@ -7468,6 +7794,7 @@ mod tests {
             &BigUint::from(1u8),
             &scored_inputs,
             1,
+            false,
             &mut rng,
         )
         .expect("sampled avalanche should succeed");
@@ -7711,6 +8038,7 @@ mod tests {
             &BigUint::from(1u8),
             &scored_inputs,
             1,
+            false,
             &mut rng,
         )
         .expect("recursive sampled avalanche resampling should succeed");

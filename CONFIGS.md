@@ -4,12 +4,15 @@ This file collects the configuration material that used to live in `README.md`.
 
 # Primary configs
 - `config/rsa_config_small_batch.json`: Main small-batch Avalanche config used by `make demo` and the current `analysis.rs` proof of concept.
+- `config/rsa_config_small_public_key_test.json`: Small public-key regression config that exercises public-key analysis plus a private-key verification peek.
 - `config/rsa_config.json`: Baseline general-purpose config with the broader engine schema documented below.
 
-# Private Key YAML
+# Key YAML
 - `kgen` writes RSA private keys as YAML under `config/keys`.
-- A non-secret example schema lives at `config/keys/private_key.example.yaml`.
+- `kgen --public-output ...` writes matching RSA public keys as `rsa-public-key-v1` YAML.
+- Non-secret example schemas live at `config/keys/private_key.example.yaml` and `config/keys/public_key.example.yaml`.
 - The tracked repository ignores the default generated key path `config/keys/private_key.yaml`.
+- Tracked examples include both private and public YAMLs for the small-batch keys under `config/keys/`.
 
 # Notes for `config/rsa_config_small_batch.json`
 - This is the main replay configuration for the current POC.
@@ -17,17 +20,26 @@ This file collects the configuration material that used to live in `README.md`.
 - It enables batched Avalanche sampling, majority-vote beam search, and Hamming-distance pruning for the small-batch workflow.
 - It is the default config for both `analysis.rs` and `demo.rs`.
 
+# Notes for `config/rsa_config_small_public_key_test.json`
+- This config exercises the public-key YAML path without changing the default private-key examples.
+- `rsa_keypair.keyfile` points at an `rsa-public-key-v1` file.
+- `rsa_keypair.private_keyfile` points at the matching private YAML so `analysis` can perform a verification peek while still operating in public-key mode.
+
 # Configuration (`config/rsa_config.json`)
 Notes:
 - Missing config files fall back to built-in defaults; when present, values below are read.
 - Unknown keys are ignored by `analysis.rs`. The `padding` and `engine.max_overlap_min` fields are currently not used.
 - When `rsa_keypair.generate` is `false`, supply either inline `rsa_keypair.p`/`rsa_keypair.q` or `rsa_keypair.keyfile`.
+- `rsa_keypair.keyfile` may point to either `rsa-private-key-v1` or `rsa-public-key-v1`.
+- When the main keyfile is public, `analysis` skips round-trip RSA. Set `rsa_keypair.private_keyfile` if you want a matching private-key verification peek; otherwise the public-key run is selected by top beam score.
+- Public-key YAMLs are used the same way as private-key YAMLs in config: point `rsa_keypair.keyfile` at the file and leave `rsa_keypair.p` and `rsa_keypair.q` unset.
 
 | Key | Type | Default in `config/rsa_config.json` | Notes |
 | --- | --- | --- | --- |
 | `rsa_keypair.generate` | bool | `false` | Generate primes when `true`. |
 | `rsa_keypair.e` | u64 | `65537` | Public exponent seed. |
-| `rsa_keypair.keyfile` | string | `""` | Relative or absolute YAML keypair path used when inline primes are absent. |
+| `rsa_keypair.keyfile` | string | `""` | Relative or absolute RSA YAML path used when inline primes are absent; accepts either private or public key YAML. |
+| `rsa_keypair.private_keyfile` | string | `""` | Optional relative or absolute private-key YAML used only for verification peeks when `rsa_keypair.keyfile` is public. |
 | `rsa_keypair.p` | string (bigint) | `3030152311446024058741` | Prime `p` when not generating. |
 | `rsa_keypair.q` | string (bigint) | `4262327550688715209573` | Prime `q` when not generating. |
 | `padding` | string | `PKCS1v15` | Present for compatibility; currently unused. |
