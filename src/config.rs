@@ -215,6 +215,12 @@ pub struct EngineConfig {
     /// Maximum number of `c^x` inputs retained per r-candidate group by the fitness pass; `0` keeps every input.
     #[serde(default = "default_avalanche_fitness_cx_candidate_limit")]
     pub avalanche_fitness_cx_candidate_limit: usize,
+    /// Whether the fitness pass drops candidates whose normalized fitness falls below the configured threshold.
+    #[serde(default = "default_avalanche_fitness_use_threshold")]
+    pub avalanche_fitness_use_threshold: bool,
+    /// Minimum normalized trailing-zero fitness retained by the fitness pass when thresholding is enabled.
+    #[serde(default = "default_avalanche_fitness_threshold")]
+    pub avalanche_fitness_threshold: f64,
     #[serde(default = "default_same_r_batch")]
     pub same_r_batch: bool,
     #[serde(default = "default_ciphertext_modify")]
@@ -404,6 +410,8 @@ impl Default for EngineConfig {
             avalanche_fitness_bit_width: default_avalanche_fitness_bit_width(),
             avalanche_fitness_r_candidate_limit: default_avalanche_fitness_r_candidate_limit(),
             avalanche_fitness_cx_candidate_limit: default_avalanche_fitness_cx_candidate_limit(),
+            avalanche_fitness_use_threshold: default_avalanche_fitness_use_threshold(),
+            avalanche_fitness_threshold: default_avalanche_fitness_threshold(),
             same_r_batch: default_same_r_batch(),
             ciphertext_modify: default_ciphertext_modify(),
             oracle_accuracy_threshold: default_oracle_accuracy_threshold(),
@@ -1480,6 +1488,34 @@ fn default_avalanche_fitness_cx_candidate_limit() -> usize {
     0
 }
 
+/// Default flag for applying the normalized fitness threshold.
+///
+/// # Parameters
+/// - None.
+///
+/// # Returns
+/// - `bool`: Default enable state for normalized fitness thresholding.
+///
+/// # Expected Output
+/// - Returns a constant default value; no side effects.
+fn default_avalanche_fitness_use_threshold() -> bool {
+    true
+}
+
+/// Default normalized fitness threshold used by the Avalanche fitness pass.
+///
+/// # Parameters
+/// - None.
+///
+/// # Returns
+/// - `f64`: Default minimum normalized trailing-zero fitness.
+///
+/// # Expected Output
+/// - Returns a constant default value; no side effects.
+fn default_avalanche_fitness_threshold() -> f64 {
+    0.580
+}
+
 /// Default flag for using the same r candidate across a batch.
 ///
 /// # Parameters
@@ -1861,6 +1897,8 @@ mod tests {
             engine.avalanche_combination_hamming_distance_outlier_preference_pct,
             0.0
         );
+        assert!(engine.avalanche_fitness_use_threshold);
+        assert!((engine.avalanche_fitness_threshold - 0.580).abs() < f64::EPSILON);
         assert_eq!(engine.sqlite_soft_heap, 10 * 1024 * 1024 * 1024);
         assert_eq!(engine.sqlite_hard_heap, 10 * 1024 * 1024 * 1024);
         assert_eq!(engine.sqlite_mmap_size, 10 * 1024 * 1024 * 1024);

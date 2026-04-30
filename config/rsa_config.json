@@ -86,6 +86,8 @@
     "avalanche_fitness_bit_width": 64,
     "avalanche_fitness_r_candidate_limit": 500,
     "avalanche_fitness_cx_candidate_limit": 1,
+    "avalanche_fitness_use_threshold": true,
+    "avalanche_fitness_threshold": 0.580,
     // Cap how many distinct r values can appear in one sampled avalanche input;
     // each selected r still contributes all of its sampled c^x variants.
     "avalanche_combination_mixed_r_candidates": 64,

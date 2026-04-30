@@ -1031,45 +1031,117 @@ fn next_probable_prime_after(prime: &BigUint) -> BigUint {
     candidate
 }
 
-/// Forces a sampled retarget update onto a unique final `r` value.
+/// Advances the last prime factor of a retargeted candidate to the next probable prime.
 ///
 /// # Parameters
-/// - `r`: Retargeted composite candidate to uniquify in place.
-/// - `factors`: Prime factors associated with `r`.
-/// - `seen`: Set of already-assigned `r` values in the current batch.
+/// - `factors`: Prime factors associated with the current retargeted candidate.
+///
+/// # Returns
+/// - `(BigUint, Vec<(BigUint, u64)>)`: Next candidate modulus plus its normalized factors.
+///
+/// # Expected Output
+/// - Returns the next candidate in the uniqueness-repair sequence; no stdout/stderr output.
+fn advance_retarget_candidate_once(
+    mut factors: Vec<(BigUint, u64)>,
+) -> (BigUint, Vec<(BigUint, u64)>) {
+    debug_assert!(
+        !factors.is_empty(),
+        "retarget uniqueness repair requires factors"
+    );
+    let last_idx = factors.len() - 1;
+    factors[last_idx].0 = next_probable_prime_after(&factors[last_idx].0);
+    let normalized = coalesce_factors(factors);
+    let r = normalized
+        .iter()
+        .fold(BigUint::one(), |acc, (p, e)| acc * p.pow(*e as u32));
+    (r, normalized)
+}
+
+/// Resolves duplicate initial retarget updates in batches before the final global uniqueness sweep.
+///
+/// # Parameters
+/// - `updates`: Retargeted updates produced from random exponent sampling.
 ///
 /// # Returns
 /// - `()`: This function returns nothing.
 ///
 /// # Expected Output
-/// - Mutates `r` and `factors` until `r` is unique within `seen`; no stdout/stderr output.
-fn uniquify_retarget_update(
-    mut r: BigUint,
-    mut factors: Vec<(BigUint, u64)>,
-    seen: &Arc<Mutex<HashSet<BigUint>>>,
-) -> (BigUint, Vec<(BigUint, u64)>) {
-    if factors.is_empty() {
-        let mut guard = seen.lock().expect("retarget uniqueness set lock poisoned");
-        guard.insert(r.clone());
-        return (r, factors);
+/// - Rewrites duplicate initial `r` values in place without using a shared global lock; no stdout/stderr output.
+fn uniquify_duplicate_retarget_updates_by_initial_r(
+    updates: &mut [Option<(BigUint, Vec<(BigUint, u64)>, BigDecimal)>],
+) {
+    let mut grouped_duplicates = BTreeMap::<BigUint, Vec<usize>>::new();
+    for (index, update) in updates.iter().enumerate() {
+        if let Some((r, _, _)) = update {
+            grouped_duplicates.entry(r.clone()).or_default().push(index);
+        }
     }
 
-    loop {
-        let inserted = {
-            let mut guard = seen.lock().expect("retarget uniqueness set lock poisoned");
-            guard.insert(r.clone())
+    let duplicate_groups = grouped_duplicates
+        .into_values()
+        .filter(|indices| indices.len() > 1)
+        .collect::<Vec<_>>();
+    let replacements = duplicate_groups
+        .into_par_iter()
+        .map(|indices| {
+            let mut current_factors = indices
+                .first()
+                .and_then(|&index| updates.get(index))
+                .and_then(|update| update.as_ref())
+                .map(|(_, factors, _)| factors.clone())
+                .unwrap_or_default();
+            if current_factors.is_empty() {
+                return Vec::new();
+            }
+
+            let mut group_replacements = Vec::with_capacity(indices.len().saturating_sub(1));
+            for &index in indices.iter().skip(1) {
+                let (next_r, next_factors) = advance_retarget_candidate_once(current_factors);
+                current_factors = next_factors.clone();
+                group_replacements.push((index, next_r, next_factors));
+            }
+            group_replacements
+        })
+        .collect::<Vec<_>>();
+
+    for group_replacements in replacements {
+        for (index, next_r, next_factors) in group_replacements {
+            if let Some(Some((r, factors, _))) = updates.get_mut(index) {
+                *r = next_r;
+                *factors = next_factors;
+            }
+        }
+    }
+}
+
+/// Finalizes retarget updates into globally unique `r` values while preserving prior batch rewrites.
+///
+/// # Parameters
+/// - `updates`: Retargeted updates to uniquify in their final output order.
+///
+/// # Returns
+/// - `()`: This function returns nothing.
+///
+/// # Expected Output
+/// - Performs a final uniqueness sweep and rewrites any remaining collisions in place; no stdout/stderr output.
+fn finalize_unique_retarget_updates(
+    updates: &mut [Option<(BigUint, Vec<(BigUint, u64)>, BigDecimal)>],
+) {
+    let mut seen = HashSet::with_capacity(updates.len());
+    for update in updates.iter_mut() {
+        let Some((r, factors, _)) = update.as_mut() else {
+            continue;
         };
-        if inserted {
-            return (r, factors);
+        if factors.is_empty() {
+            seen.insert(r.clone());
+            continue;
         }
 
-        let last_idx = factors.len() - 1;
-        factors[last_idx].0 = next_probable_prime_after(&factors[last_idx].0);
-        let normalized = coalesce_factors(factors);
-        r = normalized
-            .iter()
-            .fold(BigUint::one(), |acc, (p, e)| acc * p.pow(*e as u32));
-        factors = normalized;
+        while !seen.insert(r.clone()) {
+            let (next_r, next_factors) = advance_retarget_candidate_once(std::mem::take(factors));
+            *r = next_r;
+            *factors = next_factors;
+        }
     }
 }
 
@@ -1446,57 +1518,36 @@ pub fn retarget_r_candidates_for_speculative_oracles(
         started_at.elapsed().as_secs_f64(),
     );
 
-    let seen = Arc::new(Mutex::new(HashSet::with_capacity(candidates.len())));
+    let mut updates = updates;
     let uniquify_started_at = Instant::now();
-    let uniquify_completed = AtomicUsize::new(0);
-    let next_uniquify_log_secs = AtomicU64::new(5);
-    candidates
-        .par_iter_mut()
-        .zip(updates.into_par_iter())
-        .for_each(|(candidate, update)| {
-            if let Some((r, factors, sampled_target_exponent)) = update {
-                let (r, factors) = uniquify_retarget_update(r, factors, &seen);
-                candidate.r = r;
-                candidate.factors = factors;
-                candidate.target_exponent = sampled_target_exponent;
-            }
+    uniquify_duplicate_retarget_updates_by_initial_r(&mut updates);
+    finalize_unique_retarget_updates(&mut updates);
+    let mut completed_count = 0usize;
+    let mut next_uniquify_log_secs = 5u64;
+    for (candidate, update) in candidates.iter_mut().zip(updates.into_iter()) {
+        if let Some((r, factors, sampled_target_exponent)) = update {
+            candidate.r = r;
+            candidate.factors = factors;
+            candidate.target_exponent = sampled_target_exponent;
+        }
 
-            let completed_count = uniquify_completed.fetch_add(1, Ordering::Relaxed) + 1;
-            let elapsed_secs = uniquify_started_at.elapsed().as_secs();
-            loop {
-                let next_log_secs = next_uniquify_log_secs.load(Ordering::Relaxed);
-                if completed_count != total_candidates && elapsed_secs < next_log_secs {
-                    break;
-                }
-                let updated_next_log_secs = if completed_count == total_candidates {
-                    u64::MAX
-                } else {
-                    next_log_secs + 5
-                };
-                if next_uniquify_log_secs
-                    .compare_exchange(
-                        next_log_secs,
-                        updated_next_log_secs,
-                        Ordering::Relaxed,
-                        Ordering::Relaxed,
-                    )
-                    .is_ok()
-                {
-                    let percent = (completed_count as f64 / total_candidates as f64) * 100.0;
-                    println!(
-                        "Retarget uniqueness progress: {:.2}% ({}/{}) elapsed {:.1}s",
-                        percent,
-                        completed_count,
-                        total_candidates,
-                        uniquify_started_at.elapsed().as_secs_f64(),
-                    );
-                    break;
-                }
-            }
-        });
+        completed_count += 1;
+        let elapsed_secs = uniquify_started_at.elapsed().as_secs();
+        while completed_count != total_candidates && elapsed_secs >= next_uniquify_log_secs {
+            let percent = (completed_count as f64 / total_candidates as f64) * 100.0;
+            println!(
+                "Retarget uniqueness progress: {:.2}% ({}/{}) elapsed {:.1}s",
+                percent,
+                completed_count,
+                total_candidates,
+                uniquify_started_at.elapsed().as_secs_f64(),
+            );
+            next_uniquify_log_secs += 5;
+        }
+    }
     println!(
         "Retarget uniqueness progress: 100.00% ({}/{}) elapsed {:.1}s",
-        uniquify_completed.load(Ordering::Relaxed),
+        completed_count,
         total_candidates,
         uniquify_started_at.elapsed().as_secs_f64(),
     );

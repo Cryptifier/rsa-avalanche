@@ -61,6 +61,8 @@
     "avalanche_fitness_bit_width": 32,
     "avalanche_fitness_r_candidate_limit": 200,
     "avalanche_fitness_cx_candidate_limit": 10,
+    "avalanche_fitness_use_threshold": true,
+    "avalanche_fitness_threshold": 0.580,
     // Beam search keeps a short candidate list and interprets per-bit
     // probabilities above the threshold as bit 1.
     "beam_bit_one_threshold": 0.5,
