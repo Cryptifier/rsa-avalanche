@@ -3,11 +3,13 @@
 /// Copyright (c) 2025 Nicholas LaRoche <nlaroche@cryptifier.dev>
 use ndarray::{Array1, Array2};
 use num_bigint::{BigInt, BigUint};
+use num_integer::Integer;
 use num_rational::BigRational;
-use num_traits::{One, Zero};
+use num_traits::{One, Signed, ToPrimitive, Zero};
 use std::error::Error;
 use std::fmt::{Display, Formatter};
 
+use crate::poly::Poly;
 use crate::polynomials::IntegerPolynomial;
 
 /// Integer matrix used for lattice basis construction.
@@ -273,10 +275,7 @@ impl CoppersmithLatticeBuilder {
         let bound = self.bound.expect("validated bound");
         let m = self.m.expect("validated exponent");
         let dimension = self.dimension.expect("validated dimension");
-        let degree = self
-            .polynomial
-            .degree()
-            .ok_or(CoppersmithError::ZeroDegreePolynomial)?;
+        let degree = self.polynomial.degree();
         let minimum_dimension = degree
             .checked_mul(m)
             .ok_or(CoppersmithError::DimensionOverflow)?;
@@ -450,6 +449,70 @@ pub fn run_rsa_coppersmith(
         reduced_polynomials,
         recovered_unknown,
     })
+}
+
+/// Runs the educational univariate Coppersmith flow against a monic polynomial.
+///
+/// # Parameters
+/// - `f`: Monic univariate polynomial whose small roots are sought.
+/// - `n`: Positive modulus used in the congruence test.
+/// - `x_bound`: Positive bound `X` used both for lattice scaling and brute-force root checks.
+/// - `m`: Main Coppersmith exponent parameter.
+/// - `t`: Number of extra `x^j f(x)^m` shift rows.
+///
+/// # Returns
+/// - `Vec<BigInt>`: Sorted unique roots recovered from the reduced basis.
+///
+/// # Expected Output
+/// - Returns candidate small roots without side effects.
+pub fn univariate_coppersmith(
+    f: &Poly,
+    n: &BigInt,
+    x_bound: &BigInt,
+    m: usize,
+    t: usize,
+) -> Vec<BigInt> {
+    assert!(n > &BigInt::one(), "modulus n must be greater than one");
+    assert!(
+        x_bound > &BigInt::zero(),
+        "x_bound must be greater than zero"
+    );
+
+    let d = f.degree();
+    assert!(d > 0, "f(x) must have degree at least one");
+    assert_eq!(f.coeff(d), BigInt::one(), "f(x) should be monic");
+
+    let modulus = BigUint::try_from(n.clone()).expect("univariate_coppersmith requires n >= 0");
+    let bound = BigUint::try_from(x_bound.clone())
+        .expect("univariate_coppersmith requires x_bound >= 0");
+    let dimension = d
+        .checked_mul(m)
+        .and_then(|value| value.checked_add(t))
+        .expect("coppersmith lattice dimension overflow");
+
+    let lattice = CoppersmithLatticeBuilder::new(modulus, f.clone())
+        .with_bound(bound)
+        .with_exponent(m)
+        .with_dimension(dimension)
+        .build()
+        .expect("univariate_coppersmith inputs must form a valid lattice");
+    let reduced = lattice.reduce();
+
+    let mut roots = Vec::<BigInt>::new();
+
+    for row in reduced.iter().take(8) {
+        let h_scaled = Poly::new(row.to_vec());
+        let h = h_scaled.unscale_variable_exact(x_bound);
+
+        for r in candidate_integer_roots(&h, x_bound) {
+            if f.eval(&r).mod_floor(n).is_zero() && !roots.contains(&r) {
+                roots.push(r);
+            }
+        }
+    }
+
+    roots.sort();
+    roots
 }
 
 /// Computes the integer dot product of two lattice vectors.
@@ -646,11 +709,9 @@ fn validate_coppersmith_inputs(
     }
 
     let m = m.ok_or(CoppersmithError::MissingExponent)?;
-    let degree = polynomial
-        .degree()
-        .ok_or(CoppersmithError::ZeroDegreePolynomial)?;
+    let degree = polynomial.degree();
 
-    if degree == 0 {
+    if polynomial.is_zero() || degree == 0 {
         return Err(CoppersmithError::ZeroDegreePolynomial);
     }
     if polynomial.leading_coefficient() != Some(&BigInt::one()) {
@@ -768,6 +829,36 @@ fn brute_force_small_root(
     None
 }
 
+/// Returns candidate integer roots, preferring exact low-degree extraction over bounded search.
+fn candidate_integer_roots(h: &Poly, x_bound: &BigInt) -> Vec<BigInt> {
+    if let Some(roots) = h.exact_integer_roots_low_degree() {
+        return roots
+            .into_iter()
+            .filter(|root| root.abs() <= *x_bound)
+            .collect();
+    }
+
+    brute_force_roots(h, x_bound)
+}
+
+/// Brute-forces exact integer roots of a polynomial inside `[-X, X]`.
+fn brute_force_roots(h: &Poly, x_bound: &BigInt) -> Vec<BigInt> {
+    let Some(bound) = x_bound.abs().to_i64() else {
+        return Vec::new();
+    };
+
+    let mut roots = Vec::new();
+
+    for x in -bound..=bound {
+        let candidate = BigInt::from(x);
+        if h.eval(&candidate).is_zero() {
+            roots.push(candidate);
+        }
+    }
+
+    roots
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -841,6 +932,36 @@ mod tests {
                 BigInt::from(512)
             ]
         );
+    }
+
+    #[test]
+    fn univariate_coppersmith_finds_small_linear_root() {
+        let polynomial = Poly::new(vec![BigInt::from(-3), BigInt::one()]);
+
+        let roots = univariate_coppersmith(
+            &polynomial,
+            &BigInt::from(97u8),
+            &BigInt::from(4u8),
+            2,
+            2,
+        );
+
+        assert_eq!(roots, vec![BigInt::from(3)]);
+    }
+
+    #[test]
+    fn univariate_coppersmith_finds_negative_root_inside_bound() {
+        let polynomial = Poly::new(vec![BigInt::from(2), BigInt::one()]);
+
+        let roots = univariate_coppersmith(
+            &polynomial,
+            &BigInt::from(97u8),
+            &BigInt::from(3u8),
+            2,
+            2,
+        );
+
+        assert_eq!(roots, vec![BigInt::from(-2)]);
     }
 
     #[test]

@@ -11,12 +11,13 @@ The polynomial arithmetic used by the lattice code lives in `src/polynomials.rs`
 
 The main public types are:
 
-- `IntegerPolynomial` in `src/polynomials.rs`
+- `Poly` in `src/polynomials.rs`, available as `rsademo::poly::Poly`
 - `CoppersmithLatticeBuilder`
 - `CoppersmithLattice`
 - `CoppersmithLatticeElement`
 - `RsaCoppersmithInput`
 - `RsaCoppersmithRun`
+- `univariate_coppersmith`
 - `lll_reduce`
 
 The lattice builder is geared toward RSA use cases:
@@ -50,6 +51,55 @@ for `0 <= j < d - delta * m`.
 
 Each row is scaled as `g_{i,j}(Xx)` before its coefficients are inserted into the lattice matrix. This is what lets `vector_to_polynomial` and `reduced_polynomials` map reduced lattice vectors back into ordinary integer polynomials.
 
+## Univariate API
+
+The generic entry point now mirrors the educational signature:
+
+```rust
+pub fn univariate_coppersmith(
+    f: &Poly,
+    n: &BigInt,
+    x_bound: &BigInt,
+    m: usize,
+    t: usize,
+) -> Vec<BigInt>
+```
+
+`t` is the number of extra `x^j f(x)^m` rows, so the resulting square lattice dimension is:
+
+```text
+degree(f) * m + t
+```
+
+Example:
+
+```rust
+use num_bigint::BigInt;
+use num_traits::One;
+use rsademo::lattices::univariate_coppersmith;
+use rsademo::poly::Poly;
+
+let f = Poly::new(vec![BigInt::from(-3), BigInt::one()]);
+let roots = univariate_coppersmith(
+    &f,
+    &BigInt::from(97u8),
+    &BigInt::from(4u8),
+    2,
+    2,
+);
+
+assert_eq!(roots, vec![BigInt::from(3)]);
+```
+
+This function:
+
+- builds the standard Coppersmith basis
+- runs LLL
+- converts the top reduced vectors back into ordinary polynomials
+- solves linear and quadratic integer roots exactly when possible
+- falls back to bounded search in `[-X, X]` for higher-degree auxiliary polynomials
+- returns roots `r` satisfying `f(r) mod n == 0`
+
 ## Builder Usage
 
 Use `CoppersmithLatticeBuilder` when you already know the polynomial you want to attack.
@@ -58,10 +108,10 @@ Use `CoppersmithLatticeBuilder` when you already know the polynomial you want to
 use num_bigint::{BigInt, BigUint};
 use num_traits::One;
 use rsademo::lattices::CoppersmithLatticeBuilder;
-use rsademo::polynomials::IntegerPolynomial;
+use rsademo::poly::Poly;
 
 let modulus = BigUint::from(11413u32);
-let polynomial = IntegerPolynomial::new(vec![
+let polynomial = Poly::new(vec![
     BigInt::from(96u8),
     BigInt::one(),
 ]);
@@ -222,17 +272,23 @@ It is not yet a full symbolic small-root extractor over the reduced basis.
 
 ## Polynomial Utilities
 
-`src/polynomials.rs` provides the integer polynomial operations the lattice builder depends on:
+`src/polynomials.rs` provides the integer polynomial operations the lattice code depends on:
 
-- `IntegerPolynomial::new`
-- `IntegerPolynomial::from_constant`
-- `IntegerPolynomial::monomial`
+- `Poly::new`
+- `Poly::constant`
+- `Poly::x`
+- `Poly::monomial`
 - `add`
 - `mul`
 - `pow`
+- `mul_x_pow`
 - `scale`
+- `scale_variable`
+- `unscale_variable_exact`
+- `exact_integer_roots_low_degree`
 - `shift`
 - `scale_input`
+- `eval`
 - `evaluate`
 - `padded_coefficients`
 
@@ -258,6 +314,7 @@ The lattice and polynomial code is covered by unit tests in:
 The lattice tests cover:
 
 - LLL sanity on a small basis
+- direct `univariate_coppersmith` recovery for positive and negative linear roots
 - exact `g_{i,j}` basis construction for a linear polynomial
 - non-monic polynomial rejection
 - constant polynomial rejection
