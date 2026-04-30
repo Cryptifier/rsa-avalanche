@@ -3787,6 +3787,12 @@ struct SelectedAvalancheSample {
 }
 
 #[derive(Clone, Debug)]
+struct RecursiveAvalancheSourceSample {
+    best_match_pct: f64,
+    message_bits: PackedBits,
+}
+
+#[derive(Clone, Debug)]
 struct RecursiveAvalancheInput {
     message_bits: PackedBits,
 }
@@ -3822,11 +3828,34 @@ fn recursive_tier_bits<'a>(
     }
 }
 
+/// Compacts prior-tier selected samples into the minimal recursive source payload.
+///
+/// # Parameters
+/// - `samples`: Prior-tier selected samples whose beam metadata and finalized nodes can be discarded.
+/// - `engine`: Engine configuration controlling whether recursive tiers use top-beam or majority-vote bits.
+///
+/// # Returns
+/// - `Vec<RecursiveAvalancheSourceSample>`: Recursive-tier source records with only match score and packed message bits.
+///
+/// # Expected Output
+/// - Returns compact recursive-tier source samples; no stdout/stderr output.
+fn compact_recursive_avalanche_source_samples(
+    samples: Vec<SelectedAvalancheSample>,
+    engine: &EngineConfig,
+) -> Vec<RecursiveAvalancheSourceSample> {
+    samples
+        .into_iter()
+        .map(|sample| RecursiveAvalancheSourceSample {
+            best_match_pct: sample.best_match_pct,
+            message_bits: PackedBits::from_bools(recursive_tier_bits(&sample, engine)),
+        })
+        .collect()
+}
+
 /// Builds the recursive Avalanche inputs for a next-tier run from prior-tier selected samples.
 ///
 /// # Parameters
-/// - `samples`: Prior-tier selected samples chosen for one recursive Avalanche execution.
-/// - `engine`: Engine configuration controlling which prior-tier bit representation is carried forward.
+/// - `samples`: Compact prior-tier source samples chosen for one recursive Avalanche execution.
 ///
 /// # Returns
 /// - `Vec<RecursiveAvalancheInput>`: Recursive-tier inputs containing only the selected bit vectors.
@@ -3834,13 +3863,12 @@ fn recursive_tier_bits<'a>(
 /// # Expected Output
 /// - Returns compact recursive-tier inputs; no stdout/stderr output.
 fn build_recursive_avalanche_inputs(
-    samples: &[&SelectedAvalancheSample],
-    engine: &EngineConfig,
+    samples: &[&RecursiveAvalancheSourceSample],
 ) -> Vec<RecursiveAvalancheInput> {
     samples
         .iter()
         .map(|sample| RecursiveAvalancheInput {
-            message_bits: PackedBits::from_bools(recursive_tier_bits(sample, engine)),
+            message_bits: sample.message_bits.clone(),
         })
         .collect()
 }
@@ -4240,7 +4268,7 @@ fn apply_scored_avalanche_fitness_pass(
 /// Randomizes recursive-tier sample indices before grouping.
 ///
 /// # Parameters
-/// - `samples`: Prior-tier finalized samples available for recursive regrouping.
+/// - `source_sample_count`: Number of prior-tier finalized samples available for recursive regrouping.
 /// - `rng`: Random number generator used to permute the sample order.
 ///
 /// # Returns
@@ -4249,14 +4277,14 @@ fn apply_scored_avalanche_fitness_pass(
 /// # Expected Output
 /// - Returns the full sample-index set in RNG-selected order; no stdout/stderr output.
 fn shuffle_recursive_tier_sample_indices(
-    samples: &[SelectedAvalancheSample],
+    source_sample_count: usize,
     rng: &mut RngChoice,
 ) -> Vec<usize> {
-    if samples.len() < 2 {
-        return (0..samples.len()).collect();
+    if source_sample_count < 2 {
+        return (0..source_sample_count).collect();
     }
 
-    let mut shuffled_indices = (0..samples.len()).collect::<Vec<_>>();
+    let mut shuffled_indices = (0..source_sample_count).collect::<Vec<_>>();
     for offset in 0..(shuffled_indices.len() - 1) {
         let remaining = shuffled_indices.len() - offset;
         let swap_offset = (rng.next_u64() as usize) % remaining;
@@ -4268,7 +4296,7 @@ fn shuffle_recursive_tier_sample_indices(
 /// Selects one recursive-tier sample group from prior-tier finalized sample indices.
 ///
 /// # Parameters
-/// - `samples`: Prior-tier finalized samples available for recursive resampling.
+/// - `source_sample_count`: Number of prior-tier finalized samples available for recursive resampling.
 /// - `group_size`: Maximum number of prior-tier samples to include in the recursive group.
 /// - `rng`: Random number generator used for the without-replacement selection.
 ///
@@ -4278,15 +4306,15 @@ fn shuffle_recursive_tier_sample_indices(
 /// # Expected Output
 /// - Returns up to `group_size` unique prior-tier sample indices; no stdout/stderr output.
 fn select_recursive_tier_sample_group_indices(
-    samples: &[SelectedAvalancheSample],
+    source_sample_count: usize,
     group_size: usize,
     rng: &mut RngChoice,
 ) -> Vec<usize> {
-    if group_size == 0 || samples.is_empty() {
+    if group_size == 0 || source_sample_count == 0 {
         return Vec::new();
     }
 
-    sample_unique_indices(samples.len(), group_size, rng)
+    sample_unique_indices(source_sample_count, group_size, rng)
 }
 
 #[derive(Clone, Debug)]
@@ -5023,7 +5051,7 @@ fn execute_sampled_avalanche_sample(
 /// - `engine`: Engine configuration controlling beam-search behavior.
 /// - `reference_bits`: Full-width shifted reference bits used for optional ordering.
 /// - `comparison_message_bits`: Original plaintext payload bits used for scoring.
-/// - `source_samples`: Prior-tier Avalanche outputs available for indexed lookup.
+/// - `source_samples`: Compact prior-tier recursive source samples available for indexed lookup.
 /// - `source_sample_indices`: Indices selecting the prior-tier samples used by this recursive sample.
 /// - `tier_index`: One-based tier index being executed.
 /// - `sample_index`: Zero-based sample index within the current tier.
@@ -5037,7 +5065,7 @@ fn execute_recursive_avalanche_sample_from_indices(
     engine: &EngineConfig,
     reference_bits: &[bool],
     comparison_message_bits: &[bool],
-    source_samples: &[SelectedAvalancheSample],
+    source_samples: &[RecursiveAvalancheSourceSample],
     source_sample_indices: &[usize],
     tier_index: usize,
     sample_index: usize,
@@ -5056,7 +5084,7 @@ fn execute_recursive_avalanche_sample_from_indices(
             .map(|sample| sample.best_match_pct)
             .collect::<Vec<_>>(),
     );
-    let recursive_inputs = build_recursive_avalanche_inputs(&selected_samples, engine);
+    let recursive_inputs = build_recursive_avalanche_inputs(&selected_samples);
     let avalanche_search = build_prepared_avalanche(
         &recursive_inputs,
         engine,
@@ -5365,7 +5393,11 @@ fn run_sampled_avalanche_beam_search(
         let next_tier_index = tier_index + 1;
         let recursive_seed = rng.next_u64();
         let mut recursive_rng = RngChoice::from_seed(rng_mode, recursive_seed);
-        let source_samples = std::mem::take(&mut current_tier_samples);
+        let source_samples = compact_recursive_avalanche_source_samples(
+            std::mem::take(&mut current_tier_samples),
+            engine,
+        );
+        let source_sample_count = source_samples.len();
         let recursive_done = AtomicU64::new(0);
         let recursive_evaluated_candidates = AtomicU64::new(0);
         let recursive_log_start = Instant::now();
@@ -5385,7 +5417,7 @@ fn run_sampled_avalanche_beam_search(
                     "Avalanche recursive tier {} group preparation for batch {}: source-samples {} group-size {} target-groups {} mode recursive-resampled-samples",
                     next_tier_index,
                     batch_number,
-                    source_samples.len(),
+                    source_sample_count,
                     recursive_group_size,
                     recursive_resample_count
                 );
@@ -5404,7 +5436,7 @@ fn run_sampled_avalanche_beam_search(
                     "Avalanche recursive tier {} for batch {}: source-samples {} group-size {} groups {} mode recursive-resampled-samples",
                     next_tier_index,
                     batch_number,
-                    source_samples.len(),
+                    source_sample_count,
                     recursive_group_size,
                     group_count
                 );
@@ -5414,7 +5446,7 @@ fn run_sampled_avalanche_beam_search(
                     .map(|(group_index, seed)| {
                         let mut local_rng = RngChoice::from_seed(rng_mode, seed);
                         let source_sample_indices = select_recursive_tier_sample_group_indices(
-                            &source_samples,
+                            source_sample_count,
                             recursive_group_size,
                             &mut local_rng,
                         );
@@ -5454,13 +5486,13 @@ fn run_sampled_avalanche_beam_search(
                 (next_samples, "recursive-resampled-samples", group_count)
             } else {
                 let shuffled_sample_indices =
-                    shuffle_recursive_tier_sample_indices(&source_samples, &mut recursive_rng);
+                    shuffle_recursive_tier_sample_indices(source_sample_count, &mut recursive_rng);
                 let group_count = shuffled_sample_indices.len().div_ceil(recursive_group_size);
                 println!(
                     "Avalanche recursive tier {} for batch {}: source-samples {} group-size {} groups {} mode recursive-samples",
                     next_tier_index,
                     batch_number,
-                    source_samples.len(),
+                    source_sample_count,
                     recursive_group_size,
                     group_count
                 );
@@ -7364,6 +7396,44 @@ mod tests {
     }
 
     #[test]
+    fn test_compact_recursive_avalanche_source_samples_use_configured_recursive_bits() {
+        let sample = SelectedAvalancheSample {
+            sample_index: 1,
+            tier_index: 2,
+            input_count: 2,
+            average_score_pct: 75.0,
+            beam_results: Vec::new(),
+            majority_vote_bits: vec![false, true, false],
+            majority_vote_match_pct: 75.0,
+            majority_vote_ones_match_pct: 100.0,
+            best_bits: vec![true, false, true],
+            top_beam_score: 0.0,
+            top_beam_match_pct: None,
+            best_match_pct: 81.0,
+            node: AvalancheNode::new(vec![true, true, true], vec![2.5, -1.0, 4.0]),
+        };
+
+        let top_beam_sources = compact_recursive_avalanche_source_samples(
+            vec![sample.clone()],
+            &Config::default().engine,
+        );
+        assert_eq!(top_beam_sources[0].best_match_pct, 81.0);
+        assert_eq!(
+            top_beam_sources[0].message_bits.to_bools(),
+            vec![true, false, true]
+        );
+
+        let mut config = Config::default();
+        config.engine.avalanche_use_top_beam = false;
+        let majority_sources =
+            compact_recursive_avalanche_source_samples(vec![sample], &config.engine);
+        assert_eq!(
+            majority_sources[0].message_bits.to_bools(),
+            vec![false, true, false]
+        );
+    }
+
+    #[test]
     fn test_run_sampled_avalanche_beam_search_discards_stored_sample_biases() {
         let mut config = Config::default();
         config.engine.avalanche_random_chacha20_inputs = true;
@@ -7432,7 +7502,7 @@ mod tests {
             .collect::<Vec<_>>();
 
         let mut rng = RngChoice::from_seed(RngMode::Crypto, 23);
-        let shuffled_indices = shuffle_recursive_tier_sample_indices(&samples, &mut rng);
+        let shuffled_indices = shuffle_recursive_tier_sample_indices(samples.len(), &mut rng);
         let mut sorted_indices = shuffled_indices.clone();
         sorted_indices.sort_unstable();
 
@@ -7462,7 +7532,8 @@ mod tests {
             .collect::<Vec<_>>();
 
         let mut rng = RngChoice::from_seed(RngMode::Crypto, 29);
-        let mut sample_indices = select_recursive_tier_sample_group_indices(&samples, 3, &mut rng);
+        let mut sample_indices =
+            select_recursive_tier_sample_group_indices(samples.len(), 3, &mut rng);
         let mut deduped = sample_indices.clone();
 
         deduped.sort_unstable();
@@ -7512,11 +7583,13 @@ mod tests {
             },
         ];
 
+        let compact_sources =
+            compact_recursive_avalanche_source_samples(source_samples, &config.engine);
         let recursive = execute_recursive_avalanche_sample_from_indices(
             &config.engine,
             &[true, true, true],
             &[true, true, true],
-            &source_samples,
+            &compact_sources,
             &[1, 0],
             2,
             0,
@@ -7566,11 +7639,13 @@ mod tests {
             },
         ];
 
+        let compact_sources =
+            compact_recursive_avalanche_source_samples(source_samples, &config.engine);
         let recursive = execute_recursive_avalanche_sample_from_indices(
             &config.engine,
             &[true, true, true],
             &[true, true, true],
-            &source_samples,
+            &compact_sources,
             &[1, 0],
             2,
             0,
