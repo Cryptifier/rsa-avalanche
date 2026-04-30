@@ -1,109 +1,117 @@
 {
-    "rsa_keypair" : {
-        "generate" : false,
-        "e" : 65537,
-        "keyfile" : "",
-        "p" : "3030152311446024058741",
-        "q" : "4262327550688715209573"
-    },
-    "padding" : "PKCS1v15",
-    "polynomial_fields" : {
-        "fields" : [
-            { "prime" : 251, "seed" : 1 },
-            { "prime" : 257, "seed" : 2 },
-            { "prime" : 263, "seed" : 3 },
-            { "prime" : 269, "seed" : 4 },
-            { "prime" : 271, "seed" : 5 },
-            { "prime" : 277, "seed" : 6 },
-            { "prime" : 281, "seed" : 7 },
-            { "prime" : 283, "seed" : 8 },
-            { "prime" : 293, "seed" : 9 },
-            { "prime" : 307, "seed" : 10 },
-            { "prime" : 311, "seed" : 11 },
-            { "prime" : 313, "seed" : 12 },
-            { "prime" : 317, "seed" : 13 },
-            { "prime" : 331, "seed" : 14 },
-            { "prime" : 337, "seed" : 15 },
-            { "prime" : 349, "seed" : 16 }
-        ]
-    },
-    "engine" : {
-        "r_stress_test_enable" : false,
-        "r_stress_start" : "12915501679859480667750241440843466838812811",
-        "r_stress_end" : "12915501679859480667750241440843466838812814",
-        "r_use_list_enable" : false,
-        "r_use_list" : [],
-        "max_overlap_min" : 0.005,
-        "override_best_r" : "",
-        "test_iterations" : 4,
-        "alt_iterations" : 4,
-        "analysis_tests_iterations" : 1000,
-        "oracle_screen_iterations" : 500,
-        "analysis_tests_window" : 32,
-        "analysis_tests_stride" : 8,
-        "analysis_batch_enable" : true,
-        "analysis_batch_messages" : 50,
-        "analysis_batch_candidates" : 50,
-        "analysis_batch_batches" : 10,
-        "avalanche_combination_mixed_r_candidates" : 1,
-        "avalanche_combination_recursion_depth" : 1,
-        "avalanche_combination_recursive_group_size" : 8,
-        "avalanche_combination_recursive_resample_count" : 0,
-        "avalanche_combination_hamming_distance_prune" : false,
-        "avalanche_combination_hamming_distance_keep_percentile" : 95.0,
-        "avalanche_combination_hamming_distance_outlier_preference_pct" : 0.0,
-        "same_r_batch" : false,
-        "ciphertext_modify" : false,
-        "process_min_count" : 25,
-        "process_count" : 25,
-        "process_scale" : 12,
-        "process_max_best_attempts" : 500,
-        "process_min_factor" : 117,
-        "rabin_exponent" : 3,
-        "min_message_trials" : 100,
-        "overlap_report_threshold" : 51,
-        "entropy_report_threshold" : 0.99,
-        "oracle_accuracy_threshold" : 51.0,
-        "use_hamming_distance" : false,
-        "avalanche_use_top_beam" : true,
-        "avalanche_statistics_collection" : true,
-        "avalanche_random_chacha20_inputs" : false,
-        "avalanche_beam_top_k" : 100,
-        "r_candidate_mode" : "small_primes",
-        "r_candidate_small_primes" : [3, 5, 7, 11, 13, 17],
-        "r_candidate_small_prime_factors" : 3,
-        "r_candidate_max_factors" : 6,
-        "r_candidate_bit_length" : 192,
-        "r_candidate_target_exponent_minimum" : 0.8,
-        "r_candidate_target_exponent" : 2.005,
-        "r_candidate_retarget_partition_count" : 3,
-        "r_candidate_retarget_minimum_exponent" : 0.45,
-        "avalanche_fitness_scoring_pass" : true,
-        "avalanche_fitness_shift_bytes" : 4,
-        "avalanche_fitness_bit_width" : 32,
-        "avalanche_fitness_r_candidate_limit" : 16,
-        "avalanche_fitness_cx_candidate_limit" : 8,
-        "combiner_enable" : true,
-        "combiner_k_oracles" : 5,
-        "combiner_match_probability" : 0.75,
-        "combiner_tie_breaker" : true,
-        "base_convert" : true,
-        "invert_bits" : false,
-        "use_rs_decrypt" : true,
-        "enciphered_export_enable" : false,
-        "enciphered_export_iterations" : 10000,
-        "enciphered_export_bins" : 128,
-        "enciphered_export_window" : 128,
-        "enciphered_export_stride" : 1,
-        "enciphered_export_output_csv" : "enciphered_decryption_bins.csv",
-        "enciphered_export_ramp_length" : 3,
-        "enciphered_export_ramp_step_pct" : 0.05,
-        "enciphered_export_ramp_tolerances" : [0.005, 0.01, 0.02],
-        "enciphered_export_ramp_csv" : "enciphered_ramps.csv",
-        "message" : {
-            "is_random" : true,
-            "bits" : 64,
-            "fixed_message" : "HeloWrld1234"
-        }
+  // Small-batch beam config for replaying a precomputed r-candidate grid and
+  // then sampling large avalanche combinations from the scored batch.
+  "rsa_keypair": {
+    "generate": false,
+    "e": 65537,
+    "keyfile": "keys/small_batch_current_keypair.yaml"
+  },
+  "polynomial_fields": {
+    // Coordinate-generation fields shared with the other small/medium configs so
+    // batch outputs stay comparable across runs.
+    "fields": [
+      { "prime": 4099, "seed": 1 },
+      { "prime": 4111, "seed": 2 },
+      { "prime": 4127, "seed": 3 },
+      { "prime": 4129, "seed": 4 },
+      { "prime": 4133, "seed": 5 },
+      { "prime": 4139, "seed": 6 },
+      { "prime": 4153, "seed": 7 },
+      { "prime": 4157, "seed": 8 },
+      { "prime": 4159, "seed": 9 },
+      { "prime": 4177, "seed": 10 },
+      { "prime": 4201, "seed": 11 },
+      { "prime": 4211, "seed": 12 },
+      { "prime": 4217, "seed": 13 },
+      { "prime": 4219, "seed": 14 },
+      { "prime": 4229, "seed": 15 },
+      { "prime": 4231, "seed": 16 }
+    ]
+  },
+  "engine": {
+    "override_best_r": "",
+    "process_min_count": 50,
+    "process_count": 50,
+    "process_scale": 4,
+    "process_max_best_attempts": 20,
+    "process_min_factor": 3,
+    "rabin_exponent": 3,
+    "min_message_trials": 50,
+    "overlap_report_threshold": 49.0,
+    "entropy_report_threshold": 0.99,
+    "oracle_accuracy_threshold": 51.0,
+    "use_hamming_distance": true,
+    "avalanche_random_chacha20_inputs": true,
+    // Generate a single cheap raw seed candidate per batch and let retargeting
+    // randomize the actual speculative r-candidate pool.
+    "reuse_retargeted_r_candidates": false,
+    "reuse_retargeted_r_candidates_path_prefix": "data/rgen_retargeted",
+    // Build speculative r values from products of these small primes, then
+    // retarget the product with the exponent window below.
+    "r_candidate_mode": "small_primes",
+    "r_candidate_small_primes": [117, 1009, 1103, 1913],
+    "r_candidate_small_prime_factors": 3,
+    "r_candidate_bit_length": 510,
+    "r_candidate_random_power_window": true,
+    "r_candidate_target_exponent_minimum": 0.750, // Lower bound for sampled retarget exponents.
+    "r_candidate_target_exponent": 0.850, // Upper bound for sampled retarget exponents.
+    "r_candidate_retarget_partition_count": 3,
+    "r_candidate_retarget_minimum_exponent": 0.20,
+    // Beam search keeps a short candidate list and interprets per-bit
+    // probabilities above the threshold as bit 1.
+    "beam_bit_one_threshold": 0.5,
+    "combiner_k_oracles": 100,
+    "combiner_tie_breaker": true,
+    "base_convert": false,
+    "invert_bits": false,
+    "use_rs_decrypt": true,
+    "mirror_invert_candidates": false,
+    // Small-batch feature: score a large pool once, then draw many avalanche
+    // combinations from that scored batch to estimate per-bit agreement.
+    "analysis_batch_enable": true,
+    "analysis_batch_messages": 1000, // Number of ciphertext variants scored per batch before avalanche sampling.
+    "analysis_batch_candidates": 20000, // Number of r candidates scored in each batch before sampling combinations.
+    "analysis_batch_batches": 1, // Number of scored batches to run for the small-batch beam workflow.
+    // Search parameters.
+    "avalanche_beam_top_k": 6, // Number of top-scoring candidates to keep for beam search results.
+    "avalanche_use_top_beam": true, // Carry forward the prior tier's top beam-search bits between recursive Avalanche tiers.
+    "avalanche_probability_spread_exponent": 0.75, //0.45
+    // Fitness function parameters for scoring the avalanche effect of each candidate against the sampled batch of ciphertext variants.
+    "avalanche_fitness_scoring_pass": true,
+    "avalanche_fitness_shift_bytes": 8,
+    "avalanche_fitness_bit_width": 64,
+    "avalanche_fitness_r_candidate_limit": 500,
+    "avalanche_fitness_cx_candidate_limit": 1,
+    // Cap how many distinct r values can appear in one sampled avalanche input;
+    // each selected r still contributes all of its sampled c^x variants.
+    "avalanche_combination_mixed_r_candidates": 64,
+    "avalanche_combination_samples": 50000, // N: number of sampled combinations evaluated by avalanche per batch.
+    "avalanche_combination_size": 128, // Number of scored items taken in each sampled combination.
+    "avalanche_combination_pool_size": 100000, // Legacy compatibility field; runtime sampling now always uses the full batch-sized pool.
+    "avalanche_combination_recursion_depth": 1, // Run one recursive Avalanche tier on top of the sampled-input tier.
+    "avalanche_combination_recursive_group_size": 128, // Number of prior-tier sample outputs grouped into each recursive Avalanche call.
+    "avalanche_combination_recursive_resample_count": 50000, // 0 preserves one-pass regrouping; set >0 to resample prior-tier outputs to a target count.
+    // Hamming-distance pruning keeps a central percentile band of scored items
+    // before sampling, then optionally adds some tail outliers back in.
+    "avalanche_combination_hamming_distance_prune": true,
+    "avalanche_combination_hamming_distance_keep_percentile": 100.0,
+    "avalanche_combination_hamming_distance_outlier_preference_pct": 0.0,
+    // Majority-vote mode turns each sampled combination into per-bit frequencies
+    // for the beam, then smooths them before ranking plaintext hypotheses.
+    "avalanche_combination_majority_vote": true, // Use per-bit majority-vote probabilities from each sampled combination.
+    "avalanche_combination_sample_smoothing": true, // Apply Jeffreys smoothing to the sampled majority-vote probabilities before beam search.
+    "avalanche_combination_majority_vote_print": true, // Print a separate sampled-combination majority-vote summary alongside the beam output.
+    "avalanche_statistics_collection": false, // Collect recursive Avalanche tier statistics and other heavy analytics payloads.
+    // Allow batches to mix different r values while still perturbing the
+    // ciphertext for each sampled message variant.
+    "same_r_batch": false,
+    "ciphertext_modify": true,
+    "message": {
+      // Random 64-bit plaintexts are used for scoring; fixed_message only
+      // matters when is_random is set to false.
+      "is_random": false,
+      "bits": 128,
+      "fixed_message": "Mary had a little lamb, little lamb, little lamb."
     }
+  }
 }
