@@ -43,11 +43,8 @@
     "oracle_accuracy_threshold": 51.0,
     "use_hamming_distance": true,
     "avalanche_random_chacha20_inputs": true,
-    // Reuse a precomputed grid of scored r candidates so this config measures
-    // the small-batch avalanche pipeline instead of live r generation.
-    "reuse_r_candidates": true,
-    "reuse_r_candidates_path": "data/rgen_output.csv",
-    "reuse_r_candidates_append_only": false,
+    // Generate a single cheap raw seed candidate per batch and let retargeting
+    // randomize the actual speculative r-candidate pool.
     "reuse_retargeted_r_candidates": false,
     "reuse_retargeted_r_candidates_path_prefix": "data/rgen_retargeted",
     // Build speculative r values from products of these small primes, then
@@ -55,22 +52,15 @@
     "r_candidate_mode": "small_primes",
     "r_candidate_small_primes": [117, 1009, 1103, 1913],
     "r_candidate_small_prime_factors": 3,
-    "r_candidate_bit_length": 192,
+    "r_candidate_bit_length": 510,
     "r_candidate_random_power_window": true,
     "r_candidate_target_exponent_minimum": 0.750, // Lower bound for sampled retarget exponents.
     "r_candidate_target_exponent": 0.850, // Upper bound for sampled retarget exponents.
     "r_candidate_retarget_partition_count": 3,
     "r_candidate_retarget_minimum_exponent": 0.20,
-    "avalanche_fitness_scoring_pass": true,
-    "avalanche_fitness_shift_bytes": 4,
-    "avalanche_fitness_bit_width": 32,
-    "avalanche_fitness_r_candidate_limit": 200,
-    "avalanche_fitness_cx_candidate_limit": 10,
     // Beam search keeps a short candidate list and interprets per-bit
     // probabilities above the threshold as bit 1.
     "beam_bit_one_threshold": 0.5,
-    "avalanche_beam_top_k": 6,
-    "avalanche_probability_spread_exponent": 0.80, //0.45
     "combiner_k_oracles": 100,
     "combiner_tie_breaker": true,
     "base_convert": false,
@@ -83,6 +73,16 @@
     "analysis_batch_messages": 1000, // Number of ciphertext variants scored per batch before avalanche sampling.
     "analysis_batch_candidates": 20000, // Number of r candidates scored in each batch before sampling combinations.
     "analysis_batch_batches": 1, // Number of scored batches to run for the small-batch beam workflow.
+    // Search parameters.
+    "avalanche_beam_top_k": 6, // Number of top-scoring candidates to keep for beam search results.
+    "avalanche_use_top_beam": true, // Carry forward the prior tier's top beam-search bits between recursive Avalanche tiers.
+    "avalanche_probability_spread_exponent": 1.0, //0.45
+    // Fitness function parameters for scoring the avalanche effect of each candidate against the sampled batch of ciphertext variants.
+    "avalanche_fitness_scoring_pass": true,
+    "avalanche_fitness_shift_bytes": 8,
+    "avalanche_fitness_bit_width": 64,
+    "avalanche_fitness_r_candidate_limit": 600,
+    "avalanche_fitness_cx_candidate_limit": 4,
     // Cap how many distinct r values can appear in one sampled avalanche input;
     // each selected r still contributes all of its sampled c^x variants.
     "avalanche_combination_mixed_r_candidates": 64,
@@ -102,7 +102,6 @@
     "avalanche_combination_majority_vote": true, // Use per-bit majority-vote probabilities from each sampled combination.
     "avalanche_combination_sample_smoothing": true, // Apply Jeffreys smoothing to the sampled majority-vote probabilities before beam search.
     "avalanche_combination_majority_vote_print": true, // Print a separate sampled-combination majority-vote summary alongside the beam output.
-    "avalanche_use_top_beam": true, // Carry forward the prior tier's top beam-search bits between recursive Avalanche tiers.
     "avalanche_statistics_collection": false, // Collect recursive Avalanche tier statistics and other heavy analytics payloads.
     // Allow batches to mix different r values while still perturbing the
     // ciphertext for each sampled message variant.
@@ -111,9 +110,9 @@
     "message": {
       // Random 64-bit plaintexts are used for scoring; fixed_message only
       // matters when is_random is set to false.
-      "is_random": true,
+      "is_random": false,
       "bits": 128,
-      "fixed_message": "HeloWrld12345678"
+      "fixed_message": "Mary had a little lamb, little lamb, little lamb."
     }
   }
 }
