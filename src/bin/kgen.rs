@@ -11,6 +11,7 @@ use std::{
 use clap::{Parser, ValueEnum};
 use num_bigint::BigUint;
 use num_traits::One;
+use rsademo::config::{RsaKeyFileFormat, load_rsa_key_material_from_yaml_path};
 use rsademo::math::{choose_exponent, mod_inverse, random_prime_with_bits};
 use rsademo::rng::{RngChoice, RngMode};
 use serde::Serialize;
@@ -24,7 +25,7 @@ const MODULUS_MODE_ATTEMPT_LIMIT: usize = 10_000;
 #[derive(Parser, Debug)]
 #[command(
     name = "kgen",
-    about = "Generate RSA private keys in YAML format",
+    about = "Generate RSA private keys and emit matching public-key YAML",
     author,
     version
 )]
@@ -48,6 +49,14 @@ struct Args {
     /// YAML output path for the generated private key
     #[arg(short = 'o', long, default_value = DEFAULT_OUTPUT_PATH)]
     output: String,
+
+    /// Optional YAML output path for the public key corresponding to the generated or imported private key
+    #[arg(long)]
+    public_output: Option<String>,
+
+    /// Existing rsa-private-key-v1 YAML file to convert into rsa-public-key-v1 output
+    #[arg(long)]
+    input_private_key: Option<String>,
 
     /// Overwrite the output path if it already exists
     #[arg(long)]
@@ -100,6 +109,15 @@ struct RsaPrivateKeyFile {
 }
 
 #[derive(Debug, Serialize)]
+struct RsaPublicKeyFile {
+    format: String,
+    algorithm: String,
+    public_exponent: String,
+    modulus: String,
+    bit_lengths: RsaPublicKeyBitLengths,
+}
+
+#[derive(Debug, Serialize)]
 struct RsaPrimePair {
     p: String,
     q: String,
@@ -111,6 +129,11 @@ struct RsaKeyBitLengths {
     requested_modulus_bits: u32,
     prime_p_bits: u64,
     prime_q_bits: u64,
+    modulus_bits: u64,
+}
+
+#[derive(Debug, Serialize)]
+struct RsaPublicKeyBitLengths {
     modulus_bits: u64,
 }
 
@@ -138,43 +161,70 @@ fn main() -> Result<(), Box<dyn Error>> {
     run_kgen(args)
 }
 
-/// Runs the RSA private-key generation flow.
+/// Runs the RSA private-key generation or public-key conversion flow.
 ///
 /// # Parameters
-/// - `args`: Parsed CLI arguments controlling sizing, RNG behavior, and output.
+/// - `args`: Parsed CLI arguments controlling sizing, RNG behavior, outputs, and optional private-key input.
 ///
 /// # Returns
 /// - `Result<(), Box<dyn Error>>`: `Ok(())` on success or an error on failure.
 ///
 /// # Expected Output
-/// - Writes a YAML private-key file to disk and prints a summary to stdout.
+/// - Writes generated private/public YAML files or converts a private YAML into public-key YAML and prints a summary to stdout.
 fn run_kgen(args: Args) -> Result<(), Box<dyn Error>> {
     let rng_mode = if args.crypto_rng {
         KeyRngMode::Crypto
     } else {
         KeyRngMode::Standard
     };
-    let mut rng = build_rng(&args, rng_mode)?;
-    let key = generate_private_key(&args, &mut rng)?;
+    let (key, generated_new_private_key) =
+        if let Some(input_private_key) = args.input_private_key.as_deref() {
+            if args.public_output.is_none() {
+                return Err("--input-private-key requires --public-output".into());
+            }
+            (load_private_key_from_yaml(input_private_key)?, false)
+        } else {
+            let mut rng = build_rng(&args, rng_mode)?;
+            (generate_private_key(&args, &mut rng)?, true)
+        };
     validate_generated_key(&key)?;
 
-    let document = build_private_key_document(&args, &key, rng_mode)?;
-    write_private_key_file(&args.output, &document, args.force)?;
+    if generated_new_private_key {
+        let document = build_private_key_document(&args, &key, rng_mode)?;
+        write_yaml_file(&args.output, &document, args.force)?;
+    }
+    if let Some(public_output) = args.public_output.as_deref() {
+        let public_document = build_public_key_document(&key);
+        write_yaml_file(public_output, &public_document, args.force)?;
+    }
 
-    println!(
-        "Generated RSA private key: mode {} p-bits {} q-bits {} modulus-bits {} e {} output {}",
-        size_mode_label(args.size_mode),
-        key.p.bits(),
-        key.q.bits(),
-        key.n.bits(),
-        key.e,
-        args.output
-    );
-    if key.e != BigUint::from(args.public_exponent) {
+    if generated_new_private_key {
         println!(
-            "Adjusted public exponent from {} to {} to satisfy odd coprime RSA requirements",
-            args.public_exponent, key.e
+            "Generated RSA private key: mode {} p-bits {} q-bits {} modulus-bits {} e {} output {}",
+            size_mode_label(args.size_mode),
+            key.p.bits(),
+            key.q.bits(),
+            key.n.bits(),
+            key.e,
+            args.output
         );
+        if key.e != BigUint::from(args.public_exponent) {
+            println!(
+                "Adjusted public exponent from {} to {} to satisfy odd coprime RSA requirements",
+                args.public_exponent, key.e
+            );
+        }
+    } else {
+        println!(
+            "Loaded RSA private key: p-bits {} q-bits {} modulus-bits {} e {}",
+            key.p.bits(),
+            key.q.bits(),
+            key.n.bits(),
+            key.e,
+        );
+    }
+    if let Some(public_output) = args.public_output.as_deref() {
+        println!("Wrote RSA public key output {}", public_output);
     }
 
     Ok(())
@@ -313,6 +363,36 @@ fn validate_generated_key(key: &GeneratedPrivateKey) -> Result<(), Box<dyn Error
     Ok(())
 }
 
+/// Loads a private RSA YAML document for public-key conversion or validation.
+///
+/// # Parameters
+/// - `path`: Filesystem path to the rsa-private-key-v1 YAML file.
+///
+/// # Returns
+/// - `Result<GeneratedPrivateKey, Box<dyn Error>>`: Private key material loaded from the YAML document.
+///
+/// # Expected Output
+/// - Reads the YAML file from disk and returns its parsed private key material.
+fn load_private_key_from_yaml(path: &str) -> Result<GeneratedPrivateKey, Box<dyn Error>> {
+    let material = load_rsa_key_material_from_yaml_path(Path::new(path))?;
+    if material.format != RsaKeyFileFormat::PrivateKeyV1 {
+        return Err(format!("{path} is not an rsa-private-key-v1 YAML file").into());
+    }
+
+    Ok(GeneratedPrivateKey {
+        p: material.p.ok_or("private key YAML is missing prime p")?,
+        q: material.q.ok_or("private key YAML is missing prime q")?,
+        n: material.modulus,
+        phi: material
+            .totient
+            .ok_or("private key YAML is missing totient")?,
+        e: BigUint::from(material.public_exponent),
+        d: material
+            .private_exponent
+            .ok_or("private key YAML is missing private_exponent")?,
+    })
+}
+
 /// Builds the serialized YAML document for a generated private key.
 ///
 /// # Parameters
@@ -358,7 +438,29 @@ fn build_private_key_document(
     })
 }
 
-/// Writes the private-key YAML document to disk.
+/// Builds the serialized YAML document for the public half of an RSA keypair.
+///
+/// # Parameters
+/// - `key`: Generated or imported RSA private key material.
+///
+/// # Returns
+/// - `RsaPublicKeyFile`: Serializable public-key YAML document.
+///
+/// # Expected Output
+/// - Returns the structured public-key YAML payload; no stdout/stderr output.
+fn build_public_key_document(key: &GeneratedPrivateKey) -> RsaPublicKeyFile {
+    RsaPublicKeyFile {
+        format: "rsa-public-key-v1".to_string(),
+        algorithm: "RSA".to_string(),
+        public_exponent: key.e.to_string(),
+        modulus: key.n.to_string(),
+        bit_lengths: RsaPublicKeyBitLengths {
+            modulus_bits: key.n.bits(),
+        },
+    }
+}
+
+/// Writes a YAML document to disk.
 ///
 /// # Parameters
 /// - `path`: Output path for the YAML file.
@@ -370,9 +472,9 @@ fn build_private_key_document(
 ///
 /// # Expected Output
 /// - Creates parent directories as needed and writes the YAML file at `path`.
-fn write_private_key_file(
+fn write_yaml_file<T: Serialize>(
     path: &str,
-    document: &RsaPrivateKeyFile,
+    document: &T,
     force: bool,
 ) -> Result<(), Box<dyn Error>> {
     let output_path = Path::new(path);
@@ -453,6 +555,8 @@ mod tests {
             modulus_bits: DEFAULT_MODULUS_BITS,
             public_exponent: DEFAULT_PUBLIC_EXPONENT,
             output: DEFAULT_OUTPUT_PATH.to_string(),
+            public_output: None,
+            input_private_key: None,
             force: false,
             seed: None,
             crypto_rng: false,
@@ -467,6 +571,8 @@ mod tests {
         assert_eq!(args.prime_bits, DEFAULT_PRIME_BITS);
         assert_eq!(args.modulus_bits, DEFAULT_MODULUS_BITS);
         assert_eq!(args.output, DEFAULT_OUTPUT_PATH);
+        assert!(args.public_output.is_none());
+        assert!(args.input_private_key.is_none());
         assert_eq!(args.public_exponent, DEFAULT_PUBLIC_EXPONENT);
     }
 
@@ -513,7 +619,30 @@ mod tests {
     }
 
     #[test]
-    fn test_write_private_key_file_refuses_overwrite_without_force() {
+    fn test_build_public_key_document_omits_private_fields() {
+        let key = GeneratedPrivateKey {
+            p: BigUint::from(61u8),
+            q: BigUint::from(53u8),
+            n: BigUint::from(3233u32),
+            phi: BigUint::from(3120u32),
+            e: BigUint::from(17u8),
+            d: BigUint::from(2753u32),
+        };
+
+        let document = build_public_key_document(&key);
+        let yaml = serde_yaml::to_string(&document).expect("serialize public key document");
+
+        assert_eq!(document.format, "rsa-public-key-v1");
+        assert_eq!(document.public_exponent, "17");
+        assert_eq!(document.modulus, "3233");
+        assert!(yaml.contains("format: rsa-public-key-v1"));
+        assert!(!yaml.contains("private_exponent"));
+        assert!(!yaml.contains("totient"));
+        assert!(!yaml.contains("primes:"));
+    }
+
+    #[test]
+    fn test_write_yaml_file_refuses_overwrite_without_force() {
         let path = temp_path("overwrite_guard");
         let document = RsaPrivateKeyFile {
             format: "rsa-private-key-v1".to_string(),
@@ -542,9 +671,9 @@ mod tests {
             },
         };
 
-        write_private_key_file(path.to_str().expect("utf8 path"), &document, false)
+        write_yaml_file(path.to_str().expect("utf8 path"), &document, false)
             .expect("initial write");
-        let err = write_private_key_file(path.to_str().expect("utf8 path"), &document, false)
+        let err = write_yaml_file(path.to_str().expect("utf8 path"), &document, false)
             .expect_err("overwrite should fail");
         assert!(err.to_string().contains("--force"));
 

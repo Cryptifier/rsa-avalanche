@@ -12,7 +12,7 @@ use std::sync::{
 use std::time::{Duration, Instant, SystemTime};
 
 use num_bigint::BigUint;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
 use crate::logs::{LogError, LogWriter, write_session_start};
@@ -231,11 +231,11 @@ pub struct RCandidateBatchAnalytics {
     pub generated_count: usize,
     /// Duration in milliseconds.
     pub duration_ms: u128,
-    /// Reuse file path for candidates.
+    /// Candidate cache path when a keyed retargeted cache is enabled.
     pub reuse_path: String,
-    /// Whether reuse loading is enabled.
+    /// Whether candidate cache loading is enabled.
     pub reuse_enabled: bool,
-    /// Whether reuse append-only mode is enabled.
+    /// Reserved legacy field; always `false` now that base reuse files are removed.
     pub reuse_append_only: bool,
     /// Minimum factor used for candidate screening.
     pub min_factor: BigUint,
@@ -387,7 +387,7 @@ pub struct AvalancheCombinationSampleInput {
 }
 
 /// Beam-search candidate produced from an avalanche combination sample.
-#[derive(Debug, Serialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
 pub struct AvalancheCombinationBeamResult {
     /// One-based beam rank in descending score order.
     pub rank: usize,
@@ -894,7 +894,7 @@ pub fn generate_r_candidates_with_analytics(
     let reuse_path = if settings.reuse_retargeted_r_candidates {
         settings.reuse_retargeted_r_candidates_path.clone()
     } else {
-        settings.reuse_r_candidates_path.clone()
+        String::new()
     };
     let duration = start.elapsed();
 
@@ -929,9 +929,7 @@ pub fn generate_r_candidates_with_analytics(
                 .elapsed()
                 .as_millis()
                 .min(u128::from(u64::MAX)) as u64;
-            let interval_ms = Duration::from_secs(5)
-                .as_millis()
-                .min(u128::from(u64::MAX)) as u64;
+            let interval_ms = Duration::from_secs(5).as_millis().min(u128::from(u64::MAX)) as u64;
             loop {
                 let scheduled_ms = candidate_entry_next_log_at_ms.load(Ordering::Relaxed);
                 if done != candidate_entry_total && elapsed_ms < scheduled_ms {
@@ -972,8 +970,8 @@ pub fn generate_r_candidates_with_analytics(
             generated_count: candidates.len(),
             duration_ms: duration.as_millis(),
             reuse_path,
-            reuse_enabled: settings.reuse_r_candidates || settings.reuse_retargeted_r_candidates,
-            reuse_append_only: settings.reuse_r_candidates_append_only,
+            reuse_enabled: settings.reuse_retargeted_r_candidates,
+            reuse_append_only: false,
             min_factor: settings.process_min_factor.clone(),
             process_scale: settings.process_scale,
             small_prime_factors: settings.small_prime_factors_per_candidate,

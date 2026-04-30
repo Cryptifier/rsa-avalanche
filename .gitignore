@@ -1,6 +1,9 @@
 *.log
 *.logs
 *.lock
+*.aux
+*.out
+*.pdf
 !Cargo.lock
 target/
 images/
@@ -20,3 +23,4 @@ old-logs/
 *.wasm
 config/keys/private_key.yaml
 inventory.ini
+*.csv

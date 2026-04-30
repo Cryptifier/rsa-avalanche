@@ -2,8 +2,11 @@
 /// SPDX-License-Identifier: EPL-2.0
 /// Copyright (c) 2025 Nicholas LaRoche <nlaroche@cryptifier.dev>
 // Configuration schema and loader for config/rsa_config.json.
-
-use std::{error::Error, fs, path::Path};
+use std::{
+    error::Error,
+    fs,
+    path::{Path, PathBuf},
+};
 
 use bigdecimal::BigDecimal;
 use num_bigint::BigUint;
@@ -26,6 +29,9 @@ pub struct Config {
     /// Verification configuration for demo inputs.
     #[serde(default)]
     pub verify: VerifyConfig,
+    /// Source configuration path recorded by the loader for resolving relative keyfile references.
+    #[serde(skip)]
+    pub source_path: Option<PathBuf>,
 }
 
 /// RSA keypair configuration values.
@@ -34,6 +40,12 @@ pub struct KeyConfig {
     /// Whether to generate keys instead of using provided values.
     #[serde(default = "default_generate")]
     pub generate: bool,
+    /// Relative or absolute YAML keypair path used when `p`/`q` are not configured.
+    #[serde(default = "default_keyfile")]
+    pub keyfile: String,
+    /// Optional private-key YAML path used only for verification peeks when the main keyfile is public.
+    #[serde(default = "default_keyfile")]
+    pub private_keyfile: String,
     /// RSA prime p (required when not generating).
     #[serde(default, deserialize_with = "deserialize_biguint_option")]
     pub p: Option<BigUint>,
@@ -43,6 +55,37 @@ pub struct KeyConfig {
     /// RSA public exponent.
     #[serde(default = "default_e")]
     pub e: u64,
+    /// RSA modulus hydrated from a YAML keyfile when available.
+    #[serde(skip)]
+    pub modulus: Option<BigUint>,
+}
+
+/// Supported RSA YAML keyfile formats.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RsaKeyFileFormat {
+    /// `rsa-private-key-v1` with modulus, exponent, primes, totient, and private exponent.
+    PrivateKeyV1,
+    /// `rsa-public-key-v1` with modulus and public exponent only.
+    PublicKeyV1,
+}
+
+/// Parsed RSA YAML key material loaded from a public or private keyfile.
+#[derive(Debug, Clone)]
+pub struct RsaKeyMaterial {
+    /// Parsed YAML format identifier.
+    pub format: RsaKeyFileFormat,
+    /// RSA modulus `n`.
+    pub modulus: BigUint,
+    /// RSA public exponent `e`.
+    pub public_exponent: u64,
+    /// RSA private exponent `d` when the keyfile is private.
+    pub private_exponent: Option<BigUint>,
+    /// Euler totient `phi(n)` when the keyfile is private.
+    pub totient: Option<BigUint>,
+    /// Prime `p` when the keyfile is private.
+    pub p: Option<BigUint>,
+    /// Prime `q` when the keyfile is private.
+    pub q: Option<BigUint>,
 }
 
 /// Message configuration for generating plaintexts.
@@ -172,6 +215,12 @@ pub struct EngineConfig {
     /// Maximum number of `c^x` inputs retained per r-candidate group by the fitness pass; `0` keeps every input.
     #[serde(default = "default_avalanche_fitness_cx_candidate_limit")]
     pub avalanche_fitness_cx_candidate_limit: usize,
+    /// Whether the fitness pass drops candidates whose normalized fitness falls below the configured threshold.
+    #[serde(default = "default_avalanche_fitness_use_threshold")]
+    pub avalanche_fitness_use_threshold: bool,
+    /// Minimum normalized trailing-zero fitness retained by the fitness pass when thresholding is enabled.
+    #[serde(default = "default_avalanche_fitness_threshold")]
+    pub avalanche_fitness_threshold: f64,
     #[serde(default = "default_same_r_batch")]
     pub same_r_batch: bool,
     #[serde(default = "default_ciphertext_modify")]
@@ -187,6 +236,15 @@ pub struct EngineConfig {
     /// Exponent used to spread normalized avalanche beam probabilities.
     #[serde(default = "default_avalanche_probability_spread_exponent")]
     pub avalanche_probability_spread_exponent: f64,
+    /// Advisory SQLite soft heap limit in bytes used by the Avalanche cache database.
+    #[serde(default = "default_sqlite_soft_heap")]
+    pub sqlite_soft_heap: u64,
+    /// Hard SQLite heap limit in bytes used by the Avalanche cache database.
+    #[serde(default = "default_sqlite_hard_heap")]
+    pub sqlite_hard_heap: u64,
+    /// SQLite mmap size in bytes used by the Avalanche cache database.
+    #[serde(default = "default_sqlite_mmap_size")]
+    pub sqlite_mmap_size: u64,
     /// Whether to sort avalanche candidates by Hamming distance.
     #[serde(default = "default_use_hamming_distance")]
     pub use_hamming_distance: bool,
@@ -195,12 +253,6 @@ pub struct EngineConfig {
     pub mirror_invert_candidates: bool,
     #[serde(default)]
     pub override_best_r: Option<String>,
-    #[serde(default = "default_reuse_r_candidates_path")]
-    pub reuse_r_candidates_path: String,
-    #[serde(default = "default_reuse_r_candidates")]
-    pub reuse_r_candidates: bool,
-    #[serde(default = "default_reuse_r_candidates_append_only")]
-    pub reuse_r_candidates_append_only: bool,
     #[serde(default = "default_reuse_retargeted_r_candidates")]
     pub reuse_retargeted_r_candidates: bool,
     #[serde(default = "default_reuse_retargeted_r_candidates_path_prefix")]
@@ -284,6 +336,7 @@ impl Default for Config {
             engine: EngineConfig::default(),
             polynomial_fields: PolynomialFieldsConfig::default(),
             verify: VerifyConfig::default(),
+            source_path: None,
         }
     }
 }
@@ -292,9 +345,12 @@ impl Default for KeyConfig {
     fn default() -> Self {
         Self {
             generate: default_generate(),
+            keyfile: default_keyfile(),
+            private_keyfile: default_keyfile(),
             p: None,
             q: None,
             e: default_e(),
+            modulus: None,
         }
     }
 }
@@ -354,18 +410,20 @@ impl Default for EngineConfig {
             avalanche_fitness_bit_width: default_avalanche_fitness_bit_width(),
             avalanche_fitness_r_candidate_limit: default_avalanche_fitness_r_candidate_limit(),
             avalanche_fitness_cx_candidate_limit: default_avalanche_fitness_cx_candidate_limit(),
+            avalanche_fitness_use_threshold: default_avalanche_fitness_use_threshold(),
+            avalanche_fitness_threshold: default_avalanche_fitness_threshold(),
             same_r_batch: default_same_r_batch(),
             ciphertext_modify: default_ciphertext_modify(),
             oracle_accuracy_threshold: default_oracle_accuracy_threshold(),
             beam_bit_one_threshold: default_beam_bit_one_threshold(),
             avalanche_beam_top_k: default_avalanche_beam_top_k(),
             avalanche_probability_spread_exponent: default_avalanche_probability_spread_exponent(),
+            sqlite_soft_heap: default_sqlite_soft_heap(),
+            sqlite_hard_heap: default_sqlite_hard_heap(),
+            sqlite_mmap_size: default_sqlite_mmap_size(),
             use_hamming_distance: default_use_hamming_distance(),
             mirror_invert_candidates: default_mirror_invert_candidates(),
             override_best_r: None,
-            reuse_r_candidates_path: default_reuse_r_candidates_path(),
-            reuse_r_candidates: default_reuse_r_candidates(),
-            reuse_r_candidates_append_only: default_reuse_r_candidates_append_only(),
             reuse_retargeted_r_candidates: default_reuse_retargeted_r_candidates(),
             reuse_retargeted_r_candidates_path_prefix:
                 default_reuse_retargeted_r_candidates_path_prefix(),
@@ -404,7 +462,7 @@ pub fn load_config(path: &str) -> Result<Config, Box<dyn Error>> {
     }
 
     let raw = fs::read_to_string(cfg_path)?;
-    let config = match serde_json::from_str(&raw) {
+    let mut config: Config = match serde_json::from_str(&raw) {
         Ok(cfg) => cfg,
         Err(json_err) => match json5::from_str(&raw) {
             Ok(cfg) => cfg,
@@ -417,7 +475,240 @@ pub fn load_config(path: &str) -> Result<Config, Box<dyn Error>> {
         },
     };
 
+    config.source_path = Some(cfg_path.to_path_buf());
+    hydrate_keypair_from_keyfile(cfg_path, &mut config.rsa_keypair)?;
     Ok(config)
+}
+
+#[derive(Debug, Deserialize)]
+struct RsaKeyYamlEnvelope {
+    format: String,
+    algorithm: String,
+    public_exponent: String,
+    modulus: String,
+    #[serde(default)]
+    private_exponent: Option<String>,
+    #[serde(default)]
+    totient: Option<String>,
+    #[serde(default)]
+    primes: Option<RsaPrivateKeyYamlPrimes>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RsaPrivateKeyYamlPrimes {
+    p: String,
+    q: String,
+}
+
+/// Resolves a keyfile path relative to the configuration file that references it.
+///
+/// # Parameters
+/// - `config_path`: Path to the JSON/JSON5 configuration file.
+/// - `keyfile`: Configured keyfile string, which may be relative or absolute.
+///
+/// # Returns
+/// - `PathBuf`: Resolved filesystem path to the requested keyfile.
+///
+/// # Expected Output
+/// - Returns a path value without touching the filesystem.
+pub fn resolve_keyfile_path(config_path: &Path, keyfile: &str) -> PathBuf {
+    let keyfile_path = Path::new(keyfile);
+    if keyfile_path.is_absolute() {
+        return keyfile_path.to_path_buf();
+    }
+
+    config_path
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .join(keyfile_path)
+}
+
+/// Parses one decimal bigint field from an RSA keyfile.
+///
+/// # Parameters
+/// - `field_name`: Human-readable field label for error reporting.
+/// - `raw`: Raw decimal field value from the YAML file.
+/// - `path`: Resolved keyfile path used for diagnostics.
+///
+/// # Returns
+/// - `Result<BigUint, Box<dyn Error>>`: Parsed bigint value.
+///
+/// # Expected Output
+/// - Returns a parsed bigint or an error; no stdout/stderr output.
+fn parse_keyfile_biguint(
+    field_name: &str,
+    raw: &str,
+    path: &Path,
+) -> Result<BigUint, Box<dyn Error>> {
+    raw.trim().parse::<BigUint>().map_err(|err| {
+        format!(
+            "failed to parse {field_name} in keyfile {}: {err}",
+            path.display()
+        )
+        .into()
+    })
+}
+
+/// Loads RSA key material from a resolved YAML keyfile path.
+///
+/// # Parameters
+/// - `resolved_path`: Filesystem path to the YAML keyfile.
+///
+/// # Returns
+/// - `Result<RsaKeyMaterial, Box<dyn Error>>`: Parsed RSA key material from the requested YAML file.
+///
+/// # Expected Output
+/// - Reads and deserializes the YAML file from disk; no stdout/stderr output on success.
+pub fn load_rsa_key_material_from_yaml_path(
+    resolved_path: &Path,
+) -> Result<RsaKeyMaterial, Box<dyn Error>> {
+    let raw = fs::read_to_string(&resolved_path)?;
+    let parsed: RsaKeyYamlEnvelope = serde_yaml::from_str(&raw).map_err(|err| {
+        format!(
+            "failed to parse RSA keyfile {}: {err}",
+            resolved_path.display()
+        )
+    })?;
+
+    if parsed.algorithm.trim() != "RSA" {
+        return Err(format!(
+            "unsupported key algorithm {} in {}",
+            parsed.algorithm,
+            resolved_path.display()
+        )
+        .into());
+    }
+
+    let modulus = parse_keyfile_biguint("modulus", &parsed.modulus, resolved_path)?;
+    let public_exponent = parsed
+        .public_exponent
+        .trim()
+        .parse::<u64>()
+        .map_err(|err| {
+            format!(
+                "failed to parse public_exponent in keyfile {}: {err}",
+                resolved_path.display()
+            )
+        })?;
+
+    match parsed.format.trim() {
+        "rsa-private-key-v1" => {
+            let private_exponent_raw = parsed.private_exponent.as_deref().ok_or_else(|| {
+                format!(
+                    "rsa-private-key-v1 file {} is missing private_exponent",
+                    resolved_path.display()
+                )
+            })?;
+            let totient_raw = parsed.totient.as_deref().ok_or_else(|| {
+                format!(
+                    "rsa-private-key-v1 file {} is missing totient",
+                    resolved_path.display()
+                )
+            })?;
+            let primes = parsed.primes.ok_or_else(|| {
+                format!(
+                    "rsa-private-key-v1 file {} is missing primes",
+                    resolved_path.display()
+                )
+            })?;
+            let private_exponent =
+                parse_keyfile_biguint("private_exponent", private_exponent_raw, resolved_path)?;
+            let totient = parse_keyfile_biguint("totient", totient_raw, resolved_path)?;
+            let p = parse_keyfile_biguint("primes.p", &primes.p, resolved_path)?;
+            let q = parse_keyfile_biguint("primes.q", &primes.q, resolved_path)?;
+            Ok(RsaKeyMaterial {
+                format: RsaKeyFileFormat::PrivateKeyV1,
+                modulus,
+                public_exponent,
+                private_exponent: Some(private_exponent),
+                totient: Some(totient),
+                p: Some(p),
+                q: Some(q),
+            })
+        }
+        "rsa-public-key-v1" => {
+            if parsed.private_exponent.is_some()
+                || parsed.totient.is_some()
+                || parsed.primes.is_some()
+            {
+                return Err(format!(
+                    "rsa-public-key-v1 file {} must not include private_exponent, totient, or primes",
+                    resolved_path.display()
+                )
+                .into());
+            }
+            Ok(RsaKeyMaterial {
+                format: RsaKeyFileFormat::PublicKeyV1,
+                modulus,
+                public_exponent,
+                private_exponent: None,
+                totient: None,
+                p: None,
+                q: None,
+            })
+        }
+        other => Err(format!(
+            "unsupported RSA keyfile format {other} in {}",
+            resolved_path.display()
+        )
+        .into()),
+    }
+}
+
+/// Loads RSA key material from a configuration-relative YAML keyfile path.
+///
+/// # Parameters
+/// - `config_path`: Path to the JSON/JSON5 configuration file requesting the key.
+/// - `keyfile`: Configured YAML keyfile path, relative to `config_path` when not absolute.
+///
+/// # Returns
+/// - `Result<RsaKeyMaterial, Box<dyn Error>>`: Parsed RSA key material from the requested YAML file.
+///
+/// # Expected Output
+/// - Reads and deserializes the YAML file from disk; no stdout/stderr output on success.
+pub fn load_rsa_key_material_from_config_keyfile(
+    config_path: &Path,
+    keyfile: &str,
+) -> Result<RsaKeyMaterial, Box<dyn Error>> {
+    let resolved_path = resolve_keyfile_path(config_path, keyfile);
+    load_rsa_key_material_from_yaml_path(&resolved_path)
+}
+
+/// Hydrates missing inline RSA key material from a configured YAML keyfile.
+///
+/// # Parameters
+/// - `config_path`: Path to the JSON/JSON5 configuration file.
+/// - `key_config`: Mutable RSA keypair configuration to backfill.
+///
+/// # Returns
+/// - `Result<(), Box<dyn Error>>`: `Ok(())` when hydration succeeds or is unnecessary.
+///
+/// # Expected Output
+/// - Reads the configured YAML keyfile when inline primes are absent; no stdout/stderr output on success.
+fn hydrate_keypair_from_keyfile(
+    config_path: &Path,
+    key_config: &mut KeyConfig,
+) -> Result<(), Box<dyn Error>> {
+    if key_config.generate {
+        return Ok(());
+    }
+
+    if let (Some(p), Some(q)) = (&key_config.p, &key_config.q) {
+        key_config.modulus = Some(p * q);
+        return Ok(());
+    }
+
+    let keyfile = key_config.keyfile.trim();
+    if keyfile.is_empty() {
+        return Ok(());
+    }
+
+    let material = load_rsa_key_material_from_config_keyfile(config_path, keyfile)?;
+    key_config.modulus = Some(material.modulus.clone());
+    key_config.e = material.public_exponent;
+    key_config.p = material.p;
+    key_config.q = material.q;
+    Ok(())
 }
 
 /// Deserializes an optional `BigUint` from a string or number JSON value.
@@ -523,6 +814,20 @@ where
 /// - Returns a constant default value; no side effects.
 fn default_generate() -> bool {
     true
+}
+
+/// Default keyfile path.
+///
+/// # Parameters
+/// - None.
+///
+/// # Returns
+/// - `String`: Empty string, indicating no YAML keyfile is configured.
+///
+/// # Expected Output
+/// - Returns a constant default value; no side effects.
+fn default_keyfile() -> String {
+    String::new()
 }
 
 /// Default RSA public exponent.
@@ -1183,6 +1488,34 @@ fn default_avalanche_fitness_cx_candidate_limit() -> usize {
     0
 }
 
+/// Default flag for applying the normalized fitness threshold.
+///
+/// # Parameters
+/// - None.
+///
+/// # Returns
+/// - `bool`: Default enable state for normalized fitness thresholding.
+///
+/// # Expected Output
+/// - Returns a constant default value; no side effects.
+fn default_avalanche_fitness_use_threshold() -> bool {
+    true
+}
+
+/// Default normalized fitness threshold used by the Avalanche fitness pass.
+///
+/// # Parameters
+/// - None.
+///
+/// # Returns
+/// - `f64`: Default minimum normalized trailing-zero fitness.
+///
+/// # Expected Output
+/// - Returns a constant default value; no side effects.
+fn default_avalanche_fitness_threshold() -> f64 {
+    0.580
+}
+
 /// Default flag for using the same r candidate across a batch.
 ///
 /// # Parameters
@@ -1267,6 +1600,48 @@ fn default_avalanche_probability_spread_exponent() -> f64 {
     0.5
 }
 
+/// Default advisory SQLite soft heap limit for the Avalanche cache.
+///
+/// # Parameters
+/// - None.
+///
+/// # Returns
+/// - `u64`: Default SQLite soft heap limit in bytes.
+///
+/// # Expected Output
+/// - Returns a constant default value; no side effects.
+fn default_sqlite_soft_heap() -> u64 {
+    10 * 1024 * 1024 * 1024
+}
+
+/// Default hard SQLite heap limit for the Avalanche cache.
+///
+/// # Parameters
+/// - None.
+///
+/// # Returns
+/// - `u64`: Default SQLite hard heap limit in bytes.
+///
+/// # Expected Output
+/// - Returns a constant default value; no side effects.
+fn default_sqlite_hard_heap() -> u64 {
+    10 * 1024 * 1024 * 1024
+}
+
+/// Default SQLite mmap size for the Avalanche cache.
+///
+/// # Parameters
+/// - None.
+///
+/// # Returns
+/// - `u64`: Default SQLite mmap size in bytes.
+///
+/// # Expected Output
+/// - Returns a constant default value; no side effects.
+fn default_sqlite_mmap_size() -> u64 {
+    10 * 1024 * 1024 * 1024
+}
+
 /// Default toggle for Hamming-distance sorting in avalanche candidate ordering.
 ///
 /// # Parameters
@@ -1300,43 +1675,6 @@ fn default_mirror_invert_candidates() -> bool {
 /// # Parameters
 /// - None.
 ///
-/// # Returns
-/// - `bool`: Default reuse setting.
-///
-/// # Expected Output
-/// - Returns a constant default value; no side effects.
-fn default_reuse_r_candidates() -> bool {
-    false
-}
-
-/// Default path for the r candidates reuse file.
-///
-/// # Parameters
-/// - None.
-///
-/// # Returns
-/// - `String`: Default reuse path.
-///
-/// # Expected Output
-/// - Returns a constant default value; no side effects.
-fn default_reuse_r_candidates_path() -> String {
-    "data/r_candidates.csv".to_string()
-}
-
-/// Default flag for append-only reuse file behavior.
-///
-/// # Parameters
-/// - None.
-///
-/// # Returns
-/// - `bool`: Default append-only setting.
-///
-/// # Expected Output
-/// - Returns a constant default value; no side effects.
-fn default_reuse_r_candidates_append_only() -> bool {
-    false
-}
-
 /// Default flag for reading pre-retargeted r candidates from a keyed cache file.
 ///
 /// # Parameters
@@ -1523,6 +1861,25 @@ fn default_combiner_tie_breaker() -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    /// Builds a unique temporary path for config-loader tests.
+    ///
+    /// # Parameters
+    /// - `label`: Short suffix describing the test artifact.
+    ///
+    /// # Returns
+    /// - `PathBuf`: Unique filesystem path under the process temp directory.
+    ///
+    /// # Expected Output
+    /// - Returns a path value without touching the filesystem.
+    fn temp_path(label: &str) -> PathBuf {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock should be after unix epoch")
+            .as_nanos();
+        std::env::temp_dir().join(format!("rsademo_config_{label}_{nanos}"))
+    }
 
     #[test]
     fn test_engine_config_defaults_disable_avalanche_hamming_distance_pruning() {
@@ -1540,5 +1897,166 @@ mod tests {
             engine.avalanche_combination_hamming_distance_outlier_preference_pct,
             0.0
         );
+        assert!(engine.avalanche_fitness_use_threshold);
+        assert!((engine.avalanche_fitness_threshold - 0.580).abs() < f64::EPSILON);
+        assert_eq!(engine.sqlite_soft_heap, 10 * 1024 * 1024 * 1024);
+        assert_eq!(engine.sqlite_hard_heap, 10 * 1024 * 1024 * 1024);
+        assert_eq!(engine.sqlite_mmap_size, 10 * 1024 * 1024 * 1024);
+    }
+
+    #[test]
+    fn test_load_config_hydrates_keypair_from_relative_keyfile() {
+        let temp_dir = temp_path("keyfile_relative");
+        fs::create_dir_all(temp_dir.join("keys")).expect("create temp config dir");
+        fs::write(
+            temp_dir.join("keys").join("sample.yaml"),
+            concat!(
+                "format: rsa-private-key-v1\n",
+                "algorithm: RSA\n",
+                "public_exponent: \"17\"\n",
+                "private_exponent: \"2753\"\n",
+                "modulus: \"3233\"\n",
+                "totient: \"3120\"\n",
+                "primes:\n",
+                "  p: \"61\"\n",
+                "  q: \"53\"\n",
+            ),
+        )
+        .expect("write keyfile");
+        fs::write(
+            temp_dir.join("config.json"),
+            concat!(
+                "{\n",
+                "  \"rsa_keypair\": {\n",
+                "    \"generate\": false,\n",
+                "    \"keyfile\": \"keys/sample.yaml\"\n",
+                "  }\n",
+                "}\n",
+            ),
+        )
+        .expect("write config");
+
+        let config = load_config(temp_dir.join("config.json").to_str().expect("utf8 path"))
+            .expect("load config");
+        assert_eq!(config.rsa_keypair.e, 17);
+        assert_eq!(config.rsa_keypair.modulus, Some(BigUint::from(3233u32)));
+        assert_eq!(config.rsa_keypair.p, Some(BigUint::from(61u8)));
+        assert_eq!(config.rsa_keypair.q, Some(BigUint::from(53u8)));
+
+        let _ = fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn test_load_config_prefers_inline_primes_over_keyfile() {
+        let temp_dir = temp_path("keyfile_inline_override");
+        fs::create_dir_all(temp_dir.join("keys")).expect("create temp config dir");
+        fs::write(
+            temp_dir.join("keys").join("sample.yaml"),
+            concat!(
+                "format: rsa-private-key-v1\n",
+                "algorithm: RSA\n",
+                "public_exponent: \"17\"\n",
+                "private_exponent: \"2753\"\n",
+                "modulus: \"3233\"\n",
+                "totient: \"3120\"\n",
+                "primes:\n",
+                "  p: \"61\"\n",
+                "  q: \"53\"\n",
+            ),
+        )
+        .expect("write keyfile");
+        fs::write(
+            temp_dir.join("config.json"),
+            concat!(
+                "{\n",
+                "  \"rsa_keypair\": {\n",
+                "    \"generate\": false,\n",
+                "    \"keyfile\": \"keys/sample.yaml\",\n",
+                "    \"e\": 65537,\n",
+                "    \"p\": \"71\",\n",
+                "    \"q\": \"67\"\n",
+                "  }\n",
+                "}\n",
+            ),
+        )
+        .expect("write config");
+
+        let config = load_config(temp_dir.join("config.json").to_str().expect("utf8 path"))
+            .expect("load config");
+        assert_eq!(config.rsa_keypair.e, 65537);
+        assert_eq!(config.rsa_keypair.modulus, Some(BigUint::from(4757u32)));
+        assert_eq!(config.rsa_keypair.p, Some(BigUint::from(71u8)));
+        assert_eq!(config.rsa_keypair.q, Some(BigUint::from(67u8)));
+
+        let _ = fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn test_load_config_hydrates_public_keyfile_without_primes() {
+        let temp_dir = temp_path("keyfile_public");
+        fs::create_dir_all(temp_dir.join("keys")).expect("create temp config dir");
+        fs::write(
+            temp_dir.join("keys").join("public.yaml"),
+            concat!(
+                "format: rsa-public-key-v1\n",
+                "algorithm: RSA\n",
+                "public_exponent: \"17\"\n",
+                "modulus: \"3233\"\n",
+                "bit_lengths:\n",
+                "  modulus_bits: 12\n",
+            ),
+        )
+        .expect("write public keyfile");
+        fs::write(
+            temp_dir.join("config.json"),
+            concat!(
+                "{\n",
+                "  \"rsa_keypair\": {\n",
+                "    \"generate\": false,\n",
+                "    \"keyfile\": \"keys/public.yaml\",\n",
+                "    \"private_keyfile\": \"keys/private.yaml\"\n",
+                "  }\n",
+                "}\n",
+            ),
+        )
+        .expect("write config");
+
+        let config = load_config(temp_dir.join("config.json").to_str().expect("utf8 path"))
+            .expect("load config");
+        assert_eq!(config.rsa_keypair.e, 17);
+        assert_eq!(config.rsa_keypair.modulus, Some(BigUint::from(3233u32)));
+        assert_eq!(config.rsa_keypair.p, None);
+        assert_eq!(config.rsa_keypair.q, None);
+        assert_eq!(config.rsa_keypair.private_keyfile, "keys/private.yaml");
+
+        let _ = fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn test_load_public_keyfile_rejects_private_fields() {
+        let temp_dir = temp_path("keyfile_public_rejects_private");
+        fs::create_dir_all(&temp_dir).expect("create temp config dir");
+        let path = temp_dir.join("public.yaml");
+        fs::write(
+            &path,
+            concat!(
+                "format: rsa-public-key-v1\n",
+                "algorithm: RSA\n",
+                "public_exponent: \"17\"\n",
+                "modulus: \"3233\"\n",
+                "private_exponent: \"2753\"\n",
+            ),
+        )
+        .expect("write malformed public keyfile");
+
+        let error = load_rsa_key_material_from_yaml_path(&path)
+            .expect_err("public keyfile with private fields should be rejected");
+        assert!(
+            error
+                .to_string()
+                .contains("must not include private_exponent")
+        );
+
+        let _ = fs::remove_dir_all(&temp_dir);
     }
 }

@@ -45,7 +45,7 @@ The analysis path used by `cargo run --bin analysis` is:
 1. Build or load an RSA keypair, compute `N`, `\varphi(N)`, choose `e`, derive `d`, and verify the normal RSA round trip.
 2. Generate a batch of candidate `r` values from either:
    - factoring mode, or
-   - small-primes mode, optionally seeded from a reuse file.
+   - small-primes mode, generating fresh raw seeds per batch.
 3. Retarget each generated candidate into a speculative modulus using the fractional-power construction above. In practice this means the originally generated `r` is just a seed; the analysis uses the retargeted modulus and its explicit factor list.
 4. Compute
 

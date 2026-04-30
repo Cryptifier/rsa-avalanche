@@ -249,19 +249,23 @@ fn build_demo_context(config: &Config) -> Result<DemoContext, Box<dyn Error>> {
     if config.rsa_keypair.generate {
         return Err("demo requires rsa_keypair.generate = false".into());
     }
-    let p = config
-        .rsa_keypair
-        .p
-        .clone()
-        .ok_or("config.rsa_keypair.p must be set")?;
-    let q = config
-        .rsa_keypair
-        .q
-        .clone()
-        .ok_or("config.rsa_keypair.q must be set")?;
-    let n = &p * &q;
+    let n = if let (Some(p), Some(q)) =
+        (config.rsa_keypair.p.as_ref(), config.rsa_keypair.q.as_ref())
+    {
+        p * q
+    } else {
+        config.rsa_keypair.modulus.clone().ok_or(
+            "demo requires inline rsa_keypair.p/q or rsa_keypair.keyfile to provide a modulus",
+        )?
+    };
     let e = BigUint::from(config.rsa_keypair.e);
-    let key_bit_width = p.bits().saturating_add(q.bits());
+    let key_bit_width = if let (Some(p), Some(q)) =
+        (config.rsa_keypair.p.as_ref(), config.rsa_keypair.q.as_ref())
+    {
+        p.bits().saturating_add(q.bits())
+    } else {
+        n.bits()
+    };
 
     Ok(DemoContext {
         n,

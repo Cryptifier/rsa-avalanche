@@ -4,8 +4,8 @@
   "rsa_keypair": {
     "generate": false,
     "e": 65537,
-    "p": "3030152311446024058741",
-    "q": "4262327550688715209573"
+    "keyfile": "keys/small_batch_original_keypair.yaml",
+    "private_keyfile": ""
   },
   "polynomial_fields": {
     // Coordinate-generation fields shared with the other small/medium configs so
@@ -43,11 +43,8 @@
     "oracle_accuracy_threshold": 51.0,
     "use_hamming_distance": true,
     "avalanche_random_chacha20_inputs": true,
-    // Reuse a precomputed grid of scored r candidates so this config measures
-    // the small-batch avalanche pipeline instead of live r generation.
-    "reuse_r_candidates": true,
-    "reuse_r_candidates_path": "data/rgen_grid/rgen_grid_pct_5.csv",
-    "reuse_r_candidates_append_only": false,
+    // Generate a single cheap raw seed candidate per batch and let retargeting
+    // randomize the actual speculative r-candidate pool.
     // Build speculative r values from products of these small primes, then
     // retarget the product with the exponent window below.
     "r_candidate_mode": "small_primes",
@@ -64,6 +61,8 @@
     "avalanche_fitness_bit_width": 32,
     "avalanche_fitness_r_candidate_limit": 200,
     "avalanche_fitness_cx_candidate_limit": 10,
+    "avalanche_fitness_use_threshold": true,
+    "avalanche_fitness_threshold": 0.580,
     // Beam search keeps a short candidate list and interprets per-bit
     // probabilities above the threshold as bit 1.
     "beam_bit_one_threshold": 0.5,
@@ -81,6 +80,9 @@
     "analysis_batch_messages": 1000, // Number of ciphertext variants scored per batch before avalanche sampling.
     "analysis_batch_candidates": 20000, // Number of r candidates scored in each batch before sampling combinations.
     "analysis_batch_batches": 1, // Number of scored batches to run for the small-batch beam workflow.
+    "sqlite_soft_heap": 10737418240,
+    "sqlite_hard_heap": 10737418240,
+    "sqlite_mmap_size": 10737418240,
     // Cap how many distinct r values can appear in one sampled avalanche input;
     // each selected r still contributes all of its sampled c^x variants.
     "avalanche_combination_mixed_r_candidates": 64,

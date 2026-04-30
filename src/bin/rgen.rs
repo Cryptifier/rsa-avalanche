@@ -22,7 +22,7 @@ use rsademo::rng::{RngChoice, RngMode};
 #[derive(Parser, Debug)]
 #[command(
     name = "rgen",
-    about = "Generate r candidates for analysis CSV reuse",
+    about = "Generate r candidates for analysis CSV output",
     author,
     version
 )]
@@ -35,7 +35,7 @@ struct Args {
     )]
     config: String,
 
-    /// Output CSV path (defaults to config reuse_r_candidates_path)
+    /// Output CSV path (defaults to `data/rgen_output.csv`)
     #[arg(short = 'o', long)]
     output: Option<String>,
 
@@ -115,7 +115,7 @@ struct Args {
     #[arg(long, value_name = "R")]
     override_r: Option<String>,
 
-    /// Load the base reuse CSV, retarget up to `--count` samples with ChaCha20, and write a keyed retarget cache CSV
+    /// Generate a keyed retarget cache CSV using fresh raw seeds and ChaCha20 retargeting
     #[arg(long)]
     retargeted: bool,
 }
@@ -183,20 +183,19 @@ fn run_rgen(args: Args, config: Config) -> Result<(), Box<dyn Error>> {
             key_bit_width,
         )
     } else {
-        config.engine.reuse_r_candidates_path.clone()
+        "data/rgen_output.csv".to_string()
     };
     let target_bit_length_override = resolve_target_bit_length_override(&args, modulus.as_ref())?;
     let settings = build_r_candidate_settings(
         &config.engine,
         &args,
-        &output_path,
         target_bit_length_override,
         key_bit_width,
     )?;
 
     if (settings.mode == RCandidateMode::Factoring || args.retargeted) && modulus.is_none() {
         return Err(
-            "factoring mode requires --n, --p/--q, --bits, or config/rsa_config_small_batch.json with p and q"
+            "factoring mode requires --n, --p/--q, --bits, or config/rsa_config_small_batch.json with inline primes or rsa_keypair.keyfile"
                 .into(),
         );
     }
@@ -332,7 +331,6 @@ fn resolve_modulus(
 /// # Parameters
 /// - `engine`: Engine configuration used for defaults.
 /// - `args`: CLI arguments that override defaults.
-/// - `output_path`: Output file path used for reuse metadata.
 /// - `target_bit_length_override`: Optional target bit length override from percent-based settings.
 /// - `key_bit_width`: Bit width of the original RSA key used to derive the retargeted cache path.
 ///
@@ -344,7 +342,6 @@ fn resolve_modulus(
 fn build_r_candidate_settings(
     engine: &EngineConfig,
     args: &Args,
-    output_path: &str,
     target_bit_length_override: Option<u64>,
     key_bit_width: u64,
 ) -> Result<RCandidateSettings, Box<dyn Error>> {
@@ -392,13 +389,6 @@ fn build_r_candidate_settings(
         process_count,
         process_min_count,
         process_scale: args.scale.unwrap_or(engine.process_scale),
-        reuse_r_candidates_path: if args.retargeted {
-            engine.reuse_r_candidates_path.clone()
-        } else {
-            output_path.to_string()
-        },
-        reuse_r_candidates: false,
-        reuse_r_candidates_append_only: false,
         reuse_retargeted_r_candidates: false,
         reuse_retargeted_r_candidates_path: resolve_retargeted_r_candidates_path(
             &engine.reuse_retargeted_r_candidates_path_prefix,
@@ -560,7 +550,7 @@ fn load_existing_candidate_keys(path: &str) -> Result<HashSet<String>, Box<dyn E
             Ok(line) => line,
             Err(err) => {
                 println!(
-                    "Skipping line {} in reuse file due to read error: {}",
+                    "Skipping line {} in candidate file due to read error: {}",
                     idx + 1,
                     err
                 );
@@ -574,7 +564,10 @@ fn load_existing_candidate_keys(path: &str) -> Result<HashSet<String>, Box<dyn E
         let mut parts = line.splitn(2, ',');
         let r_str = parts.next().unwrap_or("").trim();
         if r_str.is_empty() {
-            println!("Skipping line {} in reuse file: missing r entry", idx + 1);
+            println!(
+                "Skipping line {} in candidate file: missing r entry",
+                idx + 1
+            );
             continue;
         }
         match r_str.parse::<BigUint>() {
@@ -583,7 +576,7 @@ fn load_existing_candidate_keys(path: &str) -> Result<HashSet<String>, Box<dyn E
             }
             Err(err) => {
                 println!(
-                    "Skipping line {} in reuse file: invalid r '{}': {}",
+                    "Skipping line {} in candidate file: invalid r '{}': {}",
                     idx + 1,
                     r_str,
                     err
@@ -633,10 +626,7 @@ fn build_header_lines(
     }
 
     if retargeted {
-        lines.push(format!(
-            "# source_reuse_path={}",
-            settings.reuse_r_candidates_path
-        ));
+        lines.push("# source_seed_strategy=fresh_single_seed".to_string());
     }
 
     if settings.mode == RCandidateMode::Factoring {
@@ -816,8 +806,7 @@ mod tests {
         args.r_bits = Some(80);
 
         let settings =
-            build_r_candidate_settings(&engine, &args, "data/r_candidates.csv", None, 512)
-                .expect("settings failed");
+            build_r_candidate_settings(&engine, &args, None, 512).expect("settings failed");
         assert_eq!(settings.process_count, 10);
         assert_eq!(settings.process_min_count, 8);
         assert_eq!(settings.process_min_factor, BigUint::from(13u64));
@@ -855,9 +844,6 @@ mod tests {
             process_count: 2,
             process_min_count: 1,
             process_scale: 8,
-            reuse_r_candidates_path: "data/r_candidates.csv".to_string(),
-            reuse_r_candidates: false,
-            reuse_r_candidates_append_only: false,
             reuse_retargeted_r_candidates: false,
             reuse_retargeted_r_candidates_path: "data/rgen_retargeted_512.csv".to_string(),
             small_primes: vec![3u8, 5u8, 7u8].into_iter().map(BigUint::from).collect(),
@@ -898,9 +884,6 @@ mod tests {
             process_count: 2,
             process_min_count: 1,
             process_scale: 8,
-            reuse_r_candidates_path: "data/r_candidates.csv".to_string(),
-            reuse_r_candidates: false,
-            reuse_r_candidates_append_only: false,
             reuse_retargeted_r_candidates: false,
             reuse_retargeted_r_candidates_path: "data/rgen_retargeted_512.csv".to_string(),
             small_primes: Vec::new(),
@@ -933,9 +916,6 @@ mod tests {
             process_count: 2,
             process_min_count: 1,
             process_scale: 8,
-            reuse_r_candidates_path: "data/rgen_output.csv".to_string(),
-            reuse_r_candidates: false,
-            reuse_r_candidates_append_only: false,
             reuse_retargeted_r_candidates: false,
             reuse_retargeted_r_candidates_path: "data/rgen_retargeted_512.csv".to_string(),
             small_primes: vec![3u8, 5u8, 7u8].into_iter().map(BigUint::from).collect(),
@@ -955,7 +935,7 @@ mod tests {
         let lines = build_header_lines(Some(&BigUint::from(3233u32)), &settings, 2, true, 512);
         let joined = lines.join("\n");
         assert!(joined.contains("retargeted=true"));
-        assert!(joined.contains("source_reuse_path=data/rgen_output.csv"));
+        assert!(joined.contains("source_seed_strategy=fresh_single_seed"));
         assert!(joined.contains("n=3233"));
     }
 

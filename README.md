@@ -64,6 +64,8 @@ cargo run --bin analysis -- --config config/rsa_config_small_batch.json
 - `--avalanche-combination-sample-smoothing <bool>`: Apply Jeffreys smoothing to sampled majority-vote probabilities before beam search. Default `false`.
 - `--avalanche-combination-majority-vote-print <bool>`: Print a separate sampled-combination majority-vote summary for the selected sample. Default `true`.
 - `--avalanche-use-top-beam <bool>`: Carry forward the prior tier's top beam-search bits between recursive Avalanche tiers instead of the prior tier's majority-vote bits. Default `true`.
+- `analysis` accepts either `rsa-private-key-v1` or `rsa-public-key-v1` in `rsa_keypair.keyfile`.
+- When the configured keyfile is public, `analysis` skips the normal RSA round trip. Set `rsa_keypair.private_keyfile` to a matching private YAML if you want a verification peek; otherwise the public-key run is selected by top beam score.
 
 ## `demo.rs` (WORK-IN-PROGRESS)
 `src/bin/demo.rs` is separate from the proof of concept in `analysis.rs`. Treat it as a work-in-progress utility for direct encrypt/decrypt experiments rather than the main validation path.
@@ -79,19 +81,23 @@ cargo run --bin demo -- --decrypt --ciphertext 0x1234
 - `--plaintext-hex <HEX>`: Plaintext hex string (required with `--encrypt`).
 - `--ciphertext <VALUE>`: Ciphertext override (decimal or hex). Falls back to `verify.ciphertext_hex` or `verify.ciphertext` in the config.
 - `--shift`: Multiply ciphertext by encrypted `2` before base conversion.
-- Demo runs require `rsa_keypair.generate = false` with `rsa_keypair.p` and `rsa_keypair.q` supplied.
+- Demo runs require `rsa_keypair.generate = false` with either inline `rsa_keypair.p`/`rsa_keypair.q` or `rsa_keypair.keyfile` supplied.
+- `demo` only needs the public modulus and exponent, so `rsa_keypair.keyfile` may point to either a private or public YAML key file.
 
 ## `kgen`
 ```bash
 cargo run --bin kgen
-cargo run --bin kgen -- --size-mode modulus --modulus-bits 144 --output config/keys/private_key.yaml
+cargo run --bin kgen -- --size-mode modulus --modulus-bits 144 --output config/keys/private_key.yaml --public-output config/keys/public_key.yaml
+cargo run --bin kgen -- --input-private-key config/keys/private_key.yaml --public-output config/keys/public_key.yaml --force
 ```
 
 - `--size-mode <prime|modulus>`: Choose whether generation is driven by prime size or modulus size. Default `prime`.
 - `--prime-bits <u32>`: Prime bit length used in `prime` mode. Default `56` (range `16..=8192`).
 - `--modulus-bits <u32>`: Exact modulus bit length targeted in `modulus` mode. Default `144` (range `32..=16384`).
 - `-e, --public-exponent <u64>`: Starting public exponent candidate. Default `65537`; the first odd coprime exponent at or above it is used.
-- `-o, --output <PATH>`: YAML output path. Default `config/keys/private_key.yaml`.
+- `-o, --output <PATH>`: Private-key YAML output path for generated keys. Default `config/keys/private_key.yaml`.
+- `--public-output <PATH>`: Optional public-key YAML output path for the generated or imported private key.
+- `--input-private-key <PATH>`: Existing `rsa-private-key-v1` YAML file to convert into `rsa-public-key-v1`, similar to extracting a public key from a private PEM with `openssl`.
 - `--force`: Overwrite an existing output file.
 - `--seed <u64>`: Optional deterministic RNG seed for reproducible key generation.
 - `--crypto-rng`: Use cryptographic RNGs instead of the standard seeded generator.
@@ -99,5 +105,7 @@ cargo run --bin kgen -- --size-mode modulus --modulus-bits 144 --output config/k
 # Configuration
 Configuration reference material has been moved to [CONFIGS.md](CONFIGS.md).
 
-# Why `p` and `q` are required today
-This repository's proof of concept currently covers the Avalanche method implemented in `analysis.rs`. That path still depends on the private factorization inputs `p` and `q` for setup, evaluation, and comparison of recovered output. Proving the approach directly on public `N` alone is not what the current POC implements yet, which is why the documented configs still require `p` and `q`.
+# Public-Key Workflows
+Public-key YAML files are supported for both `analysis` and `demo`. Point `rsa_keypair.keyfile` at an `rsa-public-key-v1` file when you want the run to operate without inline `p` or `q`.
+
+For `analysis`, the plaintext used for scoring still comes from `engine.message.*`, so speculative outputs can still be compared against the chosen/generated message without learning the factorization. If you also set `rsa_keypair.private_keyfile` to a matching `rsa-private-key-v1` file, `analysis` performs a private-key verification peek; otherwise it skips round-trip RSA and ranks the public-key run by beam score.
