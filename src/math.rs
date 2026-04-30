@@ -1,10 +1,10 @@
 /// Eclipse Public License 2.0
 /// SPDX-License-Identifier: EPL-2.0
 /// Copyright (c) 2025 Nicholas LaRoche <nlaroche@cryptifier.dev>
-use bigdecimal::BigDecimal;
+use bigdecimal::{BigDecimal, FromPrimitive, One};
 use num_bigint::{BigInt, BigUint};
 use num_integer::Integer;
-use num_traits::{One, Signed, ToPrimitive, Zero};
+use num_traits::{Signed, ToPrimitive, Zero};
 use rand::RngCore;
 use std::time::Instant;
 
@@ -86,6 +86,43 @@ pub fn to_hex(value: &BigUint) -> String {
         let _ = std::fmt::Write::write_fmt(&mut hex, format_args!("{:02x}", byte));
     }
     hex
+}
+
+fn pow10_neg(scale: i64) -> BigDecimal {
+    BigDecimal::new(1.into(), scale)
+}
+
+/// Returns the cosine of `x` using a big decimal approximation with `digits` precision.
+///
+/// # Parameters
+/// - `x`: The input value as a `BigDecimal`.
+/// - `digits`: The number of digits of precision to use.
+///
+/// # Returns
+/// - `BigDecimal`: The cosine of `x` with `digits` precision.
+pub fn cosine_bigdecimal(x: BigDecimal, digits: i64) -> BigDecimal {
+    let tolerance = pow10_neg(digits + 8);
+
+    let mut sum = BigDecimal::one();
+    let mut term = BigDecimal::one();
+
+    let x2 = &x * &x;
+    for n in 1..20_000_i64 {
+        // term *= -x^2 / ((2n - 1)(2n))
+        let denom = BigDecimal::from_i64((2 * n - 1) * (2 * n)).unwrap();
+
+        term = -(&term * &x2) / denom;
+        term = term.with_scale(digits + 16);
+
+        sum += &term;
+        sum = sum.with_scale(digits + 16);
+
+        if term.abs() < tolerance {
+            break;
+        }
+    }
+
+    sum.with_scale(digits)
 }
 
 /// Returns the number of bits required to represent `value`.
