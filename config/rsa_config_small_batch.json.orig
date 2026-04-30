@@ -43,11 +43,8 @@
     "oracle_accuracy_threshold": 51.0,
     "use_hamming_distance": true,
     "avalanche_random_chacha20_inputs": true,
-    // Reuse a precomputed grid of scored r candidates so this config measures
-    // the small-batch avalanche pipeline instead of live r generation.
-    "reuse_r_candidates": true,
-    "reuse_r_candidates_path": "data/rgen_grid/rgen_grid_pct_5.csv",
-    "reuse_r_candidates_append_only": false,
+    // Generate a single cheap raw seed candidate per batch and let retargeting
+    // randomize the actual speculative r-candidate pool.
     // Build speculative r values from products of these small primes, then
     // retarget the product with the exponent window below.
     "r_candidate_mode": "small_primes",

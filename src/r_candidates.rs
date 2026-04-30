@@ -79,9 +79,6 @@ pub struct RCandidateSettings {
     pub process_count: u64,
     pub process_min_count: u64,
     pub process_scale: u32,
-    pub reuse_r_candidates_path: String,
-    pub reuse_r_candidates: bool,
-    pub reuse_r_candidates_append_only: bool,
     pub reuse_retargeted_r_candidates: bool,
     pub reuse_retargeted_r_candidates_path: String,
     pub small_primes: Vec<BigUint>,
@@ -255,19 +252,19 @@ pub fn load_retargeted_r_candidates(
     Ok(loaded.entries)
 }
 
-/// Builds retargeted candidates from an existing reuse CSV and rewrites them in place.
+/// Builds retargeted candidates from a freshly generated raw `r` seed batch.
 ///
 /// # Parameters
 /// - `n`: RSA modulus used for retargeting.
-/// - `settings`: Candidate settings containing the source reuse path and retargeting window.
-/// - `rng`: Random number generator used for shuffling and retarget sampling.
+/// - `settings`: Candidate settings containing generation and retargeting parameters.
+/// - `rng`: Random number generator used for base generation and retarget sampling.
 /// - `target_count`: Number of retargeted candidates to produce.
 ///
 /// # Returns
-/// - `Result<Vec<RCandidate>, Box<dyn Error>>`: Retargeted candidate list or an error when the source file is unusable.
+/// - `Result<Vec<RCandidate>, Box<dyn Error>>`: Retargeted candidate list.
 ///
 /// # Expected Output
-/// - Loads the source reuse file, prints reuse/retarget progress, and returns retargeted candidates.
+/// - Generates raw seed candidates, prints retarget progress, and returns retargeted candidates.
 pub fn generate_retargeted_r_candidates_batch(
     n: &BigUint,
     settings: &RCandidateSettings,
@@ -275,27 +272,15 @@ pub fn generate_retargeted_r_candidates_batch(
     target_count: usize,
 ) -> Result<Vec<RCandidate>, Box<dyn Error>> {
     let count = target_count.max(1);
-    let reuse_path = settings.reuse_r_candidates_path.as_str();
-    println!(
-        "Loading base r candidates for retargeting from {}",
-        reuse_path
-    );
-    let mut loaded = load_reuse_candidates(reuse_path);
-    if loaded.is_empty() {
-        return Err(format!("no base r candidates loaded from {reuse_path}").into());
+    println!("Generating {} base r candidates for retargeting", count);
+    let mut retarget_inputs = build_seed_r_candidates_for_retargeting(n, settings, rng, count);
+    if retarget_inputs.is_empty() {
+        return Err("no base r candidates generated for retargeting".into());
     }
-    loaded.shuffle(rng);
     println!(
-        "Loaded {} base r candidates for retarget cache generation",
-        loaded.len()
+        "Generated {} base r candidates for retarget cache generation",
+        retarget_inputs.len()
     );
-
-    let mut retarget_inputs = loaded
-        .iter()
-        .cloned()
-        .cycle()
-        .take(count)
-        .collect::<Vec<_>>();
     retarget_r_candidates_for_speculative_oracles(
         n,
         &mut retarget_inputs,
@@ -308,11 +293,44 @@ pub fn generate_retargeted_r_candidates_batch(
     Ok(retarget_inputs)
 }
 
+/// Builds a raw `r` seed batch sized for the requested retarget workload.
+///
+/// # Parameters
+/// - `n`: RSA modulus used for candidate generation.
+/// - `settings`: Candidate settings controlling raw generation.
+/// - `rng`: Random number generator used for raw candidate generation.
+/// - `target_count`: Number of candidates needed after expansion.
+///
+/// # Returns
+/// - `Vec<RCandidate>`: Raw candidate seeds ready for retargeting.
+///
+/// # Expected Output
+/// - Returns one generated seed cloned to `target_count` when retargeting is enabled, or a fully
+///   generated raw batch when retargeting is disabled; may print progress logs.
+fn build_seed_r_candidates_for_retargeting(
+    n: &BigUint,
+    settings: &RCandidateSettings,
+    rng: &mut RngChoice,
+    target_count: usize,
+) -> Vec<RCandidate> {
+    let count = target_count.max(1);
+    if settings.retarget_partition_count == 0 {
+        return generate_r_candidates_batch(n, settings, rng, count);
+    }
+
+    let mut seeds = generate_r_candidates_batch(n, settings, rng, 1);
+    if seeds.is_empty() {
+        return seeds;
+    }
+    let seed = seeds.swap_remove(0);
+    vec![seed; count]
+}
+
 /// Prepares a batch of speculative r candidates, optionally loading a keyed retargeted cache.
 ///
 /// # Parameters
 /// - `n`: RSA modulus used for candidate generation and cache validation.
-/// - `settings`: Candidate settings controlling reuse, retargeting, and cache paths.
+/// - `settings`: Candidate settings controlling generation, retargeting, and cache paths.
 /// - `rng`: Random number generator used for sampling and shuffling.
 /// - `batch_size`: Target number of candidates to prepare.
 ///
@@ -339,24 +357,7 @@ pub fn prepare_r_candidates_batch(
         return Ok(candidates);
     }
 
-    let mut candidates = generate_r_candidates_batch(n, settings, rng, batch_size);
-    if settings.reuse_r_candidates
-        && settings.retarget_partition_count > 0
-        && !candidates.is_empty()
-        && candidates.len() < batch_size
-    {
-        let source_count = candidates.len();
-        candidates = candidates
-            .iter()
-            .cloned()
-            .cycle()
-            .take(batch_size)
-            .collect();
-        println!(
-            "Expanded {} reused r candidates to {} retarget inputs before retargeting",
-            source_count, batch_size
-        );
-    }
+    let mut candidates = build_seed_r_candidates_for_retargeting(n, settings, rng, batch_size);
     retarget_r_candidates_for_speculative_oracles(
         n,
         &mut candidates,
@@ -429,7 +430,7 @@ fn ciphertext_stream_next(ciphertext: &BigUint, n: &BigUint, exponent: &mut u64)
 /// - `Vec<RCandidate>`: List of mutable candidate records.
 ///
 /// # Expected Output
-/// - Returns an empty list if not enough primes are available; may read/write reuse files.
+/// - Returns an empty list if not enough primes are available; may print progress logs.
 pub fn generate_r_candidates_from_small_primes(
     settings: &RCandidateSettings,
     rng: &mut RngChoice,
@@ -447,41 +448,6 @@ pub fn generate_r_candidates_from_small_primes(
 
     let mut collected: Vec<RCandidate> = Vec::new();
     let mut seen: HashSet<BigUint> = HashSet::new();
-
-    let load_reuse = settings.reuse_r_candidates && !settings.reuse_r_candidates_append_only;
-    let append_reuse = settings.reuse_r_candidates || settings.reuse_r_candidates_append_only;
-
-    if load_reuse {
-        let reuse_path = settings.reuse_r_candidates_path.as_str();
-        println!("Reuse enabled; loading r candidates from {}", reuse_path);
-        let mut loaded = load_reuse_candidates(reuse_path);
-        loaded.shuffle(rng);
-        for candidate in loaded {
-            if seen.insert(candidate.r.clone()) {
-                collected.push(candidate);
-                if collected.len() >= target_count {
-                    println!(
-                        "Loaded {} r candidates from reuse file {}",
-                        collected.len(),
-                        reuse_path
-                    );
-                    return collected.into_iter().take(target_count).collect();
-                }
-            }
-        }
-        if !collected.is_empty() {
-            println!(
-                "Loaded {} r candidates from reuse file {}",
-                collected.len(),
-                reuse_path
-            );
-        }
-    } else if settings.reuse_r_candidates_append_only {
-        println!(
-            "Reuse append-only enabled; will append new r candidates to {} but will not load from it",
-            settings.reuse_r_candidates_path
-        );
-    }
 
     let Some(target_bits) = target_bits else {
         return collected;
@@ -527,9 +493,7 @@ pub fn generate_r_candidates_from_small_primes(
     let generation_started_at = Instant::now();
     let attempts_done = Arc::new(AtomicU64::new(0));
     let next_progress_log_at_ms = Arc::new(AtomicU64::new(
-        Duration::from_secs(5)
-            .as_millis()
-            .min(u128::from(u64::MAX)) as u64,
+        Duration::from_secs(5).as_millis().min(u128::from(u64::MAX)) as u64,
     ));
     let total_attempts = u64::try_from(seeds.len()).unwrap_or(u64::MAX);
     let target_generation_count = u64::try_from(remaining).unwrap_or(u64::MAX);
@@ -587,19 +551,13 @@ pub fn generate_r_candidates_from_small_primes(
         generation_started_at.elapsed().as_secs_f64(),
     );
 
-    let mut new_candidates = Vec::new();
     for entry in generated {
         if collected.len() >= target_count {
             break;
         }
         if seen.insert(entry.r.clone()) {
-            new_candidates.push(entry.clone());
             collected.push(entry);
         }
-    }
-
-    if append_reuse && !new_candidates.is_empty() {
-        append_reuse_candidates(&settings.reuse_r_candidates_path, &new_candidates);
     }
 
     collected.truncate(target_count);
@@ -1021,7 +979,7 @@ fn uniquify_retarget_update(
 ///
 /// # Parameters
 /// - `n`: RSA modulus used to scale candidate selection.
-/// - `settings`: Candidate generation configuration (including reuse and override options).
+/// - `settings`: Candidate generation configuration, including factor limits and overrides.
 /// - `rng`: Random number generator for candidate sampling.
 ///
 /// # Returns
@@ -1063,45 +1021,6 @@ pub fn generate_r_candidates_via_factoring(
     let mut collected: Vec<RCandidate> = Vec::new();
     let mut seen: HashSet<BigUint> = HashSet::new();
     let reserved = Arc::new(Mutex::new(HashSet::<BigUint>::new()));
-
-    let load_reuse = settings.reuse_r_candidates && !settings.reuse_r_candidates_append_only;
-    let append_reuse = settings.reuse_r_candidates || settings.reuse_r_candidates_append_only;
-
-    if load_reuse {
-        let reuse_path = settings.reuse_r_candidates_path.as_str();
-        println!("Reuse enabled; loading r candidates from {}", reuse_path);
-        let mut loaded = load_reuse_candidates(reuse_path);
-        loaded.shuffle(rng);
-        for candidate in loaded {
-            let key = candidate.r.clone();
-            if seen.insert(key.clone()) {
-                if let Ok(mut guard) = reserved.lock() {
-                    guard.insert(key);
-                }
-                collected.push(candidate);
-                if collected.len() >= target_count {
-                    println!(
-                        "Loaded {} r candidates from reuse file {}",
-                        collected.len(),
-                        reuse_path
-                    );
-                    return collected.into_iter().take(target_count).collect();
-                }
-            }
-        }
-        if !collected.is_empty() {
-            println!(
-                "Loaded {} r candidates from reuse file {}",
-                collected.len(),
-                reuse_path
-            );
-        }
-    } else if settings.reuse_r_candidates_append_only {
-        println!(
-            "Reuse append-only enabled; will append new r candidates to {} but will not load from it",
-            settings.reuse_r_candidates_path
-        );
-    }
     if settings.random_power_window {
         println!(
             "Factoring-mode r candidates will sample from a random N^a window with a in [0.8, 0.9]"
@@ -1120,9 +1039,7 @@ pub fn generate_r_candidates_via_factoring(
     let generation_started_at = Instant::now();
     let attempts_done = Arc::new(AtomicU64::new(0));
     let next_progress_log_at_ms = Arc::new(AtomicU64::new(
-        Duration::from_secs(5)
-            .as_millis()
-            .min(u128::from(u64::MAX)) as u64,
+        Duration::from_secs(5).as_millis().min(u128::from(u64::MAX)) as u64,
     ));
     let total_attempts = u64::try_from(seeds.len()).unwrap_or(u64::MAX);
     let target_generation_count = u64::try_from(target_count).unwrap_or(u64::MAX);
@@ -1177,8 +1094,8 @@ pub fn generate_r_candidates_via_factoring(
                 Some(RCandidate::new(candidate, factors))
             })();
             let attempts_count = attempts_done.fetch_add(1, Ordering::Relaxed) + 1;
-            let accepted_count = u64::try_from(found.load(Ordering::Relaxed).min(target_count))
-                .unwrap_or(u64::MAX);
+            let accepted_count =
+                u64::try_from(found.load(Ordering::Relaxed).min(target_count)).unwrap_or(u64::MAX);
             log_generation_status_every_interval(
                 attempts_count,
                 total_attempts,
@@ -1211,10 +1128,6 @@ pub fn generate_r_candidates_via_factoring(
     collected.extend(new_candidates.iter().cloned());
     collected.truncate(target_count);
 
-    if append_reuse && !new_candidates.is_empty() {
-        append_reuse_candidates(&settings.reuse_r_candidates_path, &new_candidates);
-    }
-
     collected
 }
 
@@ -1228,24 +1141,6 @@ struct LoadedCandidateFile {
 
 /// Loads reusable r candidates from a CSV file.
 ///
-/// # Parameters
-/// - `path`: Path to the reuse CSV file.
-///
-/// # Returns
-/// - `Vec<RCandidate>`: Parsed candidate records.
-///
-/// # Expected Output
-/// - Returns an empty list on missing/invalid files; may print parsing errors.
-pub fn load_reuse_candidates(path: &str) -> Vec<RCandidate> {
-    match load_candidate_file(path) {
-        Ok(loaded) => loaded.entries,
-        Err(err) => {
-            println!("Failed to load reuse file {}: {}", path, err);
-            Vec::new()
-        }
-    }
-}
-
 /// Parses a candidate CSV file and returns both metadata and candidate entries.
 ///
 /// # Parameters
@@ -1261,7 +1156,7 @@ fn load_candidate_file(path: &str) -> Result<LoadedCandidateFile, Box<dyn Error>
         Ok(f) => f,
         Err(err) => {
             if err.kind() != std::io::ErrorKind::NotFound {
-                println!("Failed to open reuse file {}: {}", path, err);
+                println!("Failed to open candidate file {}: {}", path, err);
             }
             return Ok(LoadedCandidateFile {
                 metadata: BTreeMap::new(),
@@ -1279,7 +1174,7 @@ fn load_candidate_file(path: &str) -> Result<LoadedCandidateFile, Box<dyn Error>
             Ok(l) => l,
             Err(err) => {
                 println!(
-                    "Skipping line {} in reuse file due to read error: {}",
+                    "Skipping line {} in candidate file due to read error: {}",
                     idx + 1,
                     err
                 );
@@ -1310,7 +1205,7 @@ fn load_candidate_file(path: &str) -> Result<LoadedCandidateFile, Box<dyn Error>
 
         if r_str.is_empty() || factors_str.is_empty() {
             println!(
-                "Skipping line {} in reuse file: missing r or factors entry",
+                "Skipping line {} in candidate file: missing r or factors entry",
                 idx + 1
             );
             continue;
@@ -1320,7 +1215,7 @@ fn load_candidate_file(path: &str) -> Result<LoadedCandidateFile, Box<dyn Error>
             Ok(val) => val,
             Err(err) => {
                 println!(
-                    "Skipping line {} in reuse file: invalid r '{}': {}",
+                    "Skipping line {} in candidate file: invalid r '{}': {}",
                     idx + 1,
                     r_str,
                     err
@@ -1333,7 +1228,7 @@ fn load_candidate_file(path: &str) -> Result<LoadedCandidateFile, Box<dyn Error>
             Ok(exponent) => exponent,
             Err(err) => {
                 println!(
-                    "Skipping line {} in reuse file: invalid target exponent '{}': {}",
+                    "Skipping line {} in candidate file: invalid target exponent '{}': {}",
                     idx + 1,
                     target_exponent_str,
                     err
@@ -1344,7 +1239,7 @@ fn load_candidate_file(path: &str) -> Result<LoadedCandidateFile, Box<dyn Error>
 
         let Some(factors) = parse_factors_csv(factors_str) else {
             println!(
-                "Skipping line {} in reuse file: invalid factors '{}': expected p^e;...",
+                "Skipping line {} in candidate file: invalid factors '{}': expected p^e;...",
                 idx + 1,
                 factors_str
             );
@@ -1359,63 +1254,6 @@ fn load_candidate_file(path: &str) -> Result<LoadedCandidateFile, Box<dyn Error>
     }
 
     Ok(LoadedCandidateFile { metadata, entries })
-}
-
-/// Appends newly generated `r` candidates to a reuse CSV file.
-///
-/// # Parameters
-/// - `path`: Path to the reuse CSV file.
-/// - `entries`: Candidate entries to append.
-///
-/// # Returns
-/// - `()`: This function returns nothing.
-///
-/// # Expected Output
-/// - Appends lines to the file when possible; may print I/O errors.
-fn append_reuse_candidates(path: &str, entries: &[RCandidate]) {
-    if entries.is_empty() {
-        return;
-    }
-
-    println!("Appending {} r candidates to reuse file {}", entries.len(), path);
-    let mut file = match OpenOptions::new().create(true).append(true).open(path) {
-        Ok(f) => f,
-        Err(err) => {
-            println!("Failed to append reuse file {}: {}", path, err);
-            return;
-        }
-    };
-
-    let append_started_at = Instant::now();
-    let append_total = entries.len();
-    let mut next_log_at_secs = 5u64;
-    for (idx, candidate) in entries.iter().enumerate() {
-        let factors_str = format_factors_csv(&candidate.factors);
-        if let Err(err) = writeln!(file, "{},{}", candidate.r, factors_str) {
-            println!(
-                "Failed to write r candidate {} to {}: {}",
-                candidate.r, path, err
-            );
-            break;
-        }
-        let written = idx + 1;
-        let elapsed_secs = append_started_at.elapsed().as_secs();
-        if elapsed_secs >= next_log_at_secs && written < append_total {
-            println!(
-                "Reuse file append progress: wrote {}/{} elapsed {:.1}s",
-                written,
-                append_total,
-                append_started_at.elapsed().as_secs_f64(),
-            );
-            next_log_at_secs += 5;
-        }
-    }
-    println!(
-        "Reuse file append progress: wrote {}/{} elapsed {:.1}s",
-        append_total,
-        append_total,
-        append_started_at.elapsed().as_secs_f64(),
-    );
 }
 
 /// Retargets candidates using random decimal exponent partitions.
@@ -1664,33 +1502,33 @@ mod tests {
     }
 
     #[test]
-    fn test_load_reuse_candidates_missing_file() {
+    fn test_load_candidate_file_missing_file() {
         let missing = temp_path("missing");
-        let entries = load_reuse_candidates(missing.to_str().unwrap());
-        assert!(entries.is_empty());
+        let loaded = load_candidate_file(missing.to_str().unwrap()).expect("load should succeed");
+        assert!(loaded.entries.is_empty());
     }
 
     #[test]
-    fn test_load_reuse_candidates_parses() {
+    fn test_load_candidate_file_parses() {
         let path = temp_path("load");
         let content = "# header\n105,3^1;5^1;7^1\n";
         fs::write(&path, content).expect("write failed");
-        let entries = load_reuse_candidates(path.to_str().unwrap());
-        assert_eq!(entries.len(), 1);
-        assert_eq!(entries[0].r, BigUint::from(105u8));
-        assert_eq!(entries[0].factors.len(), 3);
+        let loaded = load_candidate_file(path.to_str().unwrap()).expect("load should succeed");
+        assert_eq!(loaded.entries.len(), 1);
+        assert_eq!(loaded.entries[0].r, BigUint::from(105u8));
+        assert_eq!(loaded.entries[0].factors.len(), 3);
         let _ = fs::remove_file(&path);
     }
 
     #[test]
-    fn test_load_reuse_candidates_parses_target_exponent_column() {
+    fn test_load_candidate_file_parses_target_exponent_column() {
         let path = temp_path("load_target_exponent");
         let content = "# n=3233\n105,0.875,3^1;5^1;7^1\n";
         fs::write(&path, content).expect("write failed");
-        let entries = load_reuse_candidates(path.to_str().unwrap());
-        assert_eq!(entries.len(), 1);
+        let loaded = load_candidate_file(path.to_str().unwrap()).expect("load should succeed");
+        assert_eq!(loaded.entries.len(), 1);
         assert_eq!(
-            entries[0].target_exponent,
+            loaded.entries[0].target_exponent,
             BigDecimal::parse_bytes(b"0.875", 10).expect("valid exponent")
         );
         let _ = fs::remove_file(&path);
@@ -1727,9 +1565,6 @@ mod tests {
             process_count: 1,
             process_min_count: 1,
             process_scale: 8,
-            reuse_r_candidates_path: "data/rgen_output.csv".to_string(),
-            reuse_r_candidates: false,
-            reuse_r_candidates_append_only: false,
             reuse_retargeted_r_candidates: true,
             reuse_retargeted_r_candidates_path: path.to_string_lossy().to_string(),
             small_primes: vec![3u8, 5u8, 7u8].into_iter().map(BigUint::from).collect(),
@@ -1756,27 +1591,48 @@ mod tests {
     }
 
     #[test]
-    fn test_append_reuse_candidates_writes() {
-        let path = temp_path("append");
-        let entries = vec![RCandidate::new(
-            BigUint::from(105u8),
-            vec![
-                (BigUint::from(3u8), 1),
-                (BigUint::from(5u8), 1),
-                (BigUint::from(7u8), 1),
-            ],
-        )];
-        append_reuse_candidates(path.to_str().unwrap(), &entries);
-        let data = fs::read_to_string(&path).expect("read failed");
-        assert!(data.contains("105,3^1;5^1;7^1"));
-        let _ = fs::remove_file(&path);
-    }
-
-    #[test]
-    fn test_append_reuse_candidates_empty() {
-        let path = temp_path("append_empty");
-        append_reuse_candidates(path.to_str().unwrap(), &[]);
-        assert!(!path.exists());
+    fn test_generate_retargeted_r_candidates_batch_uses_fresh_seed() {
+        let settings = RCandidateSettings {
+            mode: RCandidateMode::SmallPrimes,
+            override_best_r: None,
+            process_min_factor: BigUint::from(3u8),
+            process_count: 10,
+            process_min_count: 10,
+            process_scale: 8,
+            reuse_retargeted_r_candidates: false,
+            reuse_retargeted_r_candidates_path: String::new(),
+            small_primes: vec![3u8, 5u8, 7u8, 11u8]
+                .into_iter()
+                .map(BigUint::from)
+                .collect(),
+            small_prime_factors_per_candidate: 3,
+            max_factors_per_candidate: 5,
+            target_bit_length: Some(16),
+            random_power_window: false,
+            target_exponent_minimum: BigDecimal::parse_bytes(b"0.8", 10).expect("valid exponent"),
+            target_exponent: BigDecimal::parse_bytes(b"0.9", 10).expect("valid exponent"),
+            retarget_partition_count: 3,
+            retarget_minimum_exponent: BigDecimal::parse_bytes(b"0.45", 10)
+                .expect("valid minimum exponent"),
+        };
+        let mut rng = RngChoice::from_seed(RngMode::Standard, 7);
+        let candidates =
+            generate_retargeted_r_candidates_batch(&BigUint::from(3233u32), &settings, &mut rng, 4)
+                .expect("retarget batch should generate");
+        assert_eq!(candidates.len(), 4);
+        assert!(
+            candidates
+                .iter()
+                .all(|candidate| !candidate.factors.is_empty())
+        );
+        assert!(
+            candidates
+                .iter()
+                .map(|candidate| candidate.r.clone())
+                .collect::<HashSet<_>>()
+                .len()
+                >= 2
+        );
     }
 
     #[test]
@@ -1788,9 +1644,6 @@ mod tests {
             process_count: 2,
             process_min_count: 1,
             process_scale: 8,
-            reuse_r_candidates_path: "".to_string(),
-            reuse_r_candidates: false,
-            reuse_r_candidates_append_only: false,
             reuse_retargeted_r_candidates: false,
             reuse_retargeted_r_candidates_path: "".to_string(),
             small_primes: vec![3u8, 5u8, 7u8, 11u8]
@@ -1835,9 +1688,6 @@ mod tests {
             process_count: 1,
             process_min_count: 1,
             process_scale: 8,
-            reuse_r_candidates_path: "".to_string(),
-            reuse_r_candidates: false,
-            reuse_r_candidates_append_only: false,
             reuse_retargeted_r_candidates: false,
             reuse_retargeted_r_candidates_path: "".to_string(),
             small_primes: vec![3u8, 5u8].into_iter().map(BigUint::from).collect(),
@@ -1865,9 +1715,6 @@ mod tests {
             process_count: 1,
             process_min_count: 1,
             process_scale: 8,
-            reuse_r_candidates_path: "".to_string(),
-            reuse_r_candidates: false,
-            reuse_r_candidates_append_only: false,
             reuse_retargeted_r_candidates: false,
             reuse_retargeted_r_candidates_path: "".to_string(),
             small_primes: vec![3u8, 5u8, 7u8].into_iter().map(BigUint::from).collect(),
@@ -1895,9 +1742,6 @@ mod tests {
             process_count: 1,
             process_min_count: 1,
             process_scale: 8,
-            reuse_r_candidates_path: "".to_string(),
-            reuse_r_candidates: false,
-            reuse_r_candidates_append_only: false,
             reuse_retargeted_r_candidates: false,
             reuse_retargeted_r_candidates_path: "".to_string(),
             small_primes: Vec::new(),
@@ -1926,9 +1770,6 @@ mod tests {
             process_count: 1,
             process_min_count: 1,
             process_scale: 8,
-            reuse_r_candidates_path: "".to_string(),
-            reuse_r_candidates: false,
-            reuse_r_candidates_append_only: false,
             reuse_retargeted_r_candidates: false,
             reuse_retargeted_r_candidates_path: "".to_string(),
             small_primes: Vec::new(),
@@ -1959,9 +1800,6 @@ mod tests {
             process_count: 1,
             process_min_count: 1,
             process_scale: 8,
-            reuse_r_candidates_path: "".to_string(),
-            reuse_r_candidates: false,
-            reuse_r_candidates_append_only: false,
             reuse_retargeted_r_candidates: false,
             reuse_retargeted_r_candidates_path: "".to_string(),
             small_primes: Vec::new(),
@@ -2039,9 +1877,6 @@ mod tests {
             process_count: 1,
             process_min_count: 1,
             process_scale: 8,
-            reuse_r_candidates_path: "".to_string(),
-            reuse_r_candidates: false,
-            reuse_r_candidates_append_only: false,
             reuse_retargeted_r_candidates: false,
             reuse_retargeted_r_candidates_path: "".to_string(),
             small_primes: Vec::new(),

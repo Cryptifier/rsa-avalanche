@@ -3429,9 +3429,6 @@ pub fn build_r_candidate_settings(
         process_count: engine.process_count,
         process_min_count: engine.process_min_count,
         process_scale: engine.process_scale,
-        reuse_r_candidates_path: engine.reuse_r_candidates_path.clone(),
-        reuse_r_candidates: engine.reuse_r_candidates,
-        reuse_r_candidates_append_only: engine.reuse_r_candidates_append_only,
         reuse_retargeted_r_candidates: engine.reuse_retargeted_r_candidates,
         reuse_retargeted_r_candidates_path: resolve_retargeted_r_candidates_path(
             &engine.reuse_retargeted_r_candidates_path_prefix,

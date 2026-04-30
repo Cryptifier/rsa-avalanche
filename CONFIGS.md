@@ -73,9 +73,6 @@ Notes:
 | `engine.oracle_accuracy_threshold` | number | `51.0` | Oracle accuracy threshold for sufficiency checks. |
 | `engine.beam_bit_one_threshold` | number | `0.4` | Minimum stored beam value interpreted as bit `1`. |
 | `engine.avalanche_probability_spread_exponent` | number | `0.5` | Power exponent applied to confidence around `0.5`; values below `1.0` sharpen confidence while preserving the original side of `0.5`, and values above `1.0` soften it. |
-| `engine.reuse_r_candidates` | bool | `true` | Reuse cached `r` candidates. |
-| `engine.reuse_r_candidates_path` | string | `data/r_candidates.csv` | Cache file path. |
-| `engine.reuse_r_candidates_append_only` | bool | `false` | Append-only reuse file behavior. |
 | `engine.r_candidate_mode` | string | `small_primes` | Candidate generation mode. |
 | `engine.r_candidate_small_primes` | array(u64) | `[3, 5, 7, 11, 13, 17]` | Small primes for candidate generation. |
 | `engine.r_candidate_small_prime_factors` | usize | `3` | Number of small prime factors. |

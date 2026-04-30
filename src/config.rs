@@ -2,7 +2,6 @@
 /// SPDX-License-Identifier: EPL-2.0
 /// Copyright (c) 2025 Nicholas LaRoche <nlaroche@cryptifier.dev>
 // Configuration schema and loader for config/rsa_config.json.
-
 use std::{error::Error, fs, path::Path};
 
 use bigdecimal::BigDecimal;
@@ -195,12 +194,6 @@ pub struct EngineConfig {
     pub mirror_invert_candidates: bool,
     #[serde(default)]
     pub override_best_r: Option<String>,
-    #[serde(default = "default_reuse_r_candidates_path")]
-    pub reuse_r_candidates_path: String,
-    #[serde(default = "default_reuse_r_candidates")]
-    pub reuse_r_candidates: bool,
-    #[serde(default = "default_reuse_r_candidates_append_only")]
-    pub reuse_r_candidates_append_only: bool,
     #[serde(default = "default_reuse_retargeted_r_candidates")]
     pub reuse_retargeted_r_candidates: bool,
     #[serde(default = "default_reuse_retargeted_r_candidates_path_prefix")]
@@ -363,9 +356,6 @@ impl Default for EngineConfig {
             use_hamming_distance: default_use_hamming_distance(),
             mirror_invert_candidates: default_mirror_invert_candidates(),
             override_best_r: None,
-            reuse_r_candidates_path: default_reuse_r_candidates_path(),
-            reuse_r_candidates: default_reuse_r_candidates(),
-            reuse_r_candidates_append_only: default_reuse_r_candidates_append_only(),
             reuse_retargeted_r_candidates: default_reuse_retargeted_r_candidates(),
             reuse_retargeted_r_candidates_path_prefix:
                 default_reuse_retargeted_r_candidates_path_prefix(),
@@ -1300,43 +1290,6 @@ fn default_mirror_invert_candidates() -> bool {
 /// # Parameters
 /// - None.
 ///
-/// # Returns
-/// - `bool`: Default reuse setting.
-///
-/// # Expected Output
-/// - Returns a constant default value; no side effects.
-fn default_reuse_r_candidates() -> bool {
-    false
-}
-
-/// Default path for the r candidates reuse file.
-///
-/// # Parameters
-/// - None.
-///
-/// # Returns
-/// - `String`: Default reuse path.
-///
-/// # Expected Output
-/// - Returns a constant default value; no side effects.
-fn default_reuse_r_candidates_path() -> String {
-    "data/r_candidates.csv".to_string()
-}
-
-/// Default flag for append-only reuse file behavior.
-///
-/// # Parameters
-/// - None.
-///
-/// # Returns
-/// - `bool`: Default append-only setting.
-///
-/// # Expected Output
-/// - Returns a constant default value; no side effects.
-fn default_reuse_r_candidates_append_only() -> bool {
-    false
-}
-
 /// Default flag for reading pre-retargeted r candidates from a keyed cache file.
 ///
 /// # Parameters
