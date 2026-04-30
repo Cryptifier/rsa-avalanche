@@ -4,17 +4,18 @@
 use bigdecimal::{BigDecimal, FromPrimitive, One};
 use num_bigint::{BigInt, BigUint};
 use num_integer::Integer;
+use num_rational::BigRational;
 use num_traits::{Signed, ToPrimitive, Zero};
 use rand::RngCore;
 use std::time::Instant;
 
 use crate::rng::RngChoice;
 
-mod rational_support {
-    include!("math_rational.rs");
-}
+//mod rational_support {
+// include!("math_rational.rs");
+//}
 
-pub use rational_support::{ApproximationBounds, BigRational, RationalError};
+//pub use rational_support::{ApproximationBounds, BigRational, RationalError};
 
 /// Selects the first odd public exponent `e >= start` that is coprime with `phi`.
 ///
@@ -88,6 +89,42 @@ pub fn to_hex(value: &BigUint) -> String {
     hex
 }
 
+/// Converts a `BigRational` to a `BigDecimal` with the specified number of digits.
+///
+/// # Parameters
+/// - `x`: The `BigRational` to convert.
+/// - `digits`: The number of digits to include in the result.
+///
+/// # Returns
+/// - `BigDecimal`: The converted value.
+pub fn rational_to_bigdecimal(x: &BigRational, digits: i64) -> BigDecimal {
+    let p = x.numer();
+    let q = x.denom();
+
+    // 10^digits
+    let scale_factor = BigInt::from(10).pow(digits as u32);
+
+    // scaled numerator
+    let scaled = p * &scale_factor;
+
+    // integer division + remainder
+    let (mut n, r) = (scaled.clone() / q, scaled % q);
+
+    // --- rounding: round half up ---
+    let two_r: BigInt = &r * 2;
+
+    if two_r.abs() >= q.abs() {
+        if x.is_negative() {
+            n -= 1;
+        } else {
+            n += 1;
+        }
+    }
+
+    BigDecimal::new(n, digits)
+}
+
+/// Returns `10^-scale` as a `BigDecimal`.
 fn pow10_neg(scale: i64) -> BigDecimal {
     BigDecimal::new(1.into(), scale)
 }

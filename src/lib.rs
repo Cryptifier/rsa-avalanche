@@ -7,7 +7,6 @@ pub mod bitflow;
 pub mod combiner;
 pub mod config;
 pub mod dsp;
-pub mod graph;
 pub mod helpers;
 pub mod lattices;
 pub mod logs;
