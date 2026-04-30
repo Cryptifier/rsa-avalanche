@@ -195,7 +195,7 @@ fn run_rgen(args: Args, config: Config) -> Result<(), Box<dyn Error>> {
 
     if (settings.mode == RCandidateMode::Factoring || args.retargeted) && modulus.is_none() {
         return Err(
-            "factoring mode requires --n, --p/--q, --bits, or config/rsa_config_small_batch.json with p and q"
+            "factoring mode requires --n, --p/--q, --bits, or config/rsa_config_small_batch.json with inline primes or rsa_keypair.keyfile"
                 .into(),
         );
     }

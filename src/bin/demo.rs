@@ -253,12 +253,12 @@ fn build_demo_context(config: &Config) -> Result<DemoContext, Box<dyn Error>> {
         .rsa_keypair
         .p
         .clone()
-        .ok_or("config.rsa_keypair.p must be set")?;
+        .ok_or("config.rsa_keypair.p must be set, or rsa_keypair.keyfile must provide it")?;
     let q = config
         .rsa_keypair
         .q
         .clone()
-        .ok_or("config.rsa_keypair.q must be set")?;
+        .ok_or("config.rsa_keypair.q must be set, or rsa_keypair.keyfile must provide it")?;
     let n = &p * &q;
     let e = BigUint::from(config.rsa_keypair.e);
     let key_bit_width = p.bits().saturating_add(q.bits());

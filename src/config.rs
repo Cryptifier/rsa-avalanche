@@ -2,7 +2,11 @@
 /// SPDX-License-Identifier: EPL-2.0
 /// Copyright (c) 2025 Nicholas LaRoche <nlaroche@cryptifier.dev>
 // Configuration schema and loader for config/rsa_config.json.
-use std::{error::Error, fs, path::Path};
+use std::{
+    error::Error,
+    fs,
+    path::{Path, PathBuf},
+};
 
 use bigdecimal::BigDecimal;
 use num_bigint::BigUint;
@@ -33,6 +37,9 @@ pub struct KeyConfig {
     /// Whether to generate keys instead of using provided values.
     #[serde(default = "default_generate")]
     pub generate: bool,
+    /// Relative or absolute YAML keypair path used when `p`/`q` are not configured.
+    #[serde(default = "default_keyfile")]
+    pub keyfile: String,
     /// RSA prime p (required when not generating).
     #[serde(default, deserialize_with = "deserialize_biguint_option")]
     pub p: Option<BigUint>,
@@ -285,6 +292,7 @@ impl Default for KeyConfig {
     fn default() -> Self {
         Self {
             generate: default_generate(),
+            keyfile: default_keyfile(),
             p: None,
             q: None,
             e: default_e(),
@@ -394,7 +402,7 @@ pub fn load_config(path: &str) -> Result<Config, Box<dyn Error>> {
     }
 
     let raw = fs::read_to_string(cfg_path)?;
-    let config = match serde_json::from_str(&raw) {
+    let mut config: Config = match serde_json::from_str(&raw) {
         Ok(cfg) => cfg,
         Err(json_err) => match json5::from_str(&raw) {
             Ok(cfg) => cfg,
@@ -407,7 +415,138 @@ pub fn load_config(path: &str) -> Result<Config, Box<dyn Error>> {
         },
     };
 
+    hydrate_keypair_from_keyfile(cfg_path, &mut config.rsa_keypair)?;
     Ok(config)
+}
+
+#[derive(Debug, Deserialize)]
+struct RsaPrivateKeyYaml {
+    public_exponent: String,
+    primes: RsaPrivateKeyYamlPrimes,
+}
+
+#[derive(Debug, Deserialize)]
+struct RsaPrivateKeyYamlPrimes {
+    p: String,
+    q: String,
+}
+
+/// Resolves a keyfile path relative to the configuration file that references it.
+///
+/// # Parameters
+/// - `config_path`: Path to the JSON/JSON5 configuration file.
+/// - `keyfile`: Configured keyfile string, which may be relative or absolute.
+///
+/// # Returns
+/// - `PathBuf`: Resolved filesystem path to the requested keyfile.
+///
+/// # Expected Output
+/// - Returns a path value without touching the filesystem.
+fn resolve_keyfile_path(config_path: &Path, keyfile: &str) -> PathBuf {
+    let keyfile_path = Path::new(keyfile);
+    if keyfile_path.is_absolute() {
+        return keyfile_path.to_path_buf();
+    }
+
+    config_path
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .join(keyfile_path)
+}
+
+/// Parses one decimal bigint field from an RSA keyfile.
+///
+/// # Parameters
+/// - `field_name`: Human-readable field label for error reporting.
+/// - `raw`: Raw decimal field value from the YAML file.
+/// - `path`: Resolved keyfile path used for diagnostics.
+///
+/// # Returns
+/// - `Result<BigUint, Box<dyn Error>>`: Parsed bigint value.
+///
+/// # Expected Output
+/// - Returns a parsed bigint or an error; no stdout/stderr output.
+fn parse_keyfile_biguint(
+    field_name: &str,
+    raw: &str,
+    path: &Path,
+) -> Result<BigUint, Box<dyn Error>> {
+    raw.trim().parse::<BigUint>().map_err(|err| {
+        format!(
+            "failed to parse {field_name} in keyfile {}: {err}",
+            path.display()
+        )
+        .into()
+    })
+}
+
+/// Loads `p`, `q`, and `e` from an RSA private-key YAML document.
+///
+/// # Parameters
+/// - `config_path`: Path to the JSON/JSON5 configuration file requesting the key.
+/// - `keyfile`: Configured YAML keyfile path, relative to `config_path` when not absolute.
+///
+/// # Returns
+/// - `Result<(BigUint, BigUint, u64), Box<dyn Error>>`: Prime pair and public exponent.
+///
+/// # Expected Output
+/// - Reads and deserializes the YAML file from disk; no stdout/stderr output on success.
+fn load_keypair_from_yaml(
+    config_path: &Path,
+    keyfile: &str,
+) -> Result<(BigUint, BigUint, u64), Box<dyn Error>> {
+    let resolved_path = resolve_keyfile_path(config_path, keyfile);
+    let raw = fs::read_to_string(&resolved_path)?;
+    let parsed: RsaPrivateKeyYaml = serde_yaml::from_str(&raw).map_err(|err| {
+        format!(
+            "failed to parse RSA keyfile {}: {err}",
+            resolved_path.display()
+        )
+    })?;
+    let p = parse_keyfile_biguint("primes.p", &parsed.primes.p, &resolved_path)?;
+    let q = parse_keyfile_biguint("primes.q", &parsed.primes.q, &resolved_path)?;
+    let e = parsed
+        .public_exponent
+        .trim()
+        .parse::<u64>()
+        .map_err(|err| {
+            format!(
+                "failed to parse public_exponent in keyfile {}: {err}",
+                resolved_path.display()
+            )
+        })?;
+    Ok((p, q, e))
+}
+
+/// Hydrates missing inline RSA key material from a configured YAML keyfile.
+///
+/// # Parameters
+/// - `config_path`: Path to the JSON/JSON5 configuration file.
+/// - `key_config`: Mutable RSA keypair configuration to backfill.
+///
+/// # Returns
+/// - `Result<(), Box<dyn Error>>`: `Ok(())` when hydration succeeds or is unnecessary.
+///
+/// # Expected Output
+/// - Reads the configured YAML keyfile when inline primes are absent; no stdout/stderr output on success.
+fn hydrate_keypair_from_keyfile(
+    config_path: &Path,
+    key_config: &mut KeyConfig,
+) -> Result<(), Box<dyn Error>> {
+    if key_config.generate || (key_config.p.is_some() && key_config.q.is_some()) {
+        return Ok(());
+    }
+
+    let keyfile = key_config.keyfile.trim();
+    if keyfile.is_empty() {
+        return Ok(());
+    }
+
+    let (p, q, e) = load_keypair_from_yaml(config_path, keyfile)?;
+    key_config.p = Some(p);
+    key_config.q = Some(q);
+    key_config.e = e;
+    Ok(())
 }
 
 /// Deserializes an optional `BigUint` from a string or number JSON value.
@@ -513,6 +652,20 @@ where
 /// - Returns a constant default value; no side effects.
 fn default_generate() -> bool {
     true
+}
+
+/// Default keyfile path.
+///
+/// # Parameters
+/// - None.
+///
+/// # Returns
+/// - `String`: Empty string, indicating no YAML keyfile is configured.
+///
+/// # Expected Output
+/// - Returns a constant default value; no side effects.
+fn default_keyfile() -> String {
+    String::new()
 }
 
 /// Default RSA public exponent.
@@ -1476,6 +1629,25 @@ fn default_combiner_tie_breaker() -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    /// Builds a unique temporary path for config-loader tests.
+    ///
+    /// # Parameters
+    /// - `label`: Short suffix describing the test artifact.
+    ///
+    /// # Returns
+    /// - `PathBuf`: Unique filesystem path under the process temp directory.
+    ///
+    /// # Expected Output
+    /// - Returns a path value without touching the filesystem.
+    fn temp_path(label: &str) -> PathBuf {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock should be after unix epoch")
+            .as_nanos();
+        std::env::temp_dir().join(format!("rsademo_config_{label}_{nanos}"))
+    }
 
     #[test]
     fn test_engine_config_defaults_disable_avalanche_hamming_distance_pruning() {
@@ -1493,5 +1665,90 @@ mod tests {
             engine.avalanche_combination_hamming_distance_outlier_preference_pct,
             0.0
         );
+    }
+
+    #[test]
+    fn test_load_config_hydrates_keypair_from_relative_keyfile() {
+        let temp_dir = temp_path("keyfile_relative");
+        fs::create_dir_all(temp_dir.join("keys")).expect("create temp config dir");
+        fs::write(
+            temp_dir.join("keys").join("sample.yaml"),
+            concat!(
+                "format: rsa-private-key-v1\n",
+                "algorithm: RSA\n",
+                "public_exponent: \"17\"\n",
+                "private_exponent: \"2753\"\n",
+                "modulus: \"3233\"\n",
+                "totient: \"3120\"\n",
+                "primes:\n",
+                "  p: \"61\"\n",
+                "  q: \"53\"\n",
+            ),
+        )
+        .expect("write keyfile");
+        fs::write(
+            temp_dir.join("config.json"),
+            concat!(
+                "{\n",
+                "  \"rsa_keypair\": {\n",
+                "    \"generate\": false,\n",
+                "    \"keyfile\": \"keys/sample.yaml\"\n",
+                "  }\n",
+                "}\n",
+            ),
+        )
+        .expect("write config");
+
+        let config = load_config(temp_dir.join("config.json").to_str().expect("utf8 path"))
+            .expect("load config");
+        assert_eq!(config.rsa_keypair.e, 17);
+        assert_eq!(config.rsa_keypair.p, Some(BigUint::from(61u8)));
+        assert_eq!(config.rsa_keypair.q, Some(BigUint::from(53u8)));
+
+        let _ = fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn test_load_config_prefers_inline_primes_over_keyfile() {
+        let temp_dir = temp_path("keyfile_inline_override");
+        fs::create_dir_all(temp_dir.join("keys")).expect("create temp config dir");
+        fs::write(
+            temp_dir.join("keys").join("sample.yaml"),
+            concat!(
+                "format: rsa-private-key-v1\n",
+                "algorithm: RSA\n",
+                "public_exponent: \"17\"\n",
+                "private_exponent: \"2753\"\n",
+                "modulus: \"3233\"\n",
+                "totient: \"3120\"\n",
+                "primes:\n",
+                "  p: \"61\"\n",
+                "  q: \"53\"\n",
+            ),
+        )
+        .expect("write keyfile");
+        fs::write(
+            temp_dir.join("config.json"),
+            concat!(
+                "{\n",
+                "  \"rsa_keypair\": {\n",
+                "    \"generate\": false,\n",
+                "    \"keyfile\": \"keys/sample.yaml\",\n",
+                "    \"e\": 65537,\n",
+                "    \"p\": \"71\",\n",
+                "    \"q\": \"67\"\n",
+                "  }\n",
+                "}\n",
+            ),
+        )
+        .expect("write config");
+
+        let config = load_config(temp_dir.join("config.json").to_str().expect("utf8 path"))
+            .expect("load config");
+        assert_eq!(config.rsa_keypair.e, 65537);
+        assert_eq!(config.rsa_keypair.p, Some(BigUint::from(71u8)));
+        assert_eq!(config.rsa_keypair.q, Some(BigUint::from(67u8)));
+
+        let _ = fs::remove_dir_all(&temp_dir);
     }
 }

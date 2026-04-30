@@ -13,8 +13,7 @@ This file collects the configuration material that used to live in `README.md`.
 
 # Notes for `config/rsa_config_small_batch.json`
 - This is the main replay configuration for the current POC.
-- It uses `rsa_keypair.generate = false` and supplies explicit `p` and `q`.
-- It reuses a precomputed `r`-candidate grid from `data/rgen_output.csv`.
+- It uses `rsa_keypair.generate = false` and resolves the RSA key from `rsa_keypair.keyfile`.
 - It enables batched Avalanche sampling, majority-vote beam search, and Hamming-distance pruning for the small-batch workflow.
 - It is the default config for both `analysis.rs` and `demo.rs`.
 
@@ -22,12 +21,13 @@ This file collects the configuration material that used to live in `README.md`.
 Notes:
 - Missing config files fall back to built-in defaults; when present, values below are read.
 - Unknown keys are ignored by `analysis.rs`. The `padding` and `engine.max_overlap_min` fields are currently not used.
-- `rsa_keypair.p` and `rsa_keypair.q` must be set when `rsa_keypair.generate` is `false`.
+- When `rsa_keypair.generate` is `false`, supply either inline `rsa_keypair.p`/`rsa_keypair.q` or `rsa_keypair.keyfile`.
 
 | Key | Type | Default in `config/rsa_config.json` | Notes |
 | --- | --- | --- | --- |
 | `rsa_keypair.generate` | bool | `false` | Generate primes when `true`. |
 | `rsa_keypair.e` | u64 | `65537` | Public exponent seed. |
+| `rsa_keypair.keyfile` | string | `""` | Relative or absolute YAML keypair path used when inline primes are absent. |
 | `rsa_keypair.p` | string (bigint) | `3030152311446024058741` | Prime `p` when not generating. |
 | `rsa_keypair.q` | string (bigint) | `4262327550688715209573` | Prime `q` when not generating. |
 | `padding` | string | `PKCS1v15` | Present for compatibility; currently unused. |

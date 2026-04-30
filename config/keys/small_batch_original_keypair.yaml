@@ -1,0 +1,21 @@
+format: rsa-private-key-v1
+algorithm: RSA
+public_exponent: "65537"
+private_exponent: "1780347623111380569028026930031963952134433"
+modulus: "12915501679859480667750241440843407877527593"
+totient: "12915501679859480667742948960981273138259280"
+primes:
+  p: "3030152311446024058741"
+  q: "4262327550688715209573"
+bit_lengths:
+  requested_prime_bits: 72
+  requested_modulus_bits: 144
+  prime_p_bits: 72
+  prime_q_bits: 72
+  modulus_bits: 144
+generation:
+  size_mode: prime
+  requested_public_exponent: 65537
+  rng_mode: standard
+  seed: null
+  created_unix_ms: 0

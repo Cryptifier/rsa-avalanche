@@ -4,8 +4,7 @@
   "rsa_keypair": {
     "generate": false,
     "e": 65537,
-    "p": "3030152311446024058741",
-    "q": "4262327550688715209573"
+    "keyfile": "keys/small_batch_original_keypair.yaml"
   },
   "polynomial_fields": {
     // Coordinate-generation fields shared with the other small/medium configs so

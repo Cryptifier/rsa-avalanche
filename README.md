@@ -79,7 +79,7 @@ cargo run --bin demo -- --decrypt --ciphertext 0x1234
 - `--plaintext-hex <HEX>`: Plaintext hex string (required with `--encrypt`).
 - `--ciphertext <VALUE>`: Ciphertext override (decimal or hex). Falls back to `verify.ciphertext_hex` or `verify.ciphertext` in the config.
 - `--shift`: Multiply ciphertext by encrypted `2` before base conversion.
-- Demo runs require `rsa_keypair.generate = false` with `rsa_keypair.p` and `rsa_keypair.q` supplied.
+- Demo runs require `rsa_keypair.generate = false` with either inline `rsa_keypair.p`/`rsa_keypair.q` or `rsa_keypair.keyfile` supplied.
 
 ## `kgen`
 ```bash

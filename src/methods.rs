@@ -378,12 +378,12 @@ pub fn run_demo(
             .rsa_keypair
             .p
             .clone()
-            .ok_or("config.rsa_keypair.p must be set when generate is false")?;
+            .ok_or("config.rsa_keypair.p must be set when generate is false, or rsa_keypair.keyfile must provide it")?;
         let q = config
             .rsa_keypair
             .q
             .clone()
-            .ok_or("config.rsa_keypair.q must be set when generate is false")?;
+            .ok_or("config.rsa_keypair.q must be set when generate is false, or rsa_keypair.keyfile must provide it")?;
         (p, q)
     };
     with_analytics(analytics, |a| {
