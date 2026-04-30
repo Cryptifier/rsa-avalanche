@@ -1,3 +1,6 @@
+/// Eclipse Public License 2.0
+/// SPDX-License-Identifier: EPL-2.0
+/// Copyright (c) 2025 Nicholas LaRoche <nlaroche@cryptifier.dev>
 use bigdecimal::BigDecimal;
 use rayon::prelude::*;
 use std::fs::File;

@@ -1,6 +1,6 @@
 /// Eclipse Public License 2.0
 /// SPDX-License-Identifier: EPL-2.0
-/// Copyright (c) 2026 Nicholas LaRoche <nlaroche@cryptifier.dev>
+/// Copyright (c) 2025 Nicholas LaRoche <nlaroche@cryptifier.dev>
 use std::{
     cmp::min,
     collections::HashSet,

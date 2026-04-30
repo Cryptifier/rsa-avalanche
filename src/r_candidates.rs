@@ -1,3 +1,6 @@
+/// Eclipse Public License 2.0
+/// SPDX-License-Identifier: EPL-2.0
+/// Copyright (c) 2025 Nicholas LaRoche <nlaroche@cryptifier.dev>
 use crate::math::{
     coalesce_factors, factor_composite_with_timeout, floor_biguint_pow_bigdecimal,
     is_probable_prime_big, next_prime_from_biguint_pow_bigdecimal, pollard_rho,

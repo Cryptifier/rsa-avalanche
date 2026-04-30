@@ -1,3 +1,6 @@
+/// Eclipse Public License 2.0
+/// SPDX-License-Identifier: EPL-2.0
+/// Copyright (c) 2025 Nicholas LaRoche <nlaroche@cryptifier.dev>
 #[cfg(all(feature = "aarch64-hamming-accel", target_arch = "aarch64"))]
 use core::arch::aarch64::{vaddvq_u8, vcntq_u8, veorq_u8, vld1q_u8};
 #[cfg(all(feature = "x86-hamming-accel", target_arch = "x86_64"))]
