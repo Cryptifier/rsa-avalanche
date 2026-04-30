@@ -18,6 +18,7 @@ use std::collections::{BTreeMap, HashSet};
 use std::error::Error;
 use std::fs::{self, OpenOptions};
 use std::io::{BufRead, BufReader, Write};
+use std::path::Path;
 use std::sync::{
     Arc, Mutex,
     atomic::{AtomicU64, AtomicUsize, Ordering},
@@ -150,20 +151,26 @@ pub fn generate_r_candidates_batch(
 /// Resolves the keyed cache path for pre-retargeted r candidates.
 ///
 /// # Parameters
-/// - `path_prefix`: File prefix configured for the retargeted cache family.
+/// - `path_prefix`: Directory-like prefix configured for the retargeted cache family.
 /// - `key_bit_width`: Bit width of the original RSA key used to namespace the cache file.
 ///
 /// # Returns
-/// - `String`: Derived cache path ending in `_<bits>.csv`.
+/// - `String`: Derived cache path ending in `/<bits>.csv`.
 ///
 /// # Expected Output
 /// - Returns a deterministic file path; no stdout/stderr output.
 pub fn resolve_retargeted_r_candidates_path(path_prefix: &str, key_bit_width: u64) -> String {
-    format!(
-        "{}_{}.csv",
-        path_prefix.trim_end_matches(".csv"),
-        key_bit_width
-    )
+    let normalized_prefix = path_prefix
+        .trim()
+        .trim_end_matches(".csv")
+        .trim_end_matches('/')
+        .trim_end_matches('\\');
+    let base_dir = if normalized_prefix.is_empty() {
+        "data/rgen_retargeted"
+    } else {
+        normalized_prefix
+    };
+    format!("{base_dir}/{key_bit_width}.csv")
 }
 
 /// Writes r candidates to a CSV file, optionally appending to an existing file.
@@ -185,6 +192,12 @@ pub fn write_candidates_csv(
     append: bool,
     header_lines: &[String],
 ) -> Result<usize, Box<dyn Error>> {
+    if let Some(parent) = Path::new(path).parent() {
+        if !parent.as_os_str().is_empty() {
+            fs::create_dir_all(parent)?;
+        }
+    }
+
     let needs_header = if append {
         fs::metadata(path)
             .map(|meta| meta.len() == 0)
@@ -237,6 +250,9 @@ pub fn load_retargeted_r_candidates(
     expected_modulus: &BigUint,
 ) -> Result<Vec<RCandidate>, Box<dyn Error>> {
     let loaded = load_candidate_file(path)?;
+    if loaded.metadata.is_empty() && loaded.entries.is_empty() {
+        return Ok(Vec::new());
+    }
     let expected_modulus_text = expected_modulus.to_string();
     let Some(stored_modulus) = loaded.metadata.get("n") else {
         return Err(format!(
@@ -326,7 +342,97 @@ fn build_seed_r_candidates_for_retargeting(
     vec![seed; count]
 }
 
-/// Prepares a batch of speculative r candidates, optionally loading a keyed retargeted cache.
+/// Builds header metadata for a retargeted r-candidate cache file.
+///
+/// # Parameters
+/// - `n`: RSA modulus bound to the cache file.
+///
+/// # Returns
+/// - `Vec<String>`: Header lines written before the first cached candidate row.
+///
+/// # Expected Output
+/// - Returns in-memory header lines; no stdout/stderr output.
+fn build_retargeted_cache_header_lines(n: &BigUint) -> Vec<String> {
+    vec![
+        "# analysis retargeted_r_candidates cache".to_string(),
+        "# retargeted=true".to_string(),
+        format!("# n={n}"),
+        "# columns=r,target_exponent,factors".to_string(),
+    ]
+}
+
+/// Loads and extends a retargeted r-candidate cache until it can satisfy the requested batch size.
+///
+/// # Parameters
+/// - `n`: RSA modulus used for cache validation and fresh retargeting.
+/// - `settings`: Candidate settings containing the cache path and retarget parameters.
+/// - `rng`: Random number generator used for fresh seed generation and retarget sampling.
+/// - `batch_size`: Number of retargeted candidates requested by the caller.
+///
+/// # Returns
+/// - `Result<Vec<RCandidate>, Box<dyn Error>>`: Cached plus newly generated candidates truncated to `batch_size`.
+///
+/// # Expected Output
+/// - Reads and appends the keyed cache file as needed; may create cache directories and print cache progress logs.
+fn prepare_cached_retargeted_r_candidates(
+    n: &BigUint,
+    settings: &RCandidateSettings,
+    rng: &mut RngChoice,
+    batch_size: usize,
+) -> Result<Vec<RCandidate>, Box<dyn Error>> {
+    let target_count = batch_size.max(1);
+    println!(
+        "Retargeted cache enabled; loading up to {} candidates from {}",
+        target_count, settings.reuse_retargeted_r_candidates_path
+    );
+    let mut cached = load_retargeted_r_candidates(&settings.reuse_retargeted_r_candidates_path, n)?;
+    let mut seen_r: HashSet<BigUint> = cached.iter().map(|candidate| candidate.r.clone()).collect();
+    let header_lines = build_retargeted_cache_header_lines(n);
+    let mut attempts = 0usize;
+    let attempt_limit = target_count.saturating_mul(4).max(4);
+
+    while cached.len() < target_count {
+        let missing = target_count - cached.len();
+        println!(
+            "Retargeted cache short by {} candidates; generating fresh seed-backed entries",
+            missing
+        );
+        let generated = generate_retargeted_r_candidates_batch(n, settings, rng, missing)?;
+        let mut unique_generated = Vec::new();
+        for candidate in generated {
+            if seen_r.insert(candidate.r.clone()) {
+                unique_generated.push(candidate);
+            }
+        }
+
+        if unique_generated.is_empty() {
+            attempts = attempts.saturating_add(1);
+            if attempts >= attempt_limit {
+                return Err(format!(
+                    "unable to extend retargeted cache {} to {} unique candidates",
+                    settings.reuse_retargeted_r_candidates_path, target_count
+                )
+                .into());
+            }
+            continue;
+        }
+
+        write_candidates_csv(
+            &settings.reuse_retargeted_r_candidates_path,
+            &unique_generated,
+            true,
+            &header_lines,
+        )?;
+        cached.extend(unique_generated);
+        attempts = 0;
+    }
+
+    cached.shuffle(rng);
+    cached.truncate(target_count);
+    Ok(cached)
+}
+
+/// Prepares a batch of speculative r candidates, optionally loading and extending a keyed retargeted cache.
 ///
 /// # Parameters
 /// - `n`: RSA modulus used for candidate generation and cache validation.
@@ -335,10 +441,10 @@ fn build_seed_r_candidates_for_retargeting(
 /// - `batch_size`: Target number of candidates to prepare.
 ///
 /// # Returns
-/// - `Result<Vec<RCandidate>, Box<dyn Error>>`: Prepared candidate batch or an error when cache loading fails.
+/// - `Result<Vec<RCandidate>, Box<dyn Error>>`: Prepared candidate batch or an error when cache loading or extension fails.
 ///
 /// # Expected Output
-/// - May print reuse and retarget progress logs; no file output.
+/// - May print reuse and retarget progress logs and append generated retargeted candidates to disk when cache reuse is enabled.
 pub fn prepare_r_candidates_batch(
     n: &BigUint,
     settings: &RCandidateSettings,
@@ -346,15 +452,7 @@ pub fn prepare_r_candidates_batch(
     batch_size: usize,
 ) -> Result<Vec<RCandidate>, Box<dyn Error>> {
     if settings.reuse_retargeted_r_candidates {
-        println!(
-            "Reuse enabled; loading retargeted r candidates from {}",
-            settings.reuse_retargeted_r_candidates_path
-        );
-        let mut candidates =
-            load_retargeted_r_candidates(&settings.reuse_retargeted_r_candidates_path, n)?;
-        candidates.shuffle(rng);
-        candidates.truncate(batch_size.max(1));
-        return Ok(candidates);
+        return prepare_cached_retargeted_r_candidates(n, settings, rng, batch_size);
     }
 
     let mut candidates = build_seed_r_candidates_for_retargeting(n, settings, rng, batch_size);
@@ -1538,7 +1636,7 @@ mod tests {
     fn test_resolve_retargeted_r_candidates_path_uses_key_bits() {
         assert_eq!(
             resolve_retargeted_r_candidates_path("data/rgen_retargeted", 512),
-            "data/rgen_retargeted_512.csv"
+            "data/rgen_retargeted/512.csv"
         );
     }
 
@@ -1551,6 +1649,14 @@ mod tests {
             .expect_err("cache should reject mismatched modulus");
         assert!(err.to_string().contains("different modulus"));
         let _ = fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_load_retargeted_r_candidates_missing_file_is_cache_miss() {
+        let path = temp_path("retargeted_missing");
+        let loaded = load_retargeted_r_candidates(path.to_str().unwrap(), &BigUint::from(3233u32))
+            .expect("missing cache should be treated as empty");
+        assert!(loaded.is_empty());
     }
 
     #[test]
@@ -1588,6 +1694,49 @@ mod tests {
             BigDecimal::parse_bytes(b"0.875", 10).expect("valid exponent")
         );
         let _ = fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_prepare_r_candidates_batch_populates_retargeted_cache_when_missing() {
+        let cache_dir = temp_path("retargeted_cache_fill");
+        let _ = fs::remove_file(&cache_dir);
+        let path = cache_dir
+            .join("nested")
+            .join("rgen_retargeted")
+            .join("16.csv");
+        let settings = RCandidateSettings {
+            mode: RCandidateMode::SmallPrimes,
+            override_best_r: None,
+            process_min_factor: BigUint::from(3u8),
+            process_count: 10,
+            process_min_count: 10,
+            process_scale: 8,
+            reuse_retargeted_r_candidates: true,
+            reuse_retargeted_r_candidates_path: path.to_string_lossy().to_string(),
+            small_primes: vec![3u8, 5u8, 7u8, 11u8]
+                .into_iter()
+                .map(BigUint::from)
+                .collect(),
+            small_prime_factors_per_candidate: 3,
+            max_factors_per_candidate: 5,
+            target_bit_length: Some(16),
+            random_power_window: false,
+            target_exponent_minimum: BigDecimal::parse_bytes(b"0.8", 10).expect("valid exponent"),
+            target_exponent: BigDecimal::parse_bytes(b"0.9", 10).expect("valid exponent"),
+            retarget_partition_count: 3,
+            retarget_minimum_exponent: BigDecimal::parse_bytes(b"0.45", 10)
+                .expect("valid minimum exponent"),
+        };
+        let mut rng = RngChoice::from_seed(RngMode::Standard, 199);
+        let candidates =
+            prepare_r_candidates_batch(&BigUint::from(3233u32), &settings, &mut rng, 3)
+                .expect("prepare cache batch failed");
+        assert_eq!(candidates.len(), 3);
+        assert!(path.exists());
+        let cached = load_retargeted_r_candidates(path.to_str().unwrap(), &BigUint::from(3233u32))
+            .expect("cache should load after creation");
+        assert!(cached.len() >= 3);
+        let _ = fs::remove_dir_all(cache_dir);
     }
 
     #[test]
