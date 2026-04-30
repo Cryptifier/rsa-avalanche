@@ -56,8 +56,8 @@
     "r_candidate_random_power_window": true,
     "r_candidate_target_exponent_minimum": 0.750, // Lower bound for sampled retarget exponents.
     "r_candidate_target_exponent": 0.850, // Upper bound for sampled retarget exponents.
-    "r_candidate_retarget_partition_count": 8,
-    "r_candidate_retarget_minimum_exponent": 0.5,
+    "r_candidate_retarget_partition_count": 2,
+    "r_candidate_retarget_minimum_exponent": 0.10,
     // Beam search keeps a short candidate list and interprets per-bit
     // probabilities above the threshold as bit 1.
     "beam_bit_one_threshold": 0.5,
@@ -71,7 +71,7 @@
     // combinations from that scored batch to estimate per-bit agreement.
     "analysis_batch_enable": true,
     "analysis_batch_messages": 100, // Number of ciphertext variants scored per batch before avalanche sampling.
-    "analysis_batch_candidates": 100000, // Number of r candidates scored in each batch before sampling combinations.
+    "analysis_batch_candidates": 40000, // Number of r candidates scored in each batch before sampling combinations.
     "analysis_batch_batches": 1, // Number of scored batches to run for the small-batch beam workflow.
     "sqlite_soft_heap": 10737418240,
     "sqlite_hard_heap": 10737418240,
