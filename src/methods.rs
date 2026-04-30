@@ -150,7 +150,6 @@ struct NewCachedAvalancheInput {
 #[diesel(table_name = avalanche_cache_inputs)]
 struct CachedAvalancheInputRow {
     id: i64,
-    batch_number: i32,
     batch_candidate_index: i32,
     message_index: i32,
     r_text: String,
@@ -189,7 +188,6 @@ struct NewCachedAvalancheSample {
 #[diesel(table_name = avalanche_cache_samples)]
 struct CachedAvalancheSampleRow {
     id: i64,
-    batch_number: i32,
     tier_index: i32,
     sample_index: i32,
     input_count: i32,
@@ -220,15 +218,12 @@ struct CachedScoredInputSummary {
 
 #[derive(Debug, Clone)]
 struct CachedScoredInputGroup {
-    batch_candidate_index: usize,
     input_ids: Vec<i64>,
 }
 
 #[derive(Debug, Clone)]
 struct CachedRecursiveSampleSummary {
     id: i64,
-    sample_index: usize,
-    best_match_pct: f64,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -6180,7 +6175,7 @@ fn group_cached_scored_inputs_by_r_candidate(
 
     grouped
         .into_iter()
-        .map(|(batch_candidate_index, mut grouped_inputs)| {
+        .map(|(_, mut grouped_inputs)| {
             grouped_inputs.sort_by(|left, right| {
                 left.message_index
                     .cmp(&right.message_index)
@@ -6188,7 +6183,6 @@ fn group_cached_scored_inputs_by_r_candidate(
                     .then_with(|| right.score_match_pct.total_cmp(&left.score_match_pct))
             });
             CachedScoredInputGroup {
-                batch_candidate_index,
                 input_ids: grouped_inputs
                     .into_iter()
                     .map(|summary| summary.id)
@@ -6987,9 +6981,6 @@ fn load_cached_recursive_sample_summaries(
         for row in rows {
             summaries.push(CachedRecursiveSampleSummary {
                 id: row.id,
-                sample_index: usize::try_from(row.sample_index)
-                    .map_err(|_| "cached sample index exceeds usize range")?,
-                best_match_pct: row.best_match_pct,
             });
         }
     }
