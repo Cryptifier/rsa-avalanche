@@ -23,3 +23,4 @@ old-logs/
 *.wasm
 config/keys/private_key.yaml
 inventory.ini
+*.csv
