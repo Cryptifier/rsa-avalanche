@@ -436,6 +436,7 @@ pub fn run_rsa_coppersmith(
 }
 
 /// Computes the integer dot product of two lattice vectors.
+#[cfg(test)]
 fn dot_i(a: &BigIntVector, b: &BigIntVector) -> BigInt {
     a.iter()
         .zip(b.iter())
