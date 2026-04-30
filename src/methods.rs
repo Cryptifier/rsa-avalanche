@@ -3989,8 +3989,8 @@ fn plot_timeline_series(
         return Ok(());
     }
 
-    let images_dir = Path::new("./images");
-    fs::create_dir_all(images_dir)?;
+    let images_dir = PathBuf::from("./images");
+    fs::create_dir_all(&images_dir)?;
 
     static TIMELINE_SEQ: AtomicUsize = AtomicUsize::new(0);
     let seq = TIMELINE_SEQ.fetch_add(1, Ordering::Relaxed);
