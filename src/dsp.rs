@@ -1,3 +1,6 @@
+/// Eclipse Public License 2.0
+/// SPDX-License-Identifier: EPL-2.0
+/// Copyright (c) 2025 Nicholas LaRoche <nlaroche@cryptifier.dev>
 /**
  * DSP module for detecting ramp signals in binned data.
  * A ramp signal is defined as a sequence of values that increase by 1 from the mean.

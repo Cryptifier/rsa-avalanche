@@ -1,4 +1,7 @@
-//! Configuration schema and loader for config/rsa_config.json.
+/// Eclipse Public License 2.0
+/// SPDX-License-Identifier: EPL-2.0
+/// Copyright (c) 2025 Nicholas LaRoche <nlaroche@cryptifier.dev>
+// Configuration schema and loader for config/rsa_config.json.
 
 use std::{error::Error, fs, path::Path};
 
