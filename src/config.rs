@@ -230,6 +230,15 @@ pub struct EngineConfig {
     /// Exponent used to spread normalized avalanche beam probabilities.
     #[serde(default = "default_avalanche_probability_spread_exponent")]
     pub avalanche_probability_spread_exponent: f64,
+    /// Advisory SQLite soft heap limit in bytes used by the Avalanche cache database.
+    #[serde(default = "default_sqlite_soft_heap")]
+    pub sqlite_soft_heap: u64,
+    /// Hard SQLite heap limit in bytes used by the Avalanche cache database.
+    #[serde(default = "default_sqlite_hard_heap")]
+    pub sqlite_hard_heap: u64,
+    /// SQLite mmap size in bytes used by the Avalanche cache database.
+    #[serde(default = "default_sqlite_mmap_size")]
+    pub sqlite_mmap_size: u64,
     /// Whether to sort avalanche candidates by Hamming distance.
     #[serde(default = "default_use_hamming_distance")]
     pub use_hamming_distance: bool,
@@ -401,6 +410,9 @@ impl Default for EngineConfig {
             beam_bit_one_threshold: default_beam_bit_one_threshold(),
             avalanche_beam_top_k: default_avalanche_beam_top_k(),
             avalanche_probability_spread_exponent: default_avalanche_probability_spread_exponent(),
+            sqlite_soft_heap: default_sqlite_soft_heap(),
+            sqlite_hard_heap: default_sqlite_hard_heap(),
+            sqlite_mmap_size: default_sqlite_mmap_size(),
             use_hamming_distance: default_use_hamming_distance(),
             mirror_invert_candidates: default_mirror_invert_candidates(),
             override_best_r: None,
@@ -1552,6 +1564,48 @@ fn default_avalanche_probability_spread_exponent() -> f64 {
     0.5
 }
 
+/// Default advisory SQLite soft heap limit for the Avalanche cache.
+///
+/// # Parameters
+/// - None.
+///
+/// # Returns
+/// - `u64`: Default SQLite soft heap limit in bytes.
+///
+/// # Expected Output
+/// - Returns a constant default value; no side effects.
+fn default_sqlite_soft_heap() -> u64 {
+    10 * 1024 * 1024 * 1024
+}
+
+/// Default hard SQLite heap limit for the Avalanche cache.
+///
+/// # Parameters
+/// - None.
+///
+/// # Returns
+/// - `u64`: Default SQLite hard heap limit in bytes.
+///
+/// # Expected Output
+/// - Returns a constant default value; no side effects.
+fn default_sqlite_hard_heap() -> u64 {
+    10 * 1024 * 1024 * 1024
+}
+
+/// Default SQLite mmap size for the Avalanche cache.
+///
+/// # Parameters
+/// - None.
+///
+/// # Returns
+/// - `u64`: Default SQLite mmap size in bytes.
+///
+/// # Expected Output
+/// - Returns a constant default value; no side effects.
+fn default_sqlite_mmap_size() -> u64 {
+    10 * 1024 * 1024 * 1024
+}
+
 /// Default toggle for Hamming-distance sorting in avalanche candidate ordering.
 ///
 /// # Parameters
@@ -1807,6 +1861,9 @@ mod tests {
             engine.avalanche_combination_hamming_distance_outlier_preference_pct,
             0.0
         );
+        assert_eq!(engine.sqlite_soft_heap, 10 * 1024 * 1024 * 1024);
+        assert_eq!(engine.sqlite_hard_heap, 10 * 1024 * 1024 * 1024);
+        assert_eq!(engine.sqlite_mmap_size, 10 * 1024 * 1024 * 1024);
     }
 
     #[test]

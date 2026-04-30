@@ -12,7 +12,7 @@ use std::sync::{
 use std::time::{Duration, Instant, SystemTime};
 
 use num_bigint::BigUint;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
 use crate::logs::{LogError, LogWriter, write_session_start};
@@ -387,7 +387,7 @@ pub struct AvalancheCombinationSampleInput {
 }
 
 /// Beam-search candidate produced from an avalanche combination sample.
-#[derive(Debug, Serialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
 pub struct AvalancheCombinationBeamResult {
     /// One-based beam rank in descending score order.
     pub rank: usize,

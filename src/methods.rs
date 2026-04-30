@@ -2,9 +2,15 @@
 /// SPDX-License-Identifier: EPL-2.0
 /// Copyright (c) 2025 Nicholas LaRoche <nlaroche@cryptifier.dev>
 use bigdecimal::BigDecimal;
+use diesel::dsl::count_star;
+use diesel::prelude::*;
+use diesel::r2d2::{ConnectionManager, CustomizeConnection, Error as R2D2Error, Pool};
+use diesel::sql_query;
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
     error::Error,
+    fs,
+    path::PathBuf,
     sync::{
         Arc, Mutex,
         atomic::{AtomicU64, Ordering},
@@ -15,10 +21,6 @@ use std::{
 #[cfg(feature = "plots")]
 use plotters::prelude::*;
 use rayon::prelude::*;
-#[cfg(feature = "plots")]
-use std::fs;
-#[cfg(feature = "plots")]
-use std::path::Path;
 #[cfg(feature = "plots")]
 use std::sync::atomic::AtomicUsize;
 
@@ -81,6 +83,406 @@ pub struct DemoArgs {
     pub bits_decrypt: Option<u32>,
 }
 
+type AvalancheSqlitePool = Pool<ConnectionManager<SqliteConnection>>;
+
+const AVALANCHE_CACHE_FLUSH_BYTES: usize = 1 << 30;
+const AVALANCHE_CACHE_PAGE_ROWS: i64 = 4_096;
+
+diesel::table! {
+    avalanche_cache_inputs (id) {
+        id -> BigInt,
+        batch_number -> Integer,
+        batch_candidate_index -> Integer,
+        message_index -> Integer,
+        r_text -> Text,
+        x_text -> Text,
+        score_match_pct -> Double,
+        message_bits -> Binary,
+        message_bit_len -> Integer,
+        target_exponent_text -> Nullable<Text>,
+        hbc_ciphertext_r_text -> Nullable<Text>,
+        candidate_decryption_text -> Nullable<Text>,
+    }
+}
+
+diesel::table! {
+    avalanche_cache_samples (id) {
+        id -> BigInt,
+        batch_number -> Integer,
+        tier_index -> Integer,
+        sample_index -> Integer,
+        input_count -> Integer,
+        average_score_pct -> Double,
+        top_beam_score -> Double,
+        top_beam_match_pct -> Nullable<Double>,
+        best_match_pct -> Double,
+        majority_vote_match_pct -> Double,
+        majority_vote_ones_match_pct -> Double,
+        best_bits -> Binary,
+        best_bits_bit_len -> Integer,
+        majority_vote_bits -> Binary,
+        majority_vote_bits_bit_len -> Integer,
+        recursive_bits -> Binary,
+        recursive_bits_bit_len -> Integer,
+        beam_results_json -> Text,
+    }
+}
+
+diesel::allow_tables_to_appear_in_same_query!(avalanche_cache_inputs, avalanche_cache_samples);
+
+#[derive(Debug, Insertable)]
+#[diesel(table_name = avalanche_cache_inputs)]
+struct NewCachedAvalancheInput {
+    batch_number: i32,
+    batch_candidate_index: i32,
+    message_index: i32,
+    r_text: String,
+    x_text: String,
+    score_match_pct: f64,
+    message_bits: Vec<u8>,
+    message_bit_len: i32,
+    target_exponent_text: Option<String>,
+    hbc_ciphertext_r_text: Option<String>,
+    candidate_decryption_text: Option<String>,
+}
+
+#[derive(Debug, Queryable, Selectable)]
+#[diesel(table_name = avalanche_cache_inputs)]
+struct CachedAvalancheInputRow {
+    id: i64,
+    batch_number: i32,
+    batch_candidate_index: i32,
+    message_index: i32,
+    r_text: String,
+    x_text: String,
+    score_match_pct: f64,
+    message_bits: Vec<u8>,
+    message_bit_len: i32,
+    target_exponent_text: Option<String>,
+    hbc_ciphertext_r_text: Option<String>,
+    candidate_decryption_text: Option<String>,
+}
+
+#[derive(Debug, Insertable)]
+#[diesel(table_name = avalanche_cache_samples)]
+struct NewCachedAvalancheSample {
+    batch_number: i32,
+    tier_index: i32,
+    sample_index: i32,
+    input_count: i32,
+    average_score_pct: f64,
+    top_beam_score: f64,
+    top_beam_match_pct: Option<f64>,
+    best_match_pct: f64,
+    majority_vote_match_pct: f64,
+    majority_vote_ones_match_pct: f64,
+    best_bits: Vec<u8>,
+    best_bits_bit_len: i32,
+    majority_vote_bits: Vec<u8>,
+    majority_vote_bits_bit_len: i32,
+    recursive_bits: Vec<u8>,
+    recursive_bits_bit_len: i32,
+    beam_results_json: String,
+}
+
+#[derive(Debug, Queryable, Selectable)]
+#[diesel(table_name = avalanche_cache_samples)]
+struct CachedAvalancheSampleRow {
+    id: i64,
+    batch_number: i32,
+    tier_index: i32,
+    sample_index: i32,
+    input_count: i32,
+    average_score_pct: f64,
+    top_beam_score: f64,
+    top_beam_match_pct: Option<f64>,
+    best_match_pct: f64,
+    majority_vote_match_pct: f64,
+    majority_vote_ones_match_pct: f64,
+    best_bits: Vec<u8>,
+    best_bits_bit_len: i32,
+    majority_vote_bits: Vec<u8>,
+    majority_vote_bits_bit_len: i32,
+    recursive_bits: Vec<u8>,
+    recursive_bits_bit_len: i32,
+    beam_results_json: String,
+}
+
+#[derive(Debug, Clone)]
+struct CachedScoredInputSummary {
+    id: i64,
+    batch_candidate_index: usize,
+    message_index: usize,
+    score_match_pct: f64,
+    x: BigUint,
+    fitness_score: usize,
+}
+
+#[derive(Debug, Clone)]
+struct CachedScoredInputGroup {
+    batch_candidate_index: usize,
+    input_ids: Vec<i64>,
+}
+
+#[derive(Debug, Clone)]
+struct CachedRecursiveSampleSummary {
+    id: i64,
+    sample_index: usize,
+    best_match_pct: f64,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct AvalancheSqliteSettings {
+    soft_heap_limit_bytes: i64,
+    hard_heap_limit_bytes: i64,
+    mmap_size_bytes: i64,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct AvalancheSqliteConnectionCustomizer {
+    settings: AvalancheSqliteSettings,
+}
+
+/// Resolves the SQLite PRAGMA settings used by the Avalanche cache.
+///
+/// # Parameters
+/// - `engine`: Engine configuration containing the configured SQLite byte limits.
+///
+/// # Returns
+/// - `Result<AvalancheSqliteSettings, Box<dyn Error>>`: Validated SQLite settings ready for the connection pool.
+///
+/// # Expected Output
+/// - Returns validated SQLite settings; no stdout/stderr output.
+fn resolve_avalanche_sqlite_settings(
+    engine: &EngineConfig,
+) -> Result<AvalancheSqliteSettings, Box<dyn Error>> {
+    let soft_heap_limit_bytes = i64::try_from(engine.sqlite_soft_heap)
+        .map_err(|_| "engine.sqlite_soft_heap exceeds SQLite i64 range")?;
+    let hard_heap_limit_bytes = i64::try_from(engine.sqlite_hard_heap)
+        .map_err(|_| "engine.sqlite_hard_heap exceeds SQLite i64 range")?;
+    let mmap_size_bytes = i64::try_from(engine.sqlite_mmap_size)
+        .map_err(|_| "engine.sqlite_mmap_size exceeds SQLite i64 range")?;
+
+    Ok(AvalancheSqliteSettings {
+        soft_heap_limit_bytes,
+        hard_heap_limit_bytes,
+        mmap_size_bytes,
+    })
+}
+
+/// Applies the Avalanche cache SQLite PRAGMA settings to one pooled connection.
+///
+/// # Parameters
+/// - `connection`: SQLite connection that will back Avalanche cache reads and writes.
+/// - `settings`: Validated SQLite PRAGMA settings derived from the engine config.
+///
+/// # Returns
+/// - `Result<(), R2D2Error>`: `Ok(())` when all PRAGMAs are accepted by SQLite.
+///
+/// # Expected Output
+/// - Updates SQLite connection settings in place; no stdout/stderr output.
+fn configure_avalanche_cache_sqlite_connection(
+    connection: &mut SqliteConnection,
+    settings: AvalancheSqliteSettings,
+) -> Result<(), R2D2Error> {
+    sql_query(format!(
+        "PRAGMA soft_heap_limit = {}",
+        settings.soft_heap_limit_bytes
+    ))
+    .execute(connection)?;
+    sql_query(format!(
+        "PRAGMA hard_heap_limit = {}",
+        settings.hard_heap_limit_bytes
+    ))
+    .execute(connection)?;
+    sql_query(format!("PRAGMA mmap_size = {}", settings.mmap_size_bytes)).execute(connection)?;
+    Ok(())
+}
+
+impl CustomizeConnection<SqliteConnection, R2D2Error> for AvalancheSqliteConnectionCustomizer {
+    fn on_acquire(&self, connection: &mut SqliteConnection) -> Result<(), R2D2Error> {
+        configure_avalanche_cache_sqlite_connection(connection, self.settings)
+    }
+}
+
+/// Resolves the on-disk SQLite path used for the temporary Avalanche cache.
+///
+/// # Parameters
+/// - `seed`: Optional deterministic analysis seed used to key the cache filename.
+///
+/// # Returns
+/// - `PathBuf`: Cache path in `/tmp` using the configured or fallback seed.
+///
+/// # Expected Output
+/// - Returns a deterministic filesystem path; no stdout/stderr output.
+pub fn resolve_avalanche_cache_db_path(seed: Option<u64>) -> PathBuf {
+    PathBuf::from(format!("/tmp/rsa_avalanche_{}.db", seed.unwrap_or(0)))
+}
+
+/// Removes the temporary Avalanche cache file if it exists.
+///
+/// # Parameters
+/// - `seed`: Optional deterministic analysis seed used to key the cache filename.
+///
+/// # Returns
+/// - `()`: This function returns nothing.
+///
+/// # Expected Output
+/// - Deletes the cache file when present; no stdout/stderr output.
+pub fn cleanup_avalanche_cache_db(seed: Option<u64>) {
+    let path = resolve_avalanche_cache_db_path(seed);
+    if path.exists() {
+        let _ = fs::remove_file(path);
+    }
+}
+
+/// Runtime SQLite cache used to spill Avalanche tier inputs and outputs to disk.
+///
+/// # Parameters
+/// - None.
+///
+/// # Returns
+/// - `AvalancheCacheGuard`: Pool-backed cache wrapper with automatic cleanup on drop.
+///
+/// # Expected Output
+/// - Owns a SQLite connection pool and deletes the backing file on drop.
+struct AvalancheCacheGuard {
+    path: PathBuf,
+    pool: Option<AvalancheSqlitePool>,
+}
+
+impl AvalancheCacheGuard {
+    /// Creates a new temporary Avalanche cache database and initializes its schema.
+    ///
+    /// # Parameters
+    /// - `seed`: Optional deterministic analysis seed used to key the cache filename.
+    /// - `engine`: Engine configuration that supplies the SQLite cache PRAGMA settings.
+    ///
+    /// # Returns
+    /// - `Result<AvalancheCacheGuard, Box<dyn Error>>`: Ready-to-use cache wrapper.
+    ///
+    /// # Expected Output
+    /// - Creates the SQLite database under `/tmp` and initializes runtime tables.
+    fn new(seed: Option<u64>, engine: &EngineConfig) -> Result<Self, Box<dyn Error>> {
+        let path = resolve_avalanche_cache_db_path(seed);
+        if path.exists() {
+            let _ = fs::remove_file(&path);
+        }
+        let settings = resolve_avalanche_sqlite_settings(engine)?;
+        let manager =
+            ConnectionManager::<SqliteConnection>::new(path.to_string_lossy().to_string());
+        let pool = Pool::builder()
+            .max_size(16)
+            .connection_customizer(Box::new(AvalancheSqliteConnectionCustomizer { settings }))
+            .build(manager)?;
+        let mut connection = pool.get()?;
+        sql_query(
+            "CREATE TABLE IF NOT EXISTS avalanche_cache_inputs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                batch_number INTEGER NOT NULL,
+                batch_candidate_index INTEGER NOT NULL,
+                message_index INTEGER NOT NULL,
+                r_text TEXT NOT NULL,
+                x_text TEXT NOT NULL,
+                score_match_pct DOUBLE NOT NULL,
+                message_bits BLOB NOT NULL,
+                message_bit_len INTEGER NOT NULL,
+                target_exponent_text TEXT NULL,
+                hbc_ciphertext_r_text TEXT NULL,
+                candidate_decryption_text TEXT NULL
+            )",
+        )
+        .execute(&mut connection)?;
+        sql_query(
+            "CREATE INDEX IF NOT EXISTS avalanche_cache_inputs_batch_idx
+                ON avalanche_cache_inputs (batch_number, batch_candidate_index, message_index)",
+        )
+        .execute(&mut connection)?;
+        sql_query(
+            "CREATE TABLE IF NOT EXISTS avalanche_cache_samples (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                batch_number INTEGER NOT NULL,
+                tier_index INTEGER NOT NULL,
+                sample_index INTEGER NOT NULL,
+                input_count INTEGER NOT NULL,
+                average_score_pct DOUBLE NOT NULL,
+                top_beam_score DOUBLE NOT NULL,
+                top_beam_match_pct DOUBLE NULL,
+                best_match_pct DOUBLE NOT NULL,
+                majority_vote_match_pct DOUBLE NOT NULL,
+                majority_vote_ones_match_pct DOUBLE NOT NULL,
+                best_bits BLOB NOT NULL,
+                best_bits_bit_len INTEGER NOT NULL,
+                majority_vote_bits BLOB NOT NULL,
+                majority_vote_bits_bit_len INTEGER NOT NULL,
+                recursive_bits BLOB NOT NULL,
+                recursive_bits_bit_len INTEGER NOT NULL,
+                beam_results_json TEXT NOT NULL
+            )",
+        )
+        .execute(&mut connection)?;
+        sql_query(
+            "CREATE INDEX IF NOT EXISTS avalanche_cache_samples_batch_tier_idx
+                ON avalanche_cache_samples (batch_number, tier_index, sample_index)",
+        )
+        .execute(&mut connection)?;
+        Ok(Self {
+            path,
+            pool: Some(pool),
+        })
+    }
+
+    /// Returns the pooled SQLite connections used by the cache.
+    ///
+    /// # Parameters
+    /// - None.
+    ///
+    /// # Returns
+    /// - `Result<&AvalancheSqlitePool, Box<dyn Error>>`: Shared SQLite pool.
+    ///
+    /// # Expected Output
+    /// - Returns the initialized connection pool; no stdout/stderr output.
+    fn pool(&self) -> Result<&AvalancheSqlitePool, Box<dyn Error>> {
+        self.pool
+            .as_ref()
+            .ok_or_else(|| "avalanche cache pool is unavailable".into())
+    }
+
+    /// Deletes cached inputs and samples for one analysis batch.
+    ///
+    /// # Parameters
+    /// - `batch_number`: One-based batch number whose rows should be removed.
+    ///
+    /// # Returns
+    /// - `Result<(), Box<dyn Error>>`: `Ok(())` on success.
+    ///
+    /// # Expected Output
+    /// - Removes persisted batch rows from the SQLite cache.
+    fn clear_batch(&self, batch_number: usize) -> Result<(), Box<dyn Error>> {
+        let batch_number =
+            i32::try_from(batch_number).map_err(|_| "batch number exceeds i32 range")?;
+        let mut connection = self.pool()?.get()?;
+        diesel::delete(
+            avalanche_cache_inputs::table
+                .filter(avalanche_cache_inputs::batch_number.eq(batch_number)),
+        )
+        .execute(&mut connection)?;
+        diesel::delete(
+            avalanche_cache_samples::table
+                .filter(avalanche_cache_samples::batch_number.eq(batch_number)),
+        )
+        .execute(&mut connection)?;
+        Ok(())
+    }
+}
+
+impl Drop for AvalancheCacheGuard {
+    fn drop(&mut self) {
+        let _ = self.pool.take();
+        let _ = fs::remove_file(&self.path);
+    }
+}
+
 /// Executes an analytics update inside a shared session lock.
 ///
 /// # Parameters
@@ -99,6 +501,495 @@ where
     if let Ok(mut guard) = analytics.lock() {
         action(&mut guard);
     }
+}
+
+/// Estimates the serialized footprint of one cached scored-input row.
+///
+/// # Parameters
+/// - `input`: Scored Avalanche input pending cache insertion.
+///
+/// # Returns
+/// - `usize`: Approximate in-memory byte footprint used for chunked cache flushing.
+///
+/// # Expected Output
+/// - Returns an approximate byte count; no stdout/stderr output.
+fn approximate_scored_avalanche_input_bytes(input: &ScoredAvalancheInput) -> usize {
+    let base = input.message_bits.bytes_le().len()
+        + input.r.to_bytes_le().len()
+        + input.x.to_bytes_le().len()
+        + std::mem::size_of::<ScoredAvalancheInput>();
+    let detail = input.detail.as_ref().map_or(0usize, |detail| {
+        detail.hbc_ciphertext_r.to_bytes_le().len()
+            + detail.candidate_decryption.to_bytes_le().len()
+            + detail.target_exponent.normalized().to_string().len()
+            + std::mem::size_of::<ScoredAvalancheInputDetail>()
+    });
+    base + detail
+}
+
+/// Converts a scored Avalanche input into one SQLite insert row.
+///
+/// # Parameters
+/// - `batch_number`: One-based analysis batch number.
+/// - `input`: Scored Avalanche input to persist.
+///
+/// # Returns
+/// - `Result<NewCachedAvalancheInput, Box<dyn Error>>`: Insert row ready for Diesel.
+///
+/// # Expected Output
+/// - Returns an owned insert payload; no stdout/stderr output.
+fn serialize_scored_avalanche_input_for_cache(
+    batch_number: usize,
+    input: &ScoredAvalancheInput,
+) -> Result<NewCachedAvalancheInput, Box<dyn Error>> {
+    Ok(NewCachedAvalancheInput {
+        batch_number: i32::try_from(batch_number).map_err(|_| "batch number exceeds i32 range")?,
+        batch_candidate_index: i32::try_from(input.batch_candidate_index)
+            .map_err(|_| "batch candidate index exceeds i32 range")?,
+        message_index: i32::try_from(input.message_index)
+            .map_err(|_| "message index exceeds i32 range")?,
+        r_text: input.r.to_string(),
+        x_text: input.x.to_string(),
+        score_match_pct: input.score_match_pct,
+        message_bits: input.message_bits.bytes_le().to_vec(),
+        message_bit_len: i32::try_from(input.message_bits.len())
+            .map_err(|_| "message bit length exceeds i32 range")?,
+        target_exponent_text: input
+            .detail
+            .as_ref()
+            .map(|detail| detail.target_exponent.normalized().to_string()),
+        hbc_ciphertext_r_text: input
+            .detail
+            .as_ref()
+            .map(|detail| detail.hbc_ciphertext_r.to_string()),
+        candidate_decryption_text: input
+            .detail
+            .as_ref()
+            .map(|detail| detail.candidate_decryption.to_string()),
+    })
+}
+
+/// Rebuilds a scored Avalanche input from one cached SQLite row.
+///
+/// # Parameters
+/// - `row`: Cached SQLite row to deserialize.
+///
+/// # Returns
+/// - `Result<ScoredAvalancheInput, Box<dyn Error>>`: Fully reconstructed scored input.
+///
+/// # Expected Output
+/// - Returns the decoded scored input; no stdout/stderr output.
+fn deserialize_scored_avalanche_input_row(
+    row: CachedAvalancheInputRow,
+) -> Result<ScoredAvalancheInput, Box<dyn Error>> {
+    let target_exponent = match row.target_exponent_text {
+        Some(raw) => Some(raw.parse::<BigDecimal>()?),
+        None => None,
+    };
+    let hbc_ciphertext_r = match row.hbc_ciphertext_r_text {
+        Some(raw) => Some(raw.parse::<BigUint>()?),
+        None => None,
+    };
+    let candidate_decryption = match row.candidate_decryption_text {
+        Some(raw) => Some(raw.parse::<BigUint>()?),
+        None => None,
+    };
+    let detail = match (target_exponent, hbc_ciphertext_r, candidate_decryption) {
+        (Some(target_exponent), Some(hbc_ciphertext_r), Some(candidate_decryption)) => {
+            Some(ScoredAvalancheInputDetail {
+                target_exponent,
+                hbc_ciphertext_r,
+                candidate_decryption,
+            })
+        }
+        _ => None,
+    };
+    Ok(ScoredAvalancheInput {
+        batch_candidate_index: usize::try_from(row.batch_candidate_index)
+            .map_err(|_| "cached batch candidate index exceeds usize range")?,
+        message_index: usize::try_from(row.message_index)
+            .map_err(|_| "cached message index exceeds usize range")?,
+        r: row.r_text.parse::<BigUint>()?,
+        x: row.x_text.parse::<BigUint>()?,
+        score_match_pct: row.score_match_pct,
+        message_bits: PackedBits::from_bytes_le(
+            &row.message_bits,
+            usize::try_from(row.message_bit_len)
+                .map_err(|_| "cached message bit length exceeds usize range")?,
+        ),
+        detail,
+    })
+}
+
+/// Inserts scored Avalanche inputs into the SQLite cache in one batch.
+///
+/// # Parameters
+/// - `cache`: Shared SQLite cache wrapper.
+/// - `batch_number`: One-based analysis batch number.
+/// - `inputs`: Scored inputs to persist.
+///
+/// # Returns
+/// - `Result<(), Box<dyn Error>>`: `Ok(())` on success.
+///
+/// # Expected Output
+/// - Writes input rows to SQLite using one Diesel insert batch.
+fn insert_cached_scored_inputs(
+    cache: &AvalancheCacheGuard,
+    batch_number: usize,
+    inputs: &[ScoredAvalancheInput],
+) -> Result<(), Box<dyn Error>> {
+    if inputs.is_empty() {
+        return Ok(());
+    }
+    let rows = inputs
+        .iter()
+        .map(|input| serialize_scored_avalanche_input_for_cache(batch_number, input))
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut connection = cache.pool()?.get()?;
+    diesel::insert_into(avalanche_cache_inputs::table)
+        .values(&rows)
+        .execute(&mut connection)?;
+    Ok(())
+}
+
+/// Loads one page of cached scored-input rows for a batch.
+///
+/// # Parameters
+/// - `cache`: Shared SQLite cache wrapper.
+/// - `batch_number`: One-based analysis batch number.
+/// - `offset_rows`: Number of rows to skip before reading.
+/// - `limit_rows`: Maximum rows to return.
+///
+/// # Returns
+/// - `Result<Vec<CachedAvalancheInputRow>, Box<dyn Error>>`: One page of cached input rows.
+///
+/// # Expected Output
+/// - Reads a bounded page of cached rows from SQLite.
+fn load_cached_scored_input_rows_page(
+    cache: &AvalancheCacheGuard,
+    batch_number: usize,
+    offset_rows: i64,
+    limit_rows: i64,
+) -> Result<Vec<CachedAvalancheInputRow>, Box<dyn Error>> {
+    let batch_number = i32::try_from(batch_number).map_err(|_| "batch number exceeds i32 range")?;
+    let mut connection = cache.pool()?.get()?;
+    let rows = avalanche_cache_inputs::table
+        .filter(avalanche_cache_inputs::batch_number.eq(batch_number))
+        .order(avalanche_cache_inputs::id.asc())
+        .limit(limit_rows)
+        .offset(offset_rows)
+        .select(CachedAvalancheInputRow::as_select())
+        .load::<CachedAvalancheInputRow>(&mut connection)?;
+    Ok(rows)
+}
+
+/// Loads raw cached scored-input rows for a selected id set.
+///
+/// # Parameters
+/// - `cache`: Shared SQLite cache wrapper.
+/// - `ids`: Cache row ids to load.
+///
+/// # Returns
+/// - `Result<Vec<CachedAvalancheInputRow>, Box<dyn Error>>`: Loaded cached rows.
+///
+/// # Expected Output
+/// - Reads the selected row set from SQLite without preserving caller order.
+fn load_cached_scored_input_rows_by_ids(
+    cache: &AvalancheCacheGuard,
+    ids: &[i64],
+) -> Result<Vec<CachedAvalancheInputRow>, Box<dyn Error>> {
+    if ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut connection = cache.pool()?.get()?;
+    let rows = avalanche_cache_inputs::table
+        .filter(avalanche_cache_inputs::id.eq_any(ids))
+        .select(CachedAvalancheInputRow::as_select())
+        .load::<CachedAvalancheInputRow>(&mut connection)?;
+    Ok(rows)
+}
+
+/// Loads full scored Avalanche inputs for a small selected set of cache row ids.
+///
+/// # Parameters
+/// - `cache`: Shared SQLite cache wrapper.
+/// - `ids`: Cache row ids to load.
+///
+/// # Returns
+/// - `Result<Vec<ScoredAvalancheInput>, Box<dyn Error>>`: Decoded scored inputs in the same order as `ids`.
+///
+/// # Expected Output
+/// - Loads a small selected row set from SQLite and preserves caller order.
+fn load_cached_scored_inputs_by_ids(
+    cache: &AvalancheCacheGuard,
+    ids: &[i64],
+) -> Result<Vec<ScoredAvalancheInput>, Box<dyn Error>> {
+    if ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    let rows = load_cached_scored_input_rows_by_ids(cache, ids)?;
+    let mut by_id = HashMap::with_capacity(rows.len());
+    for row in rows {
+        by_id.insert(row.id, row);
+    }
+    let mut ordered = Vec::with_capacity(ids.len());
+    for id in ids {
+        let row = by_id
+            .remove(id)
+            .ok_or_else(|| format!("missing cached scored-input row id {}", id))?;
+        ordered.push(deserialize_scored_avalanche_input_row(row)?);
+    }
+    Ok(ordered)
+}
+
+/// Counts cached scored-input rows for one analysis batch.
+///
+/// # Parameters
+/// - `cache`: Shared SQLite cache wrapper.
+/// - `batch_number`: One-based analysis batch number.
+///
+/// # Returns
+/// - `Result<usize, Box<dyn Error>>`: Number of cached scored-input rows in the batch.
+///
+/// # Expected Output
+/// - Reads one aggregate count from SQLite.
+fn count_cached_scored_inputs(
+    cache: &AvalancheCacheGuard,
+    batch_number: usize,
+) -> Result<usize, Box<dyn Error>> {
+    let batch_number = i32::try_from(batch_number).map_err(|_| "batch number exceeds i32 range")?;
+    let mut connection = cache.pool()?.get()?;
+    let count = avalanche_cache_inputs::table
+        .filter(avalanche_cache_inputs::batch_number.eq(batch_number))
+        .select(count_star())
+        .first::<i64>(&mut connection)?;
+    usize::try_from(count).map_err(|_| "cached scored-input count exceeds usize range".into())
+}
+
+/// Converts a selected Avalanche sample into one cached SQLite row.
+///
+/// # Parameters
+/// - `batch_number`: One-based analysis batch number.
+/// - `sample`: Finalized selected sample to persist.
+/// - `engine`: Engine configuration controlling recursive source bits.
+///
+/// # Returns
+/// - `Result<NewCachedAvalancheSample, Box<dyn Error>>`: Cached sample row ready for Diesel.
+///
+/// # Expected Output
+/// - Returns an owned insert payload for SQLite.
+fn serialize_selected_sample_for_cache(
+    batch_number: usize,
+    sample: &SelectedAvalancheSample,
+    engine: &EngineConfig,
+) -> Result<NewCachedAvalancheSample, Box<dyn Error>> {
+    let recursive_bits = PackedBits::from_bools(recursive_tier_bits(sample, engine));
+    Ok(NewCachedAvalancheSample {
+        batch_number: i32::try_from(batch_number).map_err(|_| "batch number exceeds i32 range")?,
+        tier_index: i32::try_from(sample.tier_index).map_err(|_| "tier index exceeds i32 range")?,
+        sample_index: i32::try_from(sample.sample_index)
+            .map_err(|_| "sample index exceeds i32 range")?,
+        input_count: i32::try_from(sample.input_count)
+            .map_err(|_| "input count exceeds i32 range")?,
+        average_score_pct: sample.average_score_pct,
+        top_beam_score: sample.top_beam_score,
+        top_beam_match_pct: sample.top_beam_match_pct,
+        best_match_pct: sample.best_match_pct,
+        majority_vote_match_pct: sample.majority_vote_match_pct,
+        majority_vote_ones_match_pct: sample.majority_vote_ones_match_pct,
+        best_bits: PackedBits::from_bools(&sample.best_bits)
+            .bytes_le()
+            .to_vec(),
+        best_bits_bit_len: i32::try_from(sample.best_bits.len())
+            .map_err(|_| "best bit length exceeds i32 range")?,
+        majority_vote_bits: PackedBits::from_bools(&sample.majority_vote_bits)
+            .bytes_le()
+            .to_vec(),
+        majority_vote_bits_bit_len: i32::try_from(sample.majority_vote_bits.len())
+            .map_err(|_| "majority-vote bit length exceeds i32 range")?,
+        recursive_bits: recursive_bits.bytes_le().to_vec(),
+        recursive_bits_bit_len: i32::try_from(recursive_bits.len())
+            .map_err(|_| "recursive bit length exceeds i32 range")?,
+        beam_results_json: serde_json::to_string(&sample.beam_results)?,
+    })
+}
+
+/// Inserts finalized selected samples for one batch/tier into the SQLite cache.
+///
+/// # Parameters
+/// - `cache`: Shared SQLite cache wrapper.
+/// - `batch_number`: One-based analysis batch number.
+/// - `samples`: Finalized samples to persist.
+/// - `engine`: Engine configuration controlling recursive source bits.
+///
+/// # Returns
+/// - `Result<(), Box<dyn Error>>`: `Ok(())` on success.
+///
+/// # Expected Output
+/// - Writes finalized sample rows to SQLite.
+fn insert_cached_selected_samples(
+    cache: &AvalancheCacheGuard,
+    batch_number: usize,
+    samples: &[SelectedAvalancheSample],
+    engine: &EngineConfig,
+) -> Result<(), Box<dyn Error>> {
+    if samples.is_empty() {
+        return Ok(());
+    }
+    let rows = samples
+        .iter()
+        .map(|sample| serialize_selected_sample_for_cache(batch_number, sample, engine))
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut connection = cache.pool()?.get()?;
+    diesel::insert_into(avalanche_cache_samples::table)
+        .values(&rows)
+        .execute(&mut connection)?;
+    Ok(())
+}
+
+/// Loads cached selected-sample rows for one batch/tier page.
+///
+/// # Parameters
+/// - `cache`: Shared SQLite cache wrapper.
+/// - `batch_number`: One-based analysis batch number.
+/// - `tier_index`: One-based Avalanche tier index.
+/// - `offset_rows`: Number of rows to skip before reading.
+/// - `limit_rows`: Maximum rows to return.
+///
+/// # Returns
+/// - `Result<Vec<CachedAvalancheSampleRow>, Box<dyn Error>>`: One page of cached selected samples.
+///
+/// # Expected Output
+/// - Reads a bounded page of finalized sample rows from SQLite.
+fn load_cached_selected_sample_rows_page(
+    cache: &AvalancheCacheGuard,
+    batch_number: usize,
+    tier_index: usize,
+    offset_rows: i64,
+    limit_rows: i64,
+) -> Result<Vec<CachedAvalancheSampleRow>, Box<dyn Error>> {
+    let batch_number = i32::try_from(batch_number).map_err(|_| "batch number exceeds i32 range")?;
+    let tier_index = i32::try_from(tier_index).map_err(|_| "tier index exceeds i32 range")?;
+    let mut connection = cache.pool()?.get()?;
+    let rows = avalanche_cache_samples::table
+        .filter(avalanche_cache_samples::batch_number.eq(batch_number))
+        .filter(avalanche_cache_samples::tier_index.eq(tier_index))
+        .order(avalanche_cache_samples::sample_index.asc())
+        .limit(limit_rows)
+        .offset(offset_rows)
+        .select(CachedAvalancheSampleRow::as_select())
+        .load::<CachedAvalancheSampleRow>(&mut connection)?;
+    Ok(rows)
+}
+
+/// Loads raw cached selected-sample rows for a selected id set.
+///
+/// # Parameters
+/// - `cache`: Shared SQLite cache wrapper.
+/// - `ids`: Cache row ids to load.
+///
+/// # Returns
+/// - `Result<Vec<CachedAvalancheSampleRow>, Box<dyn Error>>`: Loaded cached sample rows.
+///
+/// # Expected Output
+/// - Reads the selected sample row set from SQLite without preserving caller order.
+fn load_cached_selected_sample_rows_by_ids(
+    cache: &AvalancheCacheGuard,
+    ids: &[i64],
+) -> Result<Vec<CachedAvalancheSampleRow>, Box<dyn Error>> {
+    if ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut connection = cache.pool()?.get()?;
+    let rows = avalanche_cache_samples::table
+        .filter(avalanche_cache_samples::id.eq_any(ids))
+        .select(CachedAvalancheSampleRow::as_select())
+        .load::<CachedAvalancheSampleRow>(&mut connection)?;
+    Ok(rows)
+}
+
+/// Counts cached selected-sample rows for one batch/tier.
+///
+/// # Parameters
+/// - `cache`: Shared SQLite cache wrapper.
+/// - `batch_number`: One-based analysis batch number.
+/// - `tier_index`: One-based Avalanche tier index.
+///
+/// # Returns
+/// - `Result<usize, Box<dyn Error>>`: Number of cached finalized sample rows.
+///
+/// # Expected Output
+/// - Reads one aggregate count from SQLite.
+fn count_cached_selected_samples(
+    cache: &AvalancheCacheGuard,
+    batch_number: usize,
+    tier_index: usize,
+) -> Result<usize, Box<dyn Error>> {
+    let batch_number = i32::try_from(batch_number).map_err(|_| "batch number exceeds i32 range")?;
+    let tier_index = i32::try_from(tier_index).map_err(|_| "tier index exceeds i32 range")?;
+    let mut connection = cache.pool()?.get()?;
+    let count = avalanche_cache_samples::table
+        .filter(avalanche_cache_samples::batch_number.eq(batch_number))
+        .filter(avalanche_cache_samples::tier_index.eq(tier_index))
+        .select(count_star())
+        .first::<i64>(&mut connection)?;
+    usize::try_from(count).map_err(|_| "cached selected-sample count exceeds usize range".into())
+}
+
+/// Rebuilds a finalized selected sample from one cached SQLite row.
+///
+/// # Parameters
+/// - `row`: Cached SQLite selected-sample row.
+///
+/// # Returns
+/// - `Result<SelectedAvalancheSample, Box<dyn Error>>`: Fully reconstructed selected sample.
+///
+/// # Expected Output
+/// - Returns the decoded selected sample; no stdout/stderr output.
+fn deserialize_selected_avalanche_sample_row(
+    row: CachedAvalancheSampleRow,
+) -> Result<SelectedAvalancheSample, Box<dyn Error>> {
+    let beam_results =
+        serde_json::from_str::<Vec<AvalancheCombinationBeamResult>>(&row.beam_results_json)?;
+    Ok(SelectedAvalancheSample {
+        sample_index: usize::try_from(row.sample_index)
+            .map_err(|_| "cached sample index exceeds usize range")?,
+        tier_index: usize::try_from(row.tier_index)
+            .map_err(|_| "cached tier index exceeds usize range")?,
+        input_count: usize::try_from(row.input_count)
+            .map_err(|_| "cached input count exceeds usize range")?,
+        average_score_pct: row.average_score_pct,
+        beam_results,
+        majority_vote_bits: PackedBits::from_bytes_le(
+            &row.majority_vote_bits,
+            usize::try_from(row.majority_vote_bits_bit_len)
+                .map_err(|_| "cached majority-vote bit length exceeds usize range")?,
+        )
+        .to_bools(),
+        majority_vote_match_pct: row.majority_vote_match_pct,
+        majority_vote_ones_match_pct: row.majority_vote_ones_match_pct,
+        best_bits: PackedBits::from_bytes_le(
+            &row.best_bits,
+            usize::try_from(row.best_bits_bit_len)
+                .map_err(|_| "cached best-bit length exceeds usize range")?,
+        )
+        .to_bools(),
+        top_beam_score: row.top_beam_score,
+        top_beam_match_pct: row.top_beam_match_pct,
+        best_match_pct: row.best_match_pct,
+        node: AvalancheNode::from_packed_bits(
+            PackedBits::from_bytes_le(
+                &row.recursive_bits,
+                usize::try_from(row.recursive_bits_bit_len)
+                    .map_err(|_| "cached recursive bit length exceeds usize range")?,
+            ),
+            vec![
+                0.0;
+                usize::try_from(row.recursive_bits_bit_len)
+                    .map_err(|_| "cached recursive bit length exceeds usize range")?
+            ],
+        ),
+    })
 }
 
 /// Resolves the bit width for decryptions that use ciphertext exponent variants.
@@ -614,6 +1505,13 @@ pub fn run_demo(
         e: e.clone(),
         key_bit_width,
     };
+    let avalanche_cache = if config.engine.analysis_batch_enable {
+        let cache = AvalancheCacheGuard::new(args.seed, &config.engine)?;
+        println!("Avalanche cache database: {}", cache.path.to_string_lossy());
+        Some(cache)
+    } else {
+        None
+    };
 
     if args.tests {
         let info_start = Instant::now();
@@ -660,6 +1558,7 @@ pub fn run_demo(
             analytics,
             args.shift,
             prefer_beam_score_ordering,
+            avalanche_cache.as_ref(),
         ) {
             with_analytics(analytics, |a| {
                 a.add_feature_note("r_candidate_accuracy", &format!("failed: {}", err));
@@ -4798,6 +5697,488 @@ fn select_scored_inputs_for_mixed_r_candidates(
     selected_inputs
 }
 
+/// Loads lightweight cached scored-input summaries for one analysis batch.
+///
+/// # Parameters
+/// - `cache`: Shared SQLite cache wrapper.
+/// - `batch_number`: One-based analysis batch number.
+///
+/// # Returns
+/// - `Result<Vec<CachedScoredInputSummary>, Box<dyn Error>>`: Lightweight scored-input summaries in row order.
+///
+/// # Expected Output
+/// - Streams cached scored-input pages from SQLite and returns lightweight metadata only.
+fn load_cached_scored_input_summaries(
+    cache: &AvalancheCacheGuard,
+    batch_number: usize,
+) -> Result<Vec<CachedScoredInputSummary>, Box<dyn Error>> {
+    let total_rows = count_cached_scored_inputs(cache, batch_number)?;
+    let mut offset_rows = 0i64;
+    let mut summaries = Vec::with_capacity(total_rows);
+    while summaries.len() < total_rows {
+        let rows = load_cached_scored_input_rows_page(
+            cache,
+            batch_number,
+            offset_rows,
+            AVALANCHE_CACHE_PAGE_ROWS,
+        )?;
+        if rows.is_empty() {
+            break;
+        }
+        offset_rows +=
+            i64::try_from(rows.len()).map_err(|_| "row page length exceeds i64 range")?;
+        for row in rows {
+            summaries.push(CachedScoredInputSummary {
+                id: row.id,
+                batch_candidate_index: usize::try_from(row.batch_candidate_index)
+                    .map_err(|_| "cached batch candidate index exceeds usize range")?,
+                message_index: usize::try_from(row.message_index)
+                    .map_err(|_| "cached message index exceeds usize range")?,
+                score_match_pct: row.score_match_pct,
+                x: row.x_text.parse::<BigUint>()?,
+                fitness_score: 0,
+            });
+        }
+    }
+    Ok(summaries)
+}
+
+/// Applies the trailing-zero fitness pass to cached scored Avalanche inputs.
+///
+/// # Parameters
+/// - `cache`: Shared SQLite cache wrapper.
+/// - `batch_number`: One-based analysis batch number.
+/// - `fitness_bit_width`: Number of least-significant bits used for the trailing-zero fitness score.
+/// - `r_candidate_limit`: Maximum number of retained r-candidate groups; `0` keeps every group.
+/// - `cx_candidate_limit`: Maximum number of retained `c^x` inputs per r group; `0` keeps every input.
+///
+/// # Returns
+/// - `Result<Vec<CachedScoredInputSummary>, Box<dyn Error>>`: Fitness-ranked and truncated cached summaries.
+///
+/// # Expected Output
+/// - Streams cached rows from SQLite, computes fitness rankings, and returns lightweight retained summaries.
+fn apply_cached_scored_avalanche_fitness_pass(
+    cache: &AvalancheCacheGuard,
+    batch_number: usize,
+    fitness_bit_width: usize,
+    r_candidate_limit: usize,
+    cx_candidate_limit: usize,
+) -> Result<Vec<CachedScoredInputSummary>, Box<dyn Error>> {
+    #[derive(Debug)]
+    struct RankedGroup {
+        batch_candidate_index: usize,
+        best_fitness_score: usize,
+        total_fitness_score: usize,
+        best_match_score: f64,
+        inputs: Vec<CachedScoredInputSummary>,
+    }
+
+    let total_rows = count_cached_scored_inputs(cache, batch_number)?;
+    if total_rows == 0 {
+        return Ok(Vec::new());
+    }
+
+    let mut grouped = BTreeMap::<usize, Vec<CachedScoredInputSummary>>::new();
+    let mut offset_rows = 0i64;
+    while offset_rows
+        < i64::try_from(total_rows).map_err(|_| "cached row count exceeds i64 range")?
+    {
+        let rows = load_cached_scored_input_rows_page(
+            cache,
+            batch_number,
+            offset_rows,
+            AVALANCHE_CACHE_PAGE_ROWS,
+        )?;
+        if rows.is_empty() {
+            break;
+        }
+        offset_rows +=
+            i64::try_from(rows.len()).map_err(|_| "row page length exceeds i64 range")?;
+        for row in rows {
+            let fitness_score = lsb_zero_fitness(
+                &PackedBits::from_bytes_le(
+                    &row.message_bits,
+                    usize::try_from(row.message_bit_len)
+                        .map_err(|_| "cached message bit length exceeds usize range")?,
+                ),
+                fitness_bit_width,
+            );
+            grouped
+                .entry(
+                    usize::try_from(row.batch_candidate_index)
+                        .map_err(|_| "cached batch candidate index exceeds usize range")?,
+                )
+                .or_default()
+                .push(CachedScoredInputSummary {
+                    id: row.id,
+                    batch_candidate_index: usize::try_from(row.batch_candidate_index)
+                        .map_err(|_| "cached batch candidate index exceeds usize range")?,
+                    message_index: usize::try_from(row.message_index)
+                        .map_err(|_| "cached message index exceeds usize range")?,
+                    score_match_pct: row.score_match_pct,
+                    x: row.x_text.parse::<BigUint>()?,
+                    fitness_score,
+                });
+        }
+    }
+
+    println!(
+        "Avalanche fitness pass: scoring {} cached r-candidate groups",
+        grouped.len()
+    );
+    let mut ranked_groups = grouped
+        .into_iter()
+        .map(|(batch_candidate_index, mut ranked_inputs)| {
+            ranked_inputs.sort_by(|left, right| {
+                right
+                    .fitness_score
+                    .cmp(&left.fitness_score)
+                    .then_with(|| right.score_match_pct.total_cmp(&left.score_match_pct))
+                    .then_with(|| left.message_index.cmp(&right.message_index))
+                    .then_with(|| left.x.cmp(&right.x))
+            });
+            if cx_candidate_limit > 0 && ranked_inputs.len() > cx_candidate_limit {
+                ranked_inputs.truncate(cx_candidate_limit);
+            }
+            let best_fitness_score = ranked_inputs
+                .first()
+                .map(|input| input.fitness_score)
+                .unwrap_or(0);
+            let total_fitness_score = ranked_inputs.iter().map(|input| input.fitness_score).sum();
+            let best_match_score = ranked_inputs
+                .iter()
+                .map(|input| input.score_match_pct)
+                .max_by(|left, right| left.total_cmp(right))
+                .unwrap_or(0.0);
+            RankedGroup {
+                batch_candidate_index,
+                best_fitness_score,
+                total_fitness_score,
+                best_match_score,
+                inputs: ranked_inputs,
+            }
+        })
+        .collect::<Vec<_>>();
+    ranked_groups.sort_by(|left, right| {
+        right
+            .best_fitness_score
+            .cmp(&left.best_fitness_score)
+            .then_with(|| right.total_fitness_score.cmp(&left.total_fitness_score))
+            .then_with(|| right.best_match_score.total_cmp(&left.best_match_score))
+            .then_with(|| left.batch_candidate_index.cmp(&right.batch_candidate_index))
+    });
+    if let Some(best_r_group) = ranked_groups.first() {
+        println!(
+            "Avalanche fitness maxima: best cached r candidate batch-index {} fitness {} total-fitness {} best-match {}%",
+            best_r_group.batch_candidate_index,
+            best_r_group.best_fitness_score,
+            best_r_group.total_fitness_score,
+            format_beam_float(best_r_group.best_match_score, BEAM_PCT_DECIMALS),
+        );
+    }
+    if let Some((best_cx_group, best_cx_input)) = ranked_groups
+        .iter()
+        .flat_map(|group| group.inputs.iter().map(move |input| (group, input)))
+        .max_by(|(left_group, left_input), (right_group, right_input)| {
+            left_input
+                .fitness_score
+                .cmp(&right_input.fitness_score)
+                .then_with(|| {
+                    left_input
+                        .score_match_pct
+                        .total_cmp(&right_input.score_match_pct)
+                })
+                .then_with(|| {
+                    right_group
+                        .batch_candidate_index
+                        .cmp(&left_group.batch_candidate_index)
+                })
+                .then_with(|| right_input.message_index.cmp(&left_input.message_index))
+                .then_with(|| right_input.x.cmp(&left_input.x))
+        })
+    {
+        println!(
+            "Avalanche fitness maxima: best cached c^x candidate batch-index {} message-index {} x {} fitness {} match {}%",
+            best_cx_group.batch_candidate_index,
+            best_cx_input.message_index,
+            best_cx_input.x,
+            best_cx_input.fitness_score,
+            format_beam_float(best_cx_input.score_match_pct, BEAM_PCT_DECIMALS),
+        );
+    }
+    if r_candidate_limit > 0 && ranked_groups.len() > r_candidate_limit {
+        ranked_groups.truncate(r_candidate_limit);
+    }
+
+    let retained_input_count = ranked_groups.iter().map(|group| group.inputs.len()).sum();
+    let mut retained_inputs = Vec::with_capacity(retained_input_count);
+    for group in ranked_groups {
+        retained_inputs.extend(group.inputs);
+    }
+    Ok(retained_inputs)
+}
+
+/// Prunes cached scored-input summaries to a central Hamming-distance percentile band.
+///
+/// # Parameters
+/// - `cache`: Shared SQLite cache wrapper.
+/// - `summaries`: Lightweight cached input summaries available for pruning.
+/// - `reference_message_bits`: Original plaintext bits packed for Hamming-distance scoring.
+/// - `keep_percentile`: Central percentile of Hamming distances to retain.
+/// - `outlier_preference_pct`: Percentage of the retained inlier count to add back from outlier tails.
+///
+/// # Returns
+/// - `Result<(Vec<CachedScoredInputSummary>, usize, usize, usize), Box<dyn Error>>`: Retained summaries plus inlier/outlier counts.
+///
+/// # Expected Output
+/// - Streams only the selected rows needed for Hamming-distance scoring and returns retained summaries in original order.
+fn prune_cached_scored_inputs_by_hamming_distance_percentile(
+    cache: &AvalancheCacheGuard,
+    summaries: &[CachedScoredInputSummary],
+    reference_message_bits: &PackedBits,
+    keep_percentile: f64,
+    outlier_preference_pct: f64,
+) -> Result<(Vec<CachedScoredInputSummary>, usize, usize, usize), Box<dyn Error>> {
+    if summaries.len() < 2 || keep_percentile >= 100.0 {
+        return Ok((summaries.to_vec(), summaries.len(), 0, 0));
+    }
+
+    let tail_fraction = ((100.0 - keep_percentile).max(0.0) / 100.0) / 2.0;
+    if tail_fraction <= 0.0 {
+        return Ok((summaries.to_vec(), summaries.len(), 0, 0));
+    }
+
+    let ids = summaries
+        .iter()
+        .map(|summary| summary.id)
+        .collect::<Vec<_>>();
+    let mut distance_by_id = HashMap::with_capacity(ids.len());
+    for id_chunk in ids.chunks(usize::try_from(AVALANCHE_CACHE_PAGE_ROWS).unwrap_or(4096)) {
+        for row in load_cached_scored_input_rows_by_ids(cache, id_chunk)? {
+            distance_by_id.insert(
+                row.id,
+                hamming_distance_packed_bytes(&row.message_bits, reference_message_bits.bytes_le()),
+            );
+        }
+    }
+
+    let distances = summaries
+        .iter()
+        .enumerate()
+        .map(|(index, summary)| {
+            let distance = *distance_by_id
+                .get(&summary.id)
+                .ok_or_else(|| format!("missing cached distance row id {}", summary.id))?;
+            Ok::<_, Box<dyn Error>>((index, distance))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut sorted_distances = distances
+        .iter()
+        .map(|(_, distance)| *distance)
+        .collect::<Vec<_>>();
+    sorted_distances.sort_unstable();
+
+    let tail_count = ((summaries.len() as f64) * tail_fraction).round() as usize;
+    if tail_count == 0 || tail_count.saturating_mul(2) >= sorted_distances.len() {
+        return Ok((summaries.to_vec(), summaries.len(), 0, 0));
+    }
+
+    let lower_distance = sorted_distances[tail_count];
+    let upper_distance = sorted_distances[sorted_distances.len() - tail_count - 1];
+    let mut inlier_indices = Vec::new();
+    let mut outliers = Vec::new();
+    for (index, distance) in distances {
+        if distance >= lower_distance && distance <= upper_distance {
+            inlier_indices.push(index);
+        } else {
+            let deviation = if distance < lower_distance {
+                lower_distance - distance
+            } else {
+                distance - upper_distance
+            };
+            outliers.push((index, deviation));
+        }
+    }
+    if inlier_indices.is_empty() {
+        return Ok((summaries.to_vec(), summaries.len(), 0, 0));
+    }
+
+    let preferred_outlier_count =
+        (((inlier_indices.len() as f64) * outlier_preference_pct.max(0.0)) / 100.0).round()
+            as usize;
+    outliers.sort_by(|left, right| right.1.cmp(&left.1).then_with(|| left.0.cmp(&right.0)));
+    let inlier_index_set = inlier_indices.iter().copied().collect::<HashSet<_>>();
+    let preferred_outlier_indices = outliers
+        .iter()
+        .take(preferred_outlier_count.min(outliers.len()))
+        .map(|(index, _)| *index)
+        .collect::<HashSet<_>>();
+
+    let selected_inputs = summaries
+        .iter()
+        .enumerate()
+        .filter_map(|(index, summary)| {
+            (inlier_index_set.contains(&index) || preferred_outlier_indices.contains(&index))
+                .then(|| summary.clone())
+        })
+        .collect::<Vec<_>>();
+    Ok((
+        if selected_inputs.is_empty() {
+            summaries.to_vec()
+        } else {
+            selected_inputs
+        },
+        inlier_indices.len(),
+        outliers.len(),
+        preferred_outlier_indices.len(),
+    ))
+}
+
+/// Groups cached scored-input summaries by their originating r candidate.
+///
+/// # Parameters
+/// - `summaries`: Lightweight cached scored-input summaries produced for the batch.
+///
+/// # Returns
+/// - `Vec<CachedScoredInputGroup>`: Distinct r-candidate groups preserving every cached row id.
+///
+/// # Expected Output
+/// - Returns grouped cached summaries ordered by batch-candidate index.
+fn group_cached_scored_inputs_by_r_candidate(
+    summaries: &[CachedScoredInputSummary],
+) -> Vec<CachedScoredInputGroup> {
+    let mut grouped = BTreeMap::<usize, Vec<CachedScoredInputSummary>>::new();
+    for summary in summaries {
+        grouped
+            .entry(summary.batch_candidate_index)
+            .or_default()
+            .push(summary.clone());
+    }
+
+    grouped
+        .into_iter()
+        .map(|(batch_candidate_index, mut grouped_inputs)| {
+            grouped_inputs.sort_by(|left, right| {
+                left.message_index
+                    .cmp(&right.message_index)
+                    .then_with(|| left.x.cmp(&right.x))
+                    .then_with(|| right.score_match_pct.total_cmp(&left.score_match_pct))
+            });
+            CachedScoredInputGroup {
+                batch_candidate_index,
+                input_ids: grouped_inputs
+                    .into_iter()
+                    .map(|summary| summary.id)
+                    .collect(),
+            }
+        })
+        .collect()
+}
+
+/// Selects random cached scored-input row ids directly from the flattened summary pool.
+///
+/// # Parameters
+/// - `summaries`: Flattened cached scored-input summaries available for sampling.
+/// - `sample_size`: Maximum number of row ids to keep.
+/// - `rng`: Random number generator used for index sampling.
+///
+/// # Returns
+/// - `Vec<i64>`: Randomly selected cached row ids without replacement.
+///
+/// # Expected Output
+/// - Returns up to `sample_size` unique cached row ids; no stdout/stderr output.
+fn select_random_cached_scored_input_ids(
+    summaries: &[CachedScoredInputSummary],
+    sample_size: usize,
+    rng: &mut RngChoice,
+) -> Vec<i64> {
+    if sample_size == 0 || summaries.is_empty() {
+        return Vec::new();
+    }
+
+    sample_unique_indices(summaries.len(), sample_size, rng)
+        .into_iter()
+        .filter_map(|index| summaries.get(index).map(|summary| summary.id))
+        .collect()
+}
+
+/// Selects cached row ids for a mixed-r sampled Avalanche input set.
+///
+/// # Parameters
+/// - `grouped_inputs`: Cached scored-input groups keyed by r candidate.
+/// - `mixed_r_candidate_count`: Number of distinct r candidates to include.
+/// - `combination_size`: Maximum number of cached rows to keep after group sampling.
+/// - `rng`: Random number generator used for group sampling.
+///
+/// # Returns
+/// - `Vec<i64>`: Sampled cached row ids for the selected r groups.
+///
+/// # Expected Output
+/// - Returns up to `combination_size` cached row ids while preserving selected r-group coverage when possible.
+fn select_cached_scored_input_ids_for_mixed_r_candidates(
+    grouped_inputs: &[CachedScoredInputGroup],
+    mixed_r_candidate_count: usize,
+    combination_size: usize,
+    rng: &mut RngChoice,
+) -> Vec<i64> {
+    if combination_size == 0 || grouped_inputs.is_empty() || mixed_r_candidate_count == 0 {
+        return Vec::new();
+    }
+
+    let sampled_group_indices =
+        sample_unique_indices(grouped_inputs.len(), mixed_r_candidate_count, rng);
+    let mut sampled_groups = Vec::new();
+    for group_idx in sampled_group_indices {
+        if let Some(group) = grouped_inputs.get(group_idx) {
+            sampled_groups.push(group);
+        }
+    }
+    if sampled_groups.is_empty() {
+        return Vec::new();
+    }
+
+    let available_input_count = sampled_groups
+        .iter()
+        .map(|group| group.input_ids.len())
+        .sum::<usize>();
+    if available_input_count <= combination_size {
+        let mut selected_ids = Vec::with_capacity(available_input_count);
+        for group in sampled_groups {
+            selected_ids.extend(group.input_ids.iter().copied());
+        }
+        return selected_ids;
+    }
+
+    let required_group_slots = sampled_groups.len().min(combination_size);
+    let mut selected_ids = Vec::with_capacity(combination_size);
+    let mut leftover_ids = Vec::with_capacity(available_input_count - required_group_slots);
+    for (group_order, group) in sampled_groups.iter().enumerate() {
+        let pick_indices = sample_unique_indices(group.input_ids.len(), 1, rng);
+        if group_order < required_group_slots {
+            if let Some(&picked_index) = pick_indices.first() {
+                selected_ids.push(group.input_ids[picked_index]);
+                for (input_idx, input_id) in group.input_ids.iter().enumerate() {
+                    if input_idx != picked_index {
+                        leftover_ids.push(*input_id);
+                    }
+                }
+                continue;
+            }
+        }
+        leftover_ids.extend(group.input_ids.iter().copied());
+    }
+
+    let remaining_slots = combination_size.saturating_sub(selected_ids.len());
+    let leftover_indices = sample_unique_indices(leftover_ids.len(), remaining_slots, rng);
+    for leftover_idx in leftover_indices {
+        if let Some(input_id) = leftover_ids.get(leftover_idx) {
+            selected_ids.push(*input_id);
+        }
+    }
+
+    selected_ids
+}
+
 #[derive(Debug)]
 struct ComputedAvalancheSample {
     sample: SelectedAvalancheSample,
@@ -5278,6 +6659,302 @@ fn execute_sampled_avalanche_sample(
     })
 }
 
+/// Executes one sampled Avalanche combination by loading only the selected cached inputs.
+///
+/// # Parameters
+/// - `engine`: Engine configuration controlling combination sampling and beam scoring.
+/// - `reference_bits`: Full-width shifted reference bits used for ordering and reduction.
+/// - `comparison_message_bits`: Original plaintext payload bits used for beam-match scoring.
+/// - `cache`: Shared SQLite cache wrapper containing tier-one scored inputs.
+/// - `batch_number`: One-based analysis batch number owning the cached inputs.
+/// - `scored_input_summaries`: Lightweight cached scored-input summaries available for selection.
+/// - `grouped_inputs`: Cached scored-input groups keyed by r candidate.
+/// - `pool_size`: Total number of scored inputs available in the batch.
+/// - `mixed_r_candidate_count`: Effective number of distinct r candidates mixed into the sample.
+/// - `tier_index`: One-based Avalanche tier index being executed.
+/// - `sample_index`: Zero-based sample index for analytics ordering.
+/// - `rng`: Random number generator dedicated to this sample.
+///
+/// # Returns
+/// - `Result<SampledAvalancheSampleOutcome, String>`: Sample analytics, selected execution, and evaluated-node count.
+///
+/// # Expected Output
+/// - Loads only the selected cached rows from SQLite and returns sample analytics for one combination.
+fn execute_sampled_avalanche_sample_from_cache(
+    engine: &EngineConfig,
+    reference_bits: &[bool],
+    comparison_message_bits: &[bool],
+    cache: &AvalancheCacheGuard,
+    batch_number: usize,
+    scored_input_summaries: &[CachedScoredInputSummary],
+    grouped_inputs: &[CachedScoredInputGroup],
+    pool_size: usize,
+    mixed_r_candidate_count: usize,
+    tier_index: usize,
+    sample_index: usize,
+    rng: &mut RngChoice,
+) -> Result<SampledAvalancheSampleOutcome, String> {
+    let keep_all_samples = engine.avalanche_statistics_collection
+        && engine.avalanche_combination_keep_all_samples_in_memory;
+    let selected_input_ids = if engine.avalanche_random_chacha20_inputs {
+        select_random_cached_scored_input_ids(
+            scored_input_summaries,
+            engine.avalanche_combination_size,
+            rng,
+        )
+    } else {
+        select_cached_scored_input_ids_for_mixed_r_candidates(
+            grouped_inputs,
+            mixed_r_candidate_count,
+            engine.avalanche_combination_size,
+            rng,
+        )
+    };
+    let selected_inputs = load_cached_scored_inputs_by_ids(cache, &selected_input_ids)
+        .map_err(|err| err.to_string())?;
+    let selected_group_count = selected_inputs
+        .iter()
+        .map(|input| input.batch_candidate_index)
+        .collect::<HashSet<_>>()
+        .len();
+    let average_score_pct = mean_f64(
+        &selected_inputs
+            .iter()
+            .map(|entry| entry.score_match_pct)
+            .collect::<Vec<_>>(),
+    );
+    let evaluated_candidates = selected_inputs.len();
+    if selected_inputs.is_empty() {
+        return Ok(SampledAvalancheSampleOutcome {
+            retained_sample: None,
+            sample: None,
+            evaluated_candidates,
+            produced_sample: false,
+        });
+    }
+
+    let avalanche_search = build_prepared_avalanche(
+        &selected_inputs,
+        engine,
+        reference_bits,
+        engine.avalanche_statistics_collection,
+        None,
+    )
+    .map_err(|err| err.to_string())?
+    .execute()
+    .map_err(|err| err.to_string())?;
+    let selected_oracles = selected_inputs
+        .iter()
+        .map(|input| input.message_bits.clone())
+        .collect::<Vec<_>>();
+    let computed = finalize_avalanche_sample(
+        engine,
+        comparison_message_bits,
+        sample_index,
+        tier_index,
+        selected_inputs.len(),
+        average_score_pct,
+        avalanche_search,
+        selected_oracles,
+    )?;
+    let selected_sample = SelectedAvalancheSample {
+        sample_index: computed.sample.sample_index,
+        tier_index: computed.sample.tier_index,
+        input_count: computed.sample.input_count,
+        average_score_pct: computed.sample.average_score_pct,
+        beam_results: computed.sample.beam_results.clone(),
+        majority_vote_bits: computed.sample.majority_vote_bits.clone(),
+        majority_vote_match_pct: computed.sample.majority_vote_match_pct,
+        majority_vote_ones_match_pct: computed.sample.majority_vote_ones_match_pct,
+        best_bits: computed.sample.best_bits.clone(),
+        top_beam_score: computed.sample.top_beam_score,
+        top_beam_match_pct: computed.sample.top_beam_match_pct,
+        best_match_pct: computed.sample.best_match_pct,
+        node: computed.sample.node.clone(),
+    };
+    let retained_sample = if keep_all_samples {
+        Some(AvalancheCombinationSample {
+            sample_index: selected_sample.sample_index,
+            pool_size,
+            r_candidate_pool_size: grouped_inputs.len(),
+            combination_size: selected_inputs.len(),
+            mixed_r_candidate_count: selected_group_count,
+            average_score_pct,
+            majority_vote_enabled: engine.avalanche_combination_majority_vote,
+            sample_smoothing_enabled: engine.avalanche_combination_sample_smoothing,
+            inputs: selected_inputs
+                .iter()
+                .map(|input| {
+                    let detail = input
+                        .detail
+                        .as_ref()
+                        .expect("sample details must exist when storing all avalanche samples");
+                    AvalancheCombinationSampleInput {
+                        batch_candidate_index: input.batch_candidate_index,
+                        message_index: input.message_index,
+                        r: input.r.clone(),
+                        r_bits: input.r.bits(),
+                        target_exponent: detail.target_exponent.clone(),
+                        x: input.x.clone(),
+                        score_match_pct: input.score_match_pct,
+                        hbc_ciphertext_r: detail.hbc_ciphertext_r.clone(),
+                        candidate_decryption: detail.candidate_decryption.clone(),
+                    }
+                })
+                .collect(),
+            majority_vote_bits: extract_payload_bits_for_accuracy(
+                engine,
+                &selected_sample.majority_vote_bits,
+            ),
+            majority_vote_ones_count: computed.majority_vote_ones_count,
+            majority_vote_zeros_count: computed.majority_vote_zeros_count,
+            majority_vote_probability_one: computed.majority_vote_probability_one,
+            level_similarity_pct: computed.level_similarity_pct,
+            level_pair_counts: computed.level_pair_counts,
+            normalized_bias_probabilities: computed.normalized_bias_probabilities,
+            beam_search_probabilities: computed.beam_search_probabilities,
+            beam_results: selected_sample.beam_results.clone(),
+        })
+    } else {
+        None
+    };
+
+    let _ = batch_number;
+    Ok(SampledAvalancheSampleOutcome {
+        retained_sample,
+        sample: Some(selected_sample),
+        evaluated_candidates,
+        produced_sample: true,
+    })
+}
+
+/// Loads lightweight cached recursive sample summaries for one batch/tier.
+///
+/// # Parameters
+/// - `cache`: Shared SQLite cache wrapper.
+/// - `batch_number`: One-based analysis batch number.
+/// - `tier_index`: One-based Avalanche tier index.
+///
+/// # Returns
+/// - `Result<Vec<CachedRecursiveSampleSummary>, Box<dyn Error>>`: Lightweight cached recursive sample summaries.
+///
+/// # Expected Output
+/// - Streams cached sample rows from SQLite and returns only the metadata needed for recursive selection.
+fn load_cached_recursive_sample_summaries(
+    cache: &AvalancheCacheGuard,
+    batch_number: usize,
+    tier_index: usize,
+) -> Result<Vec<CachedRecursiveSampleSummary>, Box<dyn Error>> {
+    let total_rows = count_cached_selected_samples(cache, batch_number, tier_index)?;
+    let mut offset_rows = 0i64;
+    let mut summaries = Vec::with_capacity(total_rows);
+    while summaries.len() < total_rows {
+        let rows = load_cached_selected_sample_rows_page(
+            cache,
+            batch_number,
+            tier_index,
+            offset_rows,
+            AVALANCHE_CACHE_PAGE_ROWS,
+        )?;
+        if rows.is_empty() {
+            break;
+        }
+        offset_rows +=
+            i64::try_from(rows.len()).map_err(|_| "row page length exceeds i64 range")?;
+        for row in rows {
+            summaries.push(CachedRecursiveSampleSummary {
+                id: row.id,
+                sample_index: usize::try_from(row.sample_index)
+                    .map_err(|_| "cached sample index exceeds usize range")?,
+                best_match_pct: row.best_match_pct,
+            });
+        }
+    }
+    Ok(summaries)
+}
+
+/// Executes one recursive Avalanche sample by loading prior-tier sample rows from SQLite.
+///
+/// # Parameters
+/// - `engine`: Engine configuration controlling beam-search behavior.
+/// - `reference_bits`: Full-width shifted reference bits used for optional ordering.
+/// - `comparison_message_bits`: Original plaintext payload bits used for scoring.
+/// - `cache`: Shared SQLite cache wrapper containing prior-tier sample rows.
+/// - `source_sample_ids`: Cache row ids selecting the prior-tier samples used by this recursive sample.
+/// - `tier_index`: One-based tier index being executed.
+/// - `sample_index`: Zero-based sample index within the current tier.
+///
+/// # Returns
+/// - `Result<SelectedAvalancheSample, String>`: Finalized recursive sample result.
+///
+/// # Expected Output
+/// - Loads the requested prior-tier sample rows from SQLite and returns the recursive sample output.
+fn execute_recursive_avalanche_sample_from_cache_ids(
+    engine: &EngineConfig,
+    reference_bits: &[bool],
+    comparison_message_bits: &[bool],
+    cache: &AvalancheCacheGuard,
+    source_sample_ids: &[i64],
+    tier_index: usize,
+    sample_index: usize,
+) -> Result<SelectedAvalancheSample, String> {
+    let rows = load_cached_selected_sample_rows_by_ids(cache, source_sample_ids)
+        .map_err(|err| err.to_string())?;
+    let mut by_id = HashMap::with_capacity(rows.len());
+    for row in rows {
+        by_id.insert(row.id, row);
+    }
+    let selected_samples = source_sample_ids
+        .iter()
+        .map(|id| {
+            let row = by_id
+                .remove(id)
+                .ok_or_else(|| format!("missing cached recursive sample row id {}", id))?;
+            Ok::<_, String>(RecursiveAvalancheSourceSample {
+                best_match_pct: row.best_match_pct,
+                message_bits: PackedBits::from_bytes_le(
+                    &row.recursive_bits,
+                    usize::try_from(row.recursive_bits_bit_len)
+                        .map_err(|_| "cached recursive bit length exceeds usize range")?,
+                ),
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let selected_sample_refs = selected_samples.iter().collect::<Vec<_>>();
+    let average_score_pct = mean_f64(
+        &selected_sample_refs
+            .iter()
+            .map(|sample| sample.best_match_pct)
+            .collect::<Vec<_>>(),
+    );
+    let recursive_inputs = build_recursive_avalanche_inputs(&selected_sample_refs);
+    let avalanche_search = build_prepared_avalanche(
+        &recursive_inputs,
+        engine,
+        reference_bits,
+        engine.avalanche_statistics_collection,
+        None,
+    )
+    .map_err(|err| err.to_string())?
+    .execute()
+    .map_err(|err| err.to_string())?;
+    let selected_oracles = recursive_inputs
+        .iter()
+        .map(|input| input.message_bits.clone())
+        .collect::<Vec<_>>();
+    finalize_avalanche_sample(
+        engine,
+        comparison_message_bits,
+        sample_index,
+        tier_index,
+        selected_sample_refs.len(),
+        average_score_pct,
+        avalanche_search,
+        selected_oracles,
+    )
+    .map(|computed| computed.sample)
+}
+
 /// Executes one recursive Avalanche sample from prior-tier outputs selected by index.
 ///
 /// # Parameters
@@ -5343,6 +7020,778 @@ fn execute_recursive_avalanche_sample_from_indices(
         selected_oracles,
     )
     .map(|computed| computed.sample)
+}
+
+/// Builds tier statistics directly from cached selected-sample rows.
+///
+/// # Parameters
+/// - `cache`: Shared SQLite cache wrapper.
+/// - `batch_number`: One-based analysis batch number.
+/// - `tier_index`: One-based Avalanche tier index.
+/// - `group_size`: Number of source items grouped into each sample for the tier.
+/// - `source_kind`: Human-readable description of the source data for the tier.
+///
+/// # Returns
+/// - `Result<AvalancheTierStatistics, Box<dyn Error>>`: Per-tier sample accuracy summary.
+///
+/// # Expected Output
+/// - Reads cached selected-sample rows from SQLite and returns per-tier analytics.
+fn build_cached_avalanche_tier_statistics(
+    cache: &AvalancheCacheGuard,
+    batch_number: usize,
+    tier_index: usize,
+    group_size: usize,
+    source_kind: &str,
+) -> Result<AvalancheTierStatistics, Box<dyn Error>> {
+    let total_rows = count_cached_selected_samples(cache, batch_number, tier_index)?;
+    let mut offset_rows = 0i64;
+    let mut sample_stats = Vec::with_capacity(total_rows);
+    while sample_stats.len() < total_rows {
+        let rows = load_cached_selected_sample_rows_page(
+            cache,
+            batch_number,
+            tier_index,
+            offset_rows,
+            AVALANCHE_CACHE_PAGE_ROWS,
+        )?;
+        if rows.is_empty() {
+            break;
+        }
+        offset_rows +=
+            i64::try_from(rows.len()).map_err(|_| "row page length exceeds i64 range")?;
+        sample_stats.extend(rows.into_iter().map(|row| AvalancheTierSampleStat {
+            sample_index: usize::try_from(row.sample_index).unwrap_or(0),
+            input_count: usize::try_from(row.input_count).unwrap_or(0),
+            average_score_pct: row.average_score_pct,
+            beam_match_pct: row.top_beam_match_pct,
+            majority_vote_match_pct: Some(row.majority_vote_match_pct),
+            best_match_pct: row.best_match_pct,
+        }));
+    }
+    Ok(AvalancheTierStatistics {
+        tier_index,
+        sample_count: sample_stats.len(),
+        group_size,
+        source_kind: source_kind.to_string(),
+        sample_stats,
+    })
+}
+
+/// Runs sampled avalanche combinations over cached scored batch outputs.
+///
+/// # Parameters
+/// - `engine`: Engine configuration controlling combination sampling and beam scoring.
+/// - `payload_message`: Original plaintext payload used for scoring and to derive the widened reference.
+/// - `cache`: Shared SQLite cache wrapper containing the batch-scored inputs.
+/// - `batch_number`: One-based batch index used for progress logging.
+/// - `prefer_beam_score_ordering`: Whether selection should prefer beam score over known match percentage.
+/// - `rng`: Random number generator for combination sampling.
+///
+/// # Returns
+/// - `Result<SampledAvalancheBatchResult, Box<dyn Error>>`: Sample logs plus the selected best sample.
+///
+/// # Expected Output
+/// - Prints sampled-avalanche progress and returns results using SQLite-backed tier inputs and recursive tiers.
+fn run_sampled_avalanche_beam_search_cached(
+    engine: &EngineConfig,
+    payload_message: &BigUint,
+    cache: &AvalancheCacheGuard,
+    batch_number: usize,
+    prefer_beam_score_ordering: bool,
+    rng: &mut RngChoice,
+) -> Result<SampledAvalancheBatchResult, Box<dyn Error>> {
+    if engine.avalanche_combination_samples == 0 {
+        return Err("avalanche_combination_samples must be >= 1".into());
+    }
+    if !engine.avalanche_random_chacha20_inputs
+        && engine.avalanche_combination_mixed_r_candidates == 0
+    {
+        return Err("avalanche_combination_mixed_r_candidates must be >= 1".into());
+    }
+    if engine.avalanche_combination_size == 0 {
+        return Err("avalanche_combination_size must be >= 1".into());
+    }
+    if engine.avalanche_combination_hamming_distance_prune
+        && !(0.0 < engine.avalanche_combination_hamming_distance_keep_percentile
+            && engine.avalanche_combination_hamming_distance_keep_percentile <= 100.0)
+    {
+        return Err(
+            "avalanche_combination_hamming_distance_keep_percentile must be in (0, 100]".into(),
+        );
+    }
+    if !(0.0..=100.0)
+        .contains(&engine.avalanche_combination_hamming_distance_outlier_preference_pct)
+    {
+        return Err(
+            "avalanche_combination_hamming_distance_outlier_preference_pct must be in [0, 100]"
+                .into(),
+        );
+    }
+
+    let cached_input_total = count_cached_scored_inputs(cache, batch_number)?;
+    if cached_input_total == 0 {
+        return Ok(SampledAvalancheBatchResult::default());
+    }
+
+    let scored_inputs = if engine.avalanche_fitness_scoring_pass {
+        let preprocessed = apply_cached_scored_avalanche_fitness_pass(
+            cache,
+            batch_number,
+            resolve_avalanche_fitness_bit_width(engine),
+            engine.avalanche_fitness_r_candidate_limit,
+            engine.avalanche_fitness_cx_candidate_limit,
+        )?;
+        println!(
+            "Avalanche fitness pass for batch {}: retained {} of {} cached scored inputs across up to {} r candidates and {} c^x inputs per r using {} LSB fitness bits",
+            batch_number,
+            preprocessed.len(),
+            cached_input_total,
+            engine.avalanche_fitness_r_candidate_limit,
+            engine.avalanche_fitness_cx_candidate_limit,
+            resolve_avalanche_fitness_bit_width(engine)
+        );
+        preprocessed
+    } else {
+        load_cached_scored_input_summaries(cache, batch_number)?
+    };
+    if scored_inputs.is_empty() {
+        return Ok(SampledAvalancheBatchResult::default());
+    }
+
+    let comparison_message_bits =
+        biguint_to_bits_le(payload_message, resolve_plaintext_message_bit_width(engine));
+    let transformed_message = build_candidate_message_transform(engine)(payload_message);
+    let reference_bits = biguint_to_bits_le(
+        &transformed_message,
+        load_cached_scored_inputs_by_ids(cache, &[scored_inputs[0].id])?
+            .first()
+            .map(|input| input.message_bits.len())
+            .unwrap_or_else(|| resolve_avalanche_bit_width(engine)),
+    );
+    let packed_message_bits = PackedBits::from_bools(&reference_bits);
+    let (
+        pruned_scored_inputs,
+        retained_inlier_count,
+        available_outlier_count,
+        preferred_outlier_count,
+    ) = if engine.avalanche_combination_hamming_distance_prune {
+        prune_cached_scored_inputs_by_hamming_distance_percentile(
+            cache,
+            &scored_inputs,
+            &packed_message_bits,
+            engine.avalanche_combination_hamming_distance_keep_percentile,
+            engine.avalanche_combination_hamming_distance_outlier_preference_pct,
+        )?
+    } else {
+        (scored_inputs.clone(), scored_inputs.len(), 0, 0)
+    };
+    let grouped_inputs = group_cached_scored_inputs_by_r_candidate(&pruned_scored_inputs);
+    let pool_size = pruned_scored_inputs.len();
+    let r_candidate_pool_size = grouped_inputs.len();
+    if r_candidate_pool_size == 0 {
+        return Ok(SampledAvalancheBatchResult::default());
+    }
+    let mixed_r_candidate_count = if engine.avalanche_random_chacha20_inputs {
+        0
+    } else {
+        engine
+            .avalanche_combination_mixed_r_candidates
+            .min(engine.avalanche_combination_size)
+            .min(r_candidate_pool_size)
+    };
+
+    let sample_count = engine.avalanche_combination_samples as usize;
+    let recursion_depth = engine.avalanche_combination_recursion_depth.max(1);
+    let recursive_group_size = engine.avalanche_combination_recursive_group_size.max(1);
+    let recursive_resample_count = engine.avalanche_combination_recursive_resample_count;
+    let majority_vote_enabled = engine.avalanche_combination_majority_vote;
+    let sample_smoothing_enabled = engine.avalanche_combination_sample_smoothing;
+    let majority_vote_print_enabled = engine.avalanche_combination_majority_vote_print;
+    let recursive_input_mode = if engine.avalanche_use_top_beam {
+        "top-beam"
+    } else {
+        "majority-vote"
+    };
+    let statistics_collection_enabled = engine.avalanche_statistics_collection;
+    let keep_all_samples_enabled =
+        statistics_collection_enabled && engine.avalanche_combination_keep_all_samples_in_memory;
+    let selection_mode = if engine.avalanche_random_chacha20_inputs {
+        "random-chacha20-inputs"
+    } else {
+        "mixed-r-combinations"
+    };
+
+    println!(
+        "Avalanche combination setup for batch {}: scored inputs {} r-candidate-pool {} selection-mode {} configured-mixed-r-candidates {} effective-mixed-r-candidates {} samples {} recursion-depth {} recursive-group-size {} recursive-resample-count {} majority-vote {} sample-smoothing {} majority-print {} recursive-input {} statistics-collection {} keep-all-samples {} hamming-prune {} kept-percentile {} outlier-preference-pct {}",
+        batch_number,
+        pool_size,
+        r_candidate_pool_size,
+        selection_mode,
+        engine.avalanche_combination_mixed_r_candidates,
+        mixed_r_candidate_count,
+        sample_count,
+        recursion_depth,
+        recursive_group_size,
+        recursive_resample_count,
+        if majority_vote_enabled { "on" } else { "off" },
+        if sample_smoothing_enabled {
+            "on"
+        } else {
+            "off"
+        },
+        if majority_vote_print_enabled {
+            "on"
+        } else {
+            "off"
+        },
+        recursive_input_mode,
+        if statistics_collection_enabled {
+            "on"
+        } else {
+            "off"
+        },
+        if keep_all_samples_enabled {
+            "on"
+        } else {
+            "off"
+        },
+        if engine.avalanche_combination_hamming_distance_prune {
+            "on"
+        } else {
+            "off"
+        },
+        engine.avalanche_combination_hamming_distance_keep_percentile,
+        engine.avalanche_combination_hamming_distance_outlier_preference_pct
+    );
+    if engine.avalanche_combination_hamming_distance_prune && pool_size < scored_inputs.len() {
+        println!(
+            "Avalanche combination batch {} pruned cached scored inputs by Hamming distance from {} to {} before sampling (retained-inliers {} available-outliers {} preferred-outliers {})",
+            batch_number,
+            scored_inputs.len(),
+            pool_size,
+            retained_inlier_count,
+            available_outlier_count,
+            preferred_outlier_count
+        );
+    }
+    if !engine.avalanche_random_chacha20_inputs
+        && mixed_r_candidate_count < engine.avalanche_combination_mixed_r_candidates
+    {
+        println!(
+            "Avalanche combination batch {} capped mixed r-candidates from {} to {} because only {} distinct r candidates were available in the batch",
+            batch_number,
+            engine.avalanche_combination_mixed_r_candidates,
+            mixed_r_candidate_count,
+            r_candidate_pool_size
+        );
+    }
+
+    let rng_mode = if engine.avalanche_random_chacha20_inputs {
+        RngMode::Crypto
+    } else {
+        rng.mode()
+    };
+    let sample_label = format!("Avalanche sample batch {}", batch_number);
+    let sample_done = AtomicU64::new(0);
+    let sample_log_start = Instant::now();
+    let sample_log_interval = Duration::from_secs(5);
+    let sample_next_log_at_ms =
+        AtomicU64::new(sample_log_interval.as_millis().min(u128::from(u64::MAX)) as u64);
+    let sample_seeds: Vec<u64> = (0..sample_count).map(|_| rng.next_u64()).collect();
+    let mut base_outcomes = sample_seeds
+        .into_par_iter()
+        .enumerate()
+        .map(|(sample_index, seed)| {
+            let mut local_rng = RngChoice::from_seed(rng_mode, seed);
+            let outcome = execute_sampled_avalanche_sample_from_cache(
+                engine,
+                &reference_bits,
+                &comparison_message_bits,
+                cache,
+                batch_number,
+                &pruned_scored_inputs,
+                &grouped_inputs,
+                pool_size,
+                mixed_r_candidate_count,
+                1,
+                sample_index,
+                &mut local_rng,
+            )?;
+            let done = sample_done.fetch_add(1, Ordering::Relaxed) + 1;
+            log_parallel_progress_every_interval(
+                done,
+                sample_count as u64,
+                &sample_log_start,
+                &sample_next_log_at_ms,
+                &sample_label,
+                sample_log_interval,
+            );
+            Ok::<_, String>(outcome)
+        })
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|err| -> Box<dyn Error> { err.into() })?;
+
+    let mut reduced = SampledAvalancheBatchResult::default();
+    reduced.sample_count = base_outcomes
+        .iter()
+        .filter(|outcome| outcome.produced_sample)
+        .count();
+    reduced.evaluated_candidates = base_outcomes
+        .iter()
+        .map(|outcome| outcome.evaluated_candidates)
+        .sum();
+    reduced.retained_samples = base_outcomes
+        .iter_mut()
+        .filter_map(|outcome| outcome.retained_sample.take())
+        .collect();
+
+    let current_tier_samples = base_outcomes
+        .iter_mut()
+        .filter_map(|outcome| outcome.sample.take())
+        .collect::<Vec<_>>();
+    let will_recurse = recursion_depth > 1 && current_tier_samples.len() > 1;
+    if will_recurse {
+        compact_retained_avalanche_sample_inputs(&mut reduced.retained_samples);
+    }
+    insert_cached_selected_samples(cache, batch_number, &current_tier_samples, engine)?;
+    drop(base_outcomes);
+    drop(grouped_inputs);
+    drop(pruned_scored_inputs);
+    if statistics_collection_enabled {
+        reduced
+            .tier_statistics
+            .push(build_avalanche_tier_statistics(
+                1,
+                engine.avalanche_combination_size,
+                selection_mode,
+                &current_tier_samples,
+            ));
+    }
+
+    let mut tier_index = 1usize;
+    let mut current_tier_summaries =
+        load_cached_recursive_sample_summaries(cache, batch_number, tier_index)?;
+    drop(current_tier_samples);
+    while tier_index < recursion_depth && current_tier_summaries.len() > 1 {
+        let next_tier_index = tier_index + 1;
+        let recursive_seed = rng.next_u64();
+        let mut recursive_rng = RngChoice::from_seed(rng_mode, recursive_seed);
+        let source_sample_count = current_tier_summaries.len();
+        let recursive_done = AtomicU64::new(0);
+        let recursive_evaluated_candidates = AtomicU64::new(0);
+        let recursive_log_start = Instant::now();
+        let recursive_log_interval = Duration::from_secs(5);
+        let recursive_next_log_at_ms =
+            AtomicU64::new(recursive_log_interval.as_millis().min(u128::from(u64::MAX)) as u64);
+        let progress_label = format!(
+            "Avalanche recursive tier {} batch {}",
+            next_tier_index, batch_number
+        );
+        let (next_samples, source_kind, group_count): (Vec<SelectedAvalancheSample>, &str, usize) =
+            if recursive_resample_count > 0 {
+                let recursive_group_seeds: Vec<u64> = (0..recursive_resample_count)
+                    .map(|_| recursive_rng.next_u64())
+                    .collect();
+                println!(
+                    "Avalanche recursive tier {} group preparation for batch {}: source-samples {} group-size {} target-groups {} mode recursive-resampled-samples",
+                    next_tier_index,
+                    batch_number,
+                    source_sample_count,
+                    recursive_group_size,
+                    recursive_resample_count
+                );
+                let prepare_done = AtomicU64::new(0);
+                let prepare_log_start = Instant::now();
+                let prepare_log_interval = Duration::from_secs(5);
+                let prepare_next_log_at_ms = AtomicU64::new(
+                    prepare_log_interval.as_millis().min(u128::from(u64::MAX)) as u64,
+                );
+                let prepare_progress_label = format!(
+                    "Avalanche recursive tier {} group preparation batch {}",
+                    next_tier_index, batch_number
+                );
+                let group_count = recursive_group_seeds.len();
+                println!(
+                    "Avalanche recursive tier {} for batch {}: source-samples {} group-size {} groups {} mode recursive-resampled-samples",
+                    next_tier_index,
+                    batch_number,
+                    source_sample_count,
+                    recursive_group_size,
+                    group_count
+                );
+                let next_samples = recursive_group_seeds
+                    .into_par_iter()
+                    .enumerate()
+                    .map(|(group_index, seed)| {
+                        let mut local_rng = RngChoice::from_seed(rng_mode, seed);
+                        let source_sample_indices = select_recursive_tier_sample_group_indices(
+                            source_sample_count,
+                            recursive_group_size,
+                            &mut local_rng,
+                        );
+                        let source_sample_ids = source_sample_indices
+                            .iter()
+                            .filter_map(|&index| {
+                                current_tier_summaries.get(index).map(|summary| summary.id)
+                            })
+                            .collect::<Vec<_>>();
+                        let prepared = prepare_done.fetch_add(1, Ordering::Relaxed) + 1;
+                        log_parallel_progress_every_interval(
+                            prepared,
+                            group_count as u64,
+                            &prepare_log_start,
+                            &prepare_next_log_at_ms,
+                            &prepare_progress_label,
+                            prepare_log_interval,
+                        );
+                        recursive_evaluated_candidates
+                            .fetch_add(source_sample_ids.len() as u64, Ordering::Relaxed);
+                        let sample = execute_recursive_avalanche_sample_from_cache_ids(
+                            engine,
+                            &reference_bits,
+                            &comparison_message_bits,
+                            cache,
+                            &source_sample_ids,
+                            next_tier_index,
+                            group_index,
+                        )?;
+                        let done = recursive_done.fetch_add(1, Ordering::Relaxed) + 1;
+                        log_parallel_progress_every_interval(
+                            done,
+                            group_count as u64,
+                            &recursive_log_start,
+                            &recursive_next_log_at_ms,
+                            &progress_label,
+                            recursive_log_interval,
+                        );
+                        Ok::<_, String>(sample)
+                    })
+                    .collect::<Result<Vec<_>, _>>()
+                    .map_err(|err| -> Box<dyn Error> { err.into() })?;
+                (next_samples, "recursive-resampled-samples", group_count)
+            } else {
+                let shuffled_sample_indices =
+                    shuffle_recursive_tier_sample_indices(source_sample_count, &mut recursive_rng);
+                let group_count = shuffled_sample_indices.len().div_ceil(recursive_group_size);
+                println!(
+                    "Avalanche recursive tier {} for batch {}: source-samples {} group-size {} groups {} mode recursive-samples",
+                    next_tier_index,
+                    batch_number,
+                    source_sample_count,
+                    recursive_group_size,
+                    group_count
+                );
+                let next_samples = shuffled_sample_indices
+                    .par_chunks(recursive_group_size)
+                    .enumerate()
+                    .map(|(group_index, source_sample_indices)| {
+                        let source_sample_ids = source_sample_indices
+                            .iter()
+                            .filter_map(|&index| {
+                                current_tier_summaries.get(index).map(|summary| summary.id)
+                            })
+                            .collect::<Vec<_>>();
+                        recursive_evaluated_candidates
+                            .fetch_add(source_sample_ids.len() as u64, Ordering::Relaxed);
+                        let sample = execute_recursive_avalanche_sample_from_cache_ids(
+                            engine,
+                            &reference_bits,
+                            &comparison_message_bits,
+                            cache,
+                            &source_sample_ids,
+                            next_tier_index,
+                            group_index,
+                        )?;
+                        let done = recursive_done.fetch_add(1, Ordering::Relaxed) + 1;
+                        log_parallel_progress_every_interval(
+                            done,
+                            group_count as u64,
+                            &recursive_log_start,
+                            &recursive_next_log_at_ms,
+                            &progress_label,
+                            recursive_log_interval,
+                        );
+                        Ok::<_, String>(sample)
+                    })
+                    .collect::<Result<Vec<_>, _>>()
+                    .map_err(|err| -> Box<dyn Error> { err.into() })?;
+                (next_samples, "recursive-samples", group_count)
+            };
+        reduced.evaluated_candidates +=
+            recursive_evaluated_candidates.load(Ordering::Relaxed) as usize;
+        insert_cached_selected_samples(cache, batch_number, &next_samples, engine)?;
+        if statistics_collection_enabled {
+            reduced
+                .tier_statistics
+                .push(build_cached_avalanche_tier_statistics(
+                    cache,
+                    batch_number,
+                    next_tier_index,
+                    recursive_group_size,
+                    source_kind,
+                )?);
+        }
+        debug_assert_eq!(next_samples.len(), group_count);
+        current_tier_summaries =
+            load_cached_recursive_sample_summaries(cache, batch_number, next_tier_index)?;
+        tier_index = next_tier_index;
+    }
+
+    let final_tier_rows = load_cached_selected_sample_rows_page(
+        cache,
+        batch_number,
+        tier_index,
+        0,
+        i64::try_from(count_cached_selected_samples(
+            cache,
+            batch_number,
+            tier_index,
+        )?)
+        .map_err(|_| "final tier row count exceeds i64 range")?,
+    )?;
+    let mut final_tier_samples = Vec::with_capacity(final_tier_rows.len());
+    for row in final_tier_rows {
+        let sample = deserialize_selected_avalanche_sample_row(row)?;
+        reduced.update_selected_sample_ref(&sample, prefer_beam_score_ordering);
+        final_tier_samples.push(sample);
+    }
+    reduced.final_tier_samples = final_tier_samples;
+    Ok(reduced)
+}
+
+/// Scores one analysis batch and spills the resulting Avalanche tier-one inputs to SQLite in chunks.
+///
+/// # Parameters
+/// - `ctx`: RSA context containing the public modulus and exponent.
+/// - `engine`: Engine configuration controlling HBC behavior and detail retention.
+/// - `cache`: Shared SQLite cache wrapper that owns the batch rows.
+/// - `batch_number`: One-based analysis batch number.
+/// - `batch_candidates`: Prepared `r` candidates participating in this batch.
+/// - `shifted_ciphertexts`: Candidate ciphertext variants already shifted when required.
+/// - `x_values`: Ciphertext exponents corresponding to `shifted_ciphertexts`.
+/// - `e_x_values`: Optional `e * x` values used when ciphertext modification is enabled.
+/// - `avalanche_message_bits`: Shifted reference bits used for match scoring.
+/// - `batch_cx_total`: Total number of `c^x` candidates evaluated in the batch.
+/// - `batch_cx_done`: Shared progress counter for `c^x` evaluation logs.
+/// - `batch_cx_next_pct`: Shared percentage-step threshold for `c^x` evaluation logs.
+/// - `batch_cx_started_at`: Progress start time for interval logging.
+/// - `batch_cx_next_log_at_ms`: Shared interval threshold for `c^x` evaluation logs.
+/// - `batch_cx_label`: Human-readable progress label for `c^x` evaluation logs.
+/// - `keep_sample_details`: Whether to retain expensive sample detail payloads for analytics.
+///
+/// # Returns
+/// - `Result<(usize, usize, Option<BatchCxMax>), Box<dyn Error>>`: `(candidate_count, cx_evaluated_candidates, cx_max)` for the batch.
+///
+/// # Expected Output
+/// - Evaluates candidates in parallel chunks, writes scored inputs to SQLite in batches, and prints cache flush progress.
+fn cache_batch_scored_avalanche_inputs(
+    ctx: &RSAContext,
+    engine: &EngineConfig,
+    cache: &AvalancheCacheGuard,
+    batch_number: usize,
+    batch_candidates: &[AccuracyCandidate],
+    shifted_ciphertexts: &[BigUint],
+    x_values: &[BigUint],
+    e_x_values: &[BigUint],
+    avalanche_message_bits: &[bool],
+    batch_cx_total: u64,
+    batch_cx_done: &AtomicU64,
+    batch_cx_next_pct: &AtomicU64,
+    batch_cx_started_at: &Instant,
+    batch_cx_next_log_at_ms: &AtomicU64,
+    batch_cx_label: &str,
+    keep_sample_details: bool,
+) -> Result<(usize, usize, Option<BatchCxMax>), Box<dyn Error>> {
+    #[derive(Debug, Default)]
+    struct CachedChunkAccumulator {
+        candidate_count: usize,
+        cx_max: Option<BatchCxMax>,
+        cx_evaluated_candidates: usize,
+        scored_samples: Vec<ScoredAvalancheInput>,
+        estimated_bytes: usize,
+    }
+
+    impl CachedChunkAccumulator {
+        fn set_cx_max(&mut self, candidate: BatchCxMax) {
+            let replace = match self.cx_max.as_ref() {
+                Some(current) => {
+                    candidate.match_pct > current.match_pct
+                        || (candidate.match_pct == current.match_pct
+                            && candidate.batch_candidate_index < current.batch_candidate_index)
+                }
+                None => true,
+            };
+            if replace {
+                self.cx_max = Some(candidate);
+            }
+        }
+
+        fn merge(mut self, mut other: Self) -> Self {
+            self.candidate_count += other.candidate_count;
+            self.cx_evaluated_candidates += other.cx_evaluated_candidates;
+            self.estimated_bytes += other.estimated_bytes;
+            if let Some(candidate) = other.cx_max.take() {
+                self.set_cx_max(candidate);
+            }
+            self.scored_samples.append(&mut other.scored_samples);
+            self
+        }
+    }
+
+    let chunk_size = rayon::current_num_threads().saturating_mul(8).max(1);
+    let mut total_candidate_count = 0usize;
+    let mut total_cx_evaluated_candidates = 0usize;
+    let mut batch_cx_max: Option<BatchCxMax> = None;
+    let mut pending_rows = Vec::new();
+    let mut pending_bytes = 0usize;
+    let mut next_flush_threshold = AVALANCHE_CACHE_FLUSH_BYTES;
+
+    for (chunk_offset, candidate_chunk) in batch_candidates.chunks(chunk_size).enumerate() {
+        let global_offset = chunk_offset.saturating_mul(chunk_size);
+        let mut chunk_aggregate = candidate_chunk
+            .par_iter()
+            .enumerate()
+            .try_fold(
+                CachedChunkAccumulator::default,
+                |mut acc, (local_index, candidate)| {
+                    let batch_candidate_index = global_offset + local_index;
+                    let mut cx_max = None;
+                    let mut cx_evaluated_candidates = 0usize;
+                    let mut scored_samples = Vec::with_capacity(shifted_ciphertexts.len());
+                    let target_exponent =
+                        keep_sample_details.then(|| candidate.target_exponent.normalized());
+
+                    for idx in 0..shifted_ciphertexts.len() {
+                        let shifted = &shifted_ciphertexts[idx];
+                        let hbc_result =
+                            prepare_candidate_ciphertext(engine, shifted, &candidate.r, &ctx.n);
+                        let x_value = x_values.get(idx).cloned().ok_or_else(|| {
+                            "missing ciphertext exponent for message index".to_string()
+                        })?;
+                        let d_new_owned = if engine.ciphertext_modify {
+                            let e_x = e_x_values.get(idx).ok_or_else(|| {
+                                "missing ciphertext exponent for message index".to_string()
+                            })?;
+                            Some(mod_inverse(e_x, &candidate.phi_new).ok_or_else(|| {
+                                format!("analysis_batch missing modular inverse for x {}", x_value)
+                            })?)
+                        } else {
+                            None
+                        };
+                        let d_new = d_new_owned.as_ref().unwrap_or(&candidate.d_new);
+                        let dm = derive_candidate_message_from_result(
+                            ctx,
+                            engine,
+                            &hbc_result,
+                            &candidate.r,
+                            d_new,
+                        );
+                        let (dm_bits, match_pct) =
+                            truncated_match_percentage(&dm, avalanche_message_bits);
+                        cx_evaluated_candidates += 1;
+                        if cx_max
+                            .as_ref()
+                            .is_none_or(|current: &BatchCxMax| match_pct > current.match_pct)
+                        {
+                            cx_max = Some(BatchCxMax {
+                                match_pct,
+                                x: x_value.clone(),
+                                r: candidate.r.clone(),
+                                batch_candidate_index,
+                            });
+                        }
+
+                        let scored_input = ScoredAvalancheInput {
+                            batch_candidate_index,
+                            message_index: idx,
+                            r: candidate.r.clone(),
+                            x: x_value,
+                            score_match_pct: match_pct,
+                            message_bits: PackedBits::from_bools(&dm_bits),
+                            detail: target_exponent.as_ref().map(|target_exponent| {
+                                ScoredAvalancheInputDetail {
+                                    target_exponent: target_exponent.clone(),
+                                    hbc_ciphertext_r: hbc_result.clone(),
+                                    candidate_decryption: dm.clone(),
+                                }
+                            }),
+                        };
+                        acc.estimated_bytes +=
+                            approximate_scored_avalanche_input_bytes(&scored_input);
+                        scored_samples.push(scored_input);
+                        let done = batch_cx_done.fetch_add(1, Ordering::Relaxed) + 1;
+                        log_parallel_progress_every_ten_percent(
+                            done,
+                            batch_cx_total,
+                            batch_cx_next_pct,
+                            batch_cx_label,
+                        );
+                        log_parallel_progress_every_interval(
+                            done,
+                            batch_cx_total,
+                            batch_cx_started_at,
+                            batch_cx_next_log_at_ms,
+                            batch_cx_label,
+                            Duration::from_secs(5),
+                        );
+                    }
+
+                    acc.candidate_count += 1;
+                    acc.cx_evaluated_candidates += cx_evaluated_candidates;
+                    if let Some(candidate) = cx_max {
+                        acc.set_cx_max(candidate);
+                    }
+                    acc.scored_samples.extend(scored_samples);
+                    Ok::<_, String>(acc)
+                },
+            )
+            .try_reduce(CachedChunkAccumulator::default, |left, right| {
+                Ok::<_, String>(left.merge(right))
+            })
+            .map_err(|err| -> Box<dyn Error> { err.into() })?;
+
+        total_candidate_count += chunk_aggregate.candidate_count;
+        total_cx_evaluated_candidates += chunk_aggregate.cx_evaluated_candidates;
+        if let Some(candidate) = chunk_aggregate.cx_max.take() {
+            let replace = match batch_cx_max.as_ref() {
+                Some(current) => candidate.match_pct > current.match_pct,
+                None => true,
+            };
+            if replace {
+                batch_cx_max = Some(candidate);
+            }
+        }
+        pending_bytes += chunk_aggregate.estimated_bytes;
+        pending_rows.append(&mut chunk_aggregate.scored_samples);
+        if pending_bytes >= next_flush_threshold {
+            insert_cached_scored_inputs(cache, batch_number, &pending_rows)?;
+            println!(
+                "Avalanche cache flush for batch {}: wrote {} scored inputs at approximately {:.2} GiB pending",
+                batch_number,
+                pending_rows.len(),
+                pending_bytes as f64 / (1024.0 * 1024.0 * 1024.0)
+            );
+            pending_rows.clear();
+            pending_bytes = 0;
+            next_flush_threshold = AVALANCHE_CACHE_FLUSH_BYTES;
+        }
+    }
+
+    if !pending_rows.is_empty() {
+        insert_cached_scored_inputs(cache, batch_number, &pending_rows)?;
+        println!(
+            "Avalanche cache flush for batch {}: wrote final {} scored inputs at approximately {:.2} GiB pending",
+            batch_number,
+            pending_rows.len(),
+            pending_bytes as f64 / (1024.0 * 1024.0 * 1024.0)
+        );
+    }
+
+    Ok((
+        total_candidate_count,
+        total_cx_evaluated_candidates,
+        batch_cx_max,
+    ))
 }
 
 /// Runs sampled avalanche combinations over the scored batch outputs.
@@ -5809,6 +8258,7 @@ fn run_r_candidate_accuracy_batches(
     analytics: &Arc<Mutex<SessionAnalytics>>,
     shift: bool,
     prefer_beam_score_ordering: bool,
+    avalanche_cache: Option<&AvalancheCacheGuard>,
 ) -> Result<(), Box<dyn Error>> {
     if !engine.analysis_batch_enable {
         return Ok(());
@@ -6012,109 +8462,164 @@ fn run_r_candidate_accuracy_batches(
         let batch_cx_label = format!("Accuracy batch {} c^x candidates", batch_number);
         let keep_sample_details = engine.avalanche_statistics_collection
             && engine.avalanche_combination_keep_all_samples_in_memory;
-        let mut batch_aggregate = batch_candidates
-            .par_iter()
-            .enumerate()
-            .try_fold(
-                AccuracyBatchAccumulator::default,
-                |mut acc, (batch_candidate_index, candidate)| {
-                    let mut cx_max = None;
-                    let mut cx_evaluated_candidates = 0usize;
-                    let mut scored_samples = Vec::with_capacity(message_count);
-                    let target_exponent =
-                        keep_sample_details.then(|| candidate.target_exponent.normalized());
+        if let Some(cache) = avalanche_cache {
+            cache.clear_batch(batch_number)?;
+        }
+        let (
+            batch_candidate_count,
+            batch_cx_evaluated_candidates,
+            mut batch_cx_max,
+            sampled_avalanche_result,
+        ) = if let Some(cache) = avalanche_cache {
+            let (candidate_count, cx_evaluated_candidates, cx_max) =
+                cache_batch_scored_avalanche_inputs(
+                    ctx,
+                    engine,
+                    cache,
+                    batch_number,
+                    batch_candidates,
+                    &shifted_ciphertexts,
+                    &x_values,
+                    &e_x_values,
+                    &avalanche_message_bits,
+                    batch_cx_total,
+                    &batch_cx_done,
+                    &batch_cx_next_pct,
+                    &batch_cx_started_at,
+                    &batch_cx_next_log_at_ms,
+                    &batch_cx_label,
+                    keep_sample_details,
+                )?;
+            let sampled = run_sampled_avalanche_beam_search_cached(
+                engine,
+                &message,
+                cache,
+                batch_number,
+                prefer_beam_score_ordering,
+                rng,
+            )?;
+            (candidate_count, cx_evaluated_candidates, cx_max, sampled)
+        } else {
+            let mut batch_aggregate = batch_candidates
+                .par_iter()
+                .enumerate()
+                .try_fold(
+                    AccuracyBatchAccumulator::default,
+                    |mut acc, (batch_candidate_index, candidate)| {
+                        let mut cx_max = None;
+                        let mut cx_evaluated_candidates = 0usize;
+                        let mut scored_samples = Vec::with_capacity(message_count);
+                        let target_exponent =
+                            keep_sample_details.then(|| candidate.target_exponent.normalized());
 
-                    for idx in 0..messages.len() {
-                        let shifted = &shifted_ciphertexts[idx];
-                        let hbc_result =
-                            prepare_candidate_ciphertext(engine, shifted, &candidate.r, &ctx.n);
-                        let x_value = x_values.get(idx).cloned().ok_or_else(|| {
-                            "missing ciphertext exponent for message index".to_string()
-                        })?;
-                        let d_new_owned = if engine.ciphertext_modify {
-                            let e_x = e_x_values.get(idx).ok_or_else(|| {
+                        for idx in 0..messages.len() {
+                            let shifted = &shifted_ciphertexts[idx];
+                            let hbc_result =
+                                prepare_candidate_ciphertext(engine, shifted, &candidate.r, &ctx.n);
+                            let x_value = x_values.get(idx).cloned().ok_or_else(|| {
                                 "missing ciphertext exponent for message index".to_string()
                             })?;
-                            Some(mod_inverse(e_x, &candidate.phi_new).ok_or_else(|| {
-                                format!("analysis_batch missing modular inverse for x {}", x_value)
-                            })?)
-                        } else {
-                            None
-                        };
-                        let d_new = d_new_owned.as_ref().unwrap_or(&candidate.d_new);
+                            let d_new_owned = if engine.ciphertext_modify {
+                                let e_x = e_x_values.get(idx).ok_or_else(|| {
+                                    "missing ciphertext exponent for message index".to_string()
+                                })?;
+                                Some(mod_inverse(e_x, &candidate.phi_new).ok_or_else(|| {
+                                    format!(
+                                        "analysis_batch missing modular inverse for x {}",
+                                        x_value
+                                    )
+                                })?)
+                            } else {
+                                None
+                            };
+                            let d_new = d_new_owned.as_ref().unwrap_or(&candidate.d_new);
 
-                        let dm = derive_candidate_message_from_result(
-                            ctx,
-                            engine,
-                            &hbc_result,
-                            &candidate.r,
-                            d_new,
-                        );
-                        let (dm_bits, match_pct) =
-                            truncated_match_percentage(&dm, &avalanche_message_bits);
-                        cx_evaluated_candidates += 1;
-                        if cx_max
-                            .as_ref()
-                            .is_none_or(|current: &BatchCxMax| match_pct > current.match_pct)
-                        {
-                            cx_max = Some(BatchCxMax {
-                                match_pct,
-                                x: x_value.clone(),
-                                r: candidate.r.clone(),
+                            let dm = derive_candidate_message_from_result(
+                                ctx,
+                                engine,
+                                &hbc_result,
+                                &candidate.r,
+                                d_new,
+                            );
+                            let (dm_bits, match_pct) =
+                                truncated_match_percentage(&dm, &avalanche_message_bits);
+                            cx_evaluated_candidates += 1;
+                            if cx_max
+                                .as_ref()
+                                .is_none_or(|current: &BatchCxMax| match_pct > current.match_pct)
+                            {
+                                cx_max = Some(BatchCxMax {
+                                    match_pct,
+                                    x: x_value.clone(),
+                                    r: candidate.r.clone(),
+                                    batch_candidate_index,
+                                });
+                            }
+
+                            scored_samples.push(ScoredAvalancheInput {
                                 batch_candidate_index,
+                                message_index: idx,
+                                r: candidate.r.clone(),
+                                x: x_value,
+                                score_match_pct: match_pct,
+                                message_bits: PackedBits::from_bools(&dm_bits),
+                                detail: target_exponent.as_ref().map(|target_exponent| {
+                                    ScoredAvalancheInputDetail {
+                                        target_exponent: target_exponent.clone(),
+                                        hbc_ciphertext_r: hbc_result.clone(),
+                                        candidate_decryption: dm.clone(),
+                                    }
+                                }),
                             });
+                            let done = batch_cx_done.fetch_add(1, Ordering::Relaxed) + 1;
+                            log_parallel_progress_every_ten_percent(
+                                done,
+                                batch_cx_total,
+                                &batch_cx_next_pct,
+                                &batch_cx_label,
+                            );
+                            log_parallel_progress_every_interval(
+                                done,
+                                batch_cx_total,
+                                &batch_cx_started_at,
+                                &batch_cx_next_log_at_ms,
+                                &batch_cx_label,
+                                Duration::from_secs(5),
+                            );
                         }
 
-                        scored_samples.push(ScoredAvalancheInput {
-                            batch_candidate_index,
-                            message_index: idx,
-                            r: candidate.r.clone(),
-                            x: x_value,
-                            score_match_pct: match_pct,
-                            message_bits: PackedBits::from_bools(&dm_bits),
-                            detail: target_exponent.as_ref().map(|target_exponent| {
-                                ScoredAvalancheInputDetail {
-                                    target_exponent: target_exponent.clone(),
-                                    hbc_ciphertext_r: hbc_result.clone(),
-                                    candidate_decryption: dm.clone(),
-                                }
-                            }),
-                        });
-                        let done = batch_cx_done.fetch_add(1, Ordering::Relaxed) + 1;
-                        log_parallel_progress_every_ten_percent(
-                            done,
-                            batch_cx_total,
-                            &batch_cx_next_pct,
-                            &batch_cx_label,
-                        );
-                        log_parallel_progress_every_interval(
-                            done,
-                            batch_cx_total,
-                            &batch_cx_started_at,
-                            &batch_cx_next_log_at_ms,
-                            &batch_cx_label,
-                            Duration::from_secs(5),
-                        );
-                    }
-
-                    acc.candidate_count += 1;
-                    acc.cx_evaluated_candidates += cx_evaluated_candidates;
-                    if let Some(candidate) = cx_max {
-                        acc.set_cx_max(candidate);
-                    }
-                    acc.scored_samples.extend(scored_samples);
-                    Ok::<_, String>(acc)
-                },
+                        acc.candidate_count += 1;
+                        acc.cx_evaluated_candidates += cx_evaluated_candidates;
+                        if let Some(candidate) = cx_max {
+                            acc.set_cx_max(candidate);
+                        }
+                        acc.scored_samples.extend(scored_samples);
+                        Ok::<_, String>(acc)
+                    },
+                )
+                .try_reduce(AccuracyBatchAccumulator::default, |left, right| {
+                    Ok::<_, String>(left.merge(right))
+                })
+                .map_err(|err| -> Box<dyn Error> { err.into() })?;
+            let batch_scored_inputs = batch_aggregate.scored_samples;
+            let sampled = run_sampled_avalanche_beam_search(
+                engine,
+                &message,
+                &batch_scored_inputs,
+                batch_number,
+                prefer_beam_score_ordering,
+                rng,
+            )?;
+            (
+                batch_aggregate.candidate_count,
+                batch_aggregate.cx_evaluated_candidates,
+                batch_aggregate.cx_max.take(),
+                sampled,
             )
-            .try_reduce(AccuracyBatchAccumulator::default, |left, right| {
-                Ok::<_, String>(left.merge(right))
-            })
-            .map_err(|err| -> Box<dyn Error> { err.into() })?;
-        let batch_candidate_count = batch_aggregate.candidate_count;
+        };
         let mut batch_cx_max_match_pct = None;
         let mut batch_cx_max_x = None;
-        let batch_cx_evaluated_candidates = batch_aggregate.cx_evaluated_candidates;
-        if let Some(best) = batch_aggregate.cx_max.take() {
+        if let Some(best) = batch_cx_max.take() {
             batch_cx_max_match_pct = Some(best.match_pct);
             batch_cx_max_x = Some(best.x.clone());
             let replace = match cx_run_max {
@@ -6130,7 +8635,6 @@ fn run_r_candidate_accuracy_batches(
                 });
             }
         }
-        let batch_scored_inputs = batch_aggregate.scored_samples;
         total_cx_evaluated_candidates += batch_cx_evaluated_candidates;
 
         let mut beam_match_pct = None;
@@ -6141,14 +8645,6 @@ fn run_r_candidate_accuracy_batches(
         let mut beam_bit_width = None;
         let mut batch_selected_sample_index = None;
         let mut batch_selected_sample_average_score_pct = None;
-        let sampled_avalanche_result = run_sampled_avalanche_beam_search(
-            engine,
-            &message,
-            &batch_scored_inputs,
-            batch_number,
-            prefer_beam_score_ordering,
-            rng,
-        )?;
         total_avalanche_evaluated_candidates += sampled_avalanche_result.evaluated_candidates;
         if let Some(selected_sample) = sampled_avalanche_result.selected_sample.as_ref() {
             batch_selected_sample_index = Some(selected_sample.sample_index);
@@ -8049,6 +10545,148 @@ mod tests {
         assert_eq!(
             result.tier_statistics[1].source_kind,
             "recursive-resampled-samples"
+        );
+    }
+
+    #[test]
+    fn test_resolve_avalanche_cache_db_path_uses_seed() {
+        assert_eq!(
+            resolve_avalanche_cache_db_path(Some(42)),
+            PathBuf::from("/tmp/rsa_avalanche_42.db")
+        );
+        assert_eq!(
+            resolve_avalanche_cache_db_path(None),
+            PathBuf::from("/tmp/rsa_avalanche_0.db")
+        );
+    }
+
+    #[test]
+    fn test_avalanche_cache_sets_sqlite_memory_pragmas() {
+        let engine = EngineConfig::default();
+
+        #[derive(Debug, QueryableByName)]
+        struct SoftHeapLimitRow {
+            #[diesel(sql_type = diesel::sql_types::BigInt, column_name = soft_heap_limit)]
+            soft_heap_limit: i64,
+        }
+
+        #[derive(Debug, QueryableByName)]
+        struct HardHeapLimitRow {
+            #[diesel(sql_type = diesel::sql_types::BigInt, column_name = hard_heap_limit)]
+            hard_heap_limit: i64,
+        }
+
+        #[derive(Debug, QueryableByName)]
+        struct MmapSizeRow {
+            #[diesel(sql_type = diesel::sql_types::BigInt, column_name = mmap_size)]
+            mmap_size: i64,
+        }
+
+        let cache =
+            AvalancheCacheGuard::new(Some(10_001), &engine).expect("cache should initialize");
+        let mut connection = cache.pool().expect("pool should exist").get().unwrap();
+
+        let soft_heap_limit = sql_query("PRAGMA soft_heap_limit")
+            .get_result::<SoftHeapLimitRow>(&mut connection)
+            .expect("soft heap limit pragma should be readable");
+        let hard_heap_limit = sql_query("PRAGMA hard_heap_limit")
+            .get_result::<HardHeapLimitRow>(&mut connection)
+            .expect("hard heap limit pragma should be readable");
+        let mmap_size = sql_query("PRAGMA mmap_size")
+            .get_result::<MmapSizeRow>(&mut connection)
+            .expect("mmap size pragma should be readable");
+
+        assert_eq!(
+            soft_heap_limit.soft_heap_limit,
+            i64::try_from(engine.sqlite_soft_heap).unwrap()
+        );
+        assert_eq!(
+            hard_heap_limit.hard_heap_limit,
+            i64::try_from(engine.sqlite_hard_heap).unwrap()
+        );
+        assert!(mmap_size.mmap_size > 0);
+        assert!(mmap_size.mmap_size <= i64::try_from(engine.sqlite_mmap_size).unwrap());
+    }
+
+    #[test]
+    fn test_run_sampled_avalanche_beam_search_cached_matches_in_memory_path() {
+        let mut config = Config::default();
+        config.engine.avalanche_random_chacha20_inputs = true;
+        config.engine.avalanche_combination_samples = 1;
+        config.engine.avalanche_combination_size = 2;
+        config.engine.avalanche_combination_mixed_r_candidates = 0;
+        config.engine.avalanche_combination_recursion_depth = 1;
+        config.engine.avalanche_beam_top_k = 1;
+
+        let scored_inputs = vec![
+            ScoredAvalancheInput {
+                batch_candidate_index: 0,
+                message_index: 0,
+                r: BigUint::from(3u8),
+                x: BigUint::from(1u8),
+                score_match_pct: 80.0,
+                message_bits: PackedBits::from_bools(&[true, false, true]),
+                detail: None,
+            },
+            ScoredAvalancheInput {
+                batch_candidate_index: 1,
+                message_index: 0,
+                r: BigUint::from(5u8),
+                x: BigUint::from(1u8),
+                score_match_pct: 70.0,
+                message_bits: PackedBits::from_bools(&[false, true, true]),
+                detail: None,
+            },
+        ];
+
+        let cache =
+            AvalancheCacheGuard::new(Some(9_999), &config.engine).expect("cache should initialize");
+        cache.clear_batch(1).expect("cache clear should succeed");
+        insert_cached_scored_inputs(&cache, 1, &scored_inputs)
+            .expect("cache insert should succeed");
+
+        let mut in_memory_rng = RngChoice::from_seed(RngMode::Standard, 77);
+        let in_memory = run_sampled_avalanche_beam_search(
+            &config.engine,
+            &BigUint::from(5u8),
+            &scored_inputs,
+            1,
+            false,
+            &mut in_memory_rng,
+        )
+        .expect("in-memory sampled avalanche should succeed");
+
+        let mut cached_rng = RngChoice::from_seed(RngMode::Standard, 77);
+        let cached = run_sampled_avalanche_beam_search_cached(
+            &config.engine,
+            &BigUint::from(5u8),
+            &cache,
+            1,
+            false,
+            &mut cached_rng,
+        )
+        .expect("cached sampled avalanche should succeed");
+
+        let in_memory_selected = in_memory
+            .selected_sample
+            .expect("in-memory sampled avalanche should select one sample");
+        let cached_selected = cached
+            .selected_sample
+            .expect("cached sampled avalanche should select one sample");
+        assert_eq!(cached.sample_count, in_memory.sample_count);
+        assert_eq!(cached.evaluated_candidates, in_memory.evaluated_candidates);
+        assert_eq!(cached_selected.best_bits, in_memory_selected.best_bits);
+        assert_eq!(
+            cached_selected.majority_vote_bits,
+            in_memory_selected.majority_vote_bits
+        );
+        assert_eq!(
+            cached_selected.beam_results,
+            in_memory_selected.beam_results
+        );
+        assert_eq!(
+            cached.final_tier_samples.len(),
+            in_memory.final_tier_samples.len()
         );
     }
 }

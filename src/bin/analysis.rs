@@ -11,7 +11,7 @@ use clap::Parser;
 use rsademo::analytics::{AnalyticsCliArgs, SessionAnalytics};
 use rsademo::config::load_config;
 use rsademo::logs::write_session_log;
-use rsademo::methods::{DemoArgs, run_demo};
+use rsademo::methods::{DemoArgs, cleanup_avalanche_cache_db, run_demo};
 
 #[derive(Parser, Debug)]
 #[command(
@@ -320,6 +320,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     })?));
 
     let analytics_for_handler = Arc::clone(&analytics);
+    let avalanche_cache_seed = args.seed;
     ctrlc::set_handler(move || {
         if let Ok(mut guard) = analytics_for_handler.lock() {
             guard.finish(Some("interrupted".to_string()));
@@ -328,6 +329,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                 eprintln!("Failed to write {}: {}", output_path, err);
             }
         }
+        cleanup_avalanche_cache_db(avalanche_cache_seed);
         std::process::exit(130);
     })?;
 

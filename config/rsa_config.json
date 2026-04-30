@@ -73,6 +73,9 @@
     "analysis_batch_messages": 1000, // Number of ciphertext variants scored per batch before avalanche sampling.
     "analysis_batch_candidates": 20000, // Number of r candidates scored in each batch before sampling combinations.
     "analysis_batch_batches": 1, // Number of scored batches to run for the small-batch beam workflow.
+    "sqlite_soft_heap": 10737418240,
+    "sqlite_hard_heap": 10737418240,
+    "sqlite_mmap_size": 10737418240,
     // Search parameters.
     "avalanche_beam_top_k": 6, // Number of top-scoring candidates to keep for beam search results.
     "avalanche_use_top_beam": true, // Carry forward the prior tier's top beam-search bits between recursive Avalanche tiers.
