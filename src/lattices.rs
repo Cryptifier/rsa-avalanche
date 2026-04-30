@@ -347,7 +347,11 @@ pub struct RsaCoppersmithInput {
     /// RSA modulus `N = pq`.
     pub modulus: BigUint,
     /// Prime factor `p` whose low-order portion is treated as unknown.
+    ///
+    /// Set this to `0` to skip factor-based validation and use `known_prefix` directly.
     pub prime: BigUint,
+    /// Known high-order prefix used to build `f(x) = x + known_prefix` when `prime == 0`.
+    pub known_prefix: BigUint,
     /// Exact unknown low-order part `x` used to derive the known prefix `p - x`.
     pub unknown_part: BigUint,
     /// Exponent parameter `m` for the lattice basis.
@@ -369,7 +373,9 @@ pub struct RsaCoppersmithRun {
     pub reduced_basis: Vec<BigIntVector>,
     /// Reduced basis vectors converted back to integer polynomials.
     pub reduced_polynomials: Vec<IntegerPolynomial>,
-    /// Recovered low-order part, when a candidate satisfying the RSA divisibility check is found.
+    /// Recovered low-order part, when a candidate root is found in the reduced basis.
+    ///
+    /// When `prime != 0`, the candidate must also reconstruct a factor of the RSA modulus.
     pub recovered_unknown: Option<BigUint>,
 }
 
@@ -392,7 +398,7 @@ impl RsaCoppersmithRun {
 /// Runs the RSA partial-prime Coppersmith workflow for a known `p` and low-order tail `x`.
 ///
 /// # Parameters
-/// - `input`: RSA modulus, prime factor, unknown tail, and lattice parameters.
+/// - `input`: RSA modulus, optional prime factor, known prefix, unknown tail, and lattice parameters.
 ///
 /// # Returns
 /// - `Result<RsaCoppersmithRun, CoppersmithError>`: Run artifacts or a validation error.
@@ -402,17 +408,25 @@ impl RsaCoppersmithRun {
 pub fn run_rsa_coppersmith(
     input: &RsaCoppersmithInput,
 ) -> Result<RsaCoppersmithRun, CoppersmithError> {
-    if input.prime.is_zero() || input.modulus <= BigUint::one() {
+    if input.modulus <= BigUint::one() {
         return Err(CoppersmithError::InvalidModulus);
     }
-    if input.unknown_part > input.prime {
-        return Err(CoppersmithError::UnknownPartExceedsPrime);
-    }
-    if (&input.modulus % &input.prime) != BigUint::zero() {
-        return Err(CoppersmithError::PrimeDoesNotDivideModulus);
+    let prime_supplied = !input.prime.is_zero();
+
+    if prime_supplied {
+        if input.unknown_part > input.prime {
+            return Err(CoppersmithError::UnknownPartExceedsPrime);
+        }
+        if (&input.modulus % &input.prime) != BigUint::zero() {
+            return Err(CoppersmithError::PrimeDoesNotDivideModulus);
+        }
     }
 
-    let known_prefix = &input.prime - &input.unknown_part;
+    let known_prefix = if prime_supplied {
+        &input.prime - &input.unknown_part
+    } else {
+        input.known_prefix.clone()
+    };
     let bound = rsa_unknown_bound(&input.unknown_part);
     let polynomial = IntegerPolynomial::new(vec![BigInt::from(known_prefix.clone()), BigInt::one()]);
     let lattice = CoppersmithLatticeBuilder::new(input.modulus.clone(), polynomial)
@@ -422,8 +436,11 @@ pub fn run_rsa_coppersmith(
         .build()?;
     let reduced_basis = lattice.reduce();
     let reduced_polynomials = lattice.reduced_polynomials(&reduced_basis)?;
-    let recovered_unknown =
-        brute_force_rsa_unknown(&known_prefix, &input.modulus, &reduced_polynomials, &bound);
+    let recovered_unknown = if prime_supplied {
+        brute_force_rsa_unknown(&known_prefix, &input.modulus, &reduced_polynomials, &bound)
+    } else {
+        brute_force_small_root(&reduced_polynomials, &bound)
+    };
 
     Ok(RsaCoppersmithRun {
         known_prefix,
@@ -727,6 +744,30 @@ fn brute_force_rsa_unknown(
     None
 }
 
+/// Searches the reduced polynomials for the first candidate root in `[0, X)`.
+fn brute_force_small_root(
+    reduced_polynomials: &[IntegerPolynomial],
+    bound: &BigUint,
+) -> Option<BigUint> {
+    let mut candidate = BigUint::zero();
+
+    while &candidate < bound {
+        let candidate_int = BigInt::from(candidate.clone());
+        let has_zero = reduced_polynomials
+            .iter()
+            .filter(|polynomial| !polynomial.is_zero())
+            .any(|polynomial| polynomial.evaluate(&candidate_int).is_zero());
+
+        if has_zero {
+            return Some(candidate);
+        }
+
+        candidate += BigUint::one();
+    }
+
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -888,6 +929,7 @@ mod tests {
         let input = RsaCoppersmithInput {
             modulus: BigUint::from(11413u32),
             prime: BigUint::from(101u8),
+            known_prefix: BigUint::zero(),
             unknown_part: BigUint::from(5u8),
             m: 3,
             dimension: 6,
@@ -906,6 +948,7 @@ mod tests {
         let input = RsaCoppersmithInput {
             modulus: BigUint::from(11413u32),
             prime: BigUint::from(101u8),
+            known_prefix: BigUint::zero(),
             unknown_part: BigUint::zero(),
             m: 2,
             dimension: 4,
@@ -922,6 +965,7 @@ mod tests {
         let input = RsaCoppersmithInput {
             modulus: BigUint::from(11413u32),
             prime: BigUint::from(101u8),
+            known_prefix: BigUint::zero(),
             unknown_part: BigUint::from(102u8),
             m: 2,
             dimension: 4,
@@ -937,6 +981,7 @@ mod tests {
         let input = RsaCoppersmithInput {
             modulus: BigUint::from(11413u32),
             prime: BigUint::from(103u8),
+            known_prefix: BigUint::zero(),
             unknown_part: BigUint::from(5u8),
             m: 2,
             dimension: 4,
@@ -945,5 +990,22 @@ mod tests {
         let error = run_rsa_coppersmith(&input).expect_err("prime divisibility should fail");
 
         assert_eq!(error, CoppersmithError::PrimeDoesNotDivideModulus);
+    }
+
+    #[test]
+    fn rsa_coppersmith_allows_zero_prime_when_known_prefix_is_supplied() {
+        let input = RsaCoppersmithInput {
+            modulus: BigUint::from(11413u32),
+            prime: BigUint::zero(),
+            known_prefix: BigUint::from(96u8),
+            unknown_part: BigUint::from(5u8),
+            m: 3,
+            dimension: 6,
+        };
+
+        let run = run_rsa_coppersmith(&input).expect("rsa run");
+
+        assert_eq!(run.known_prefix, BigUint::from(96u8));
+        assert!(run.recovered_expected_unknown(&BigUint::from(5u8)));
     }
 }

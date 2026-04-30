@@ -3,7 +3,7 @@
 `src/lattices.rs` provides two related pieces of functionality:
 
 - A generic univariate Coppersmith lattice builder for integer polynomials over an RSA modulus.
-- An RSA-oriented helper that builds `f(x) = x + known_prefix` from a prime factor `p` whose low bits are treated as the unknown small root `x`.
+- An RSA-oriented helper that builds `f(x) = x + known_prefix` either from a supplied prime factor `p` or directly from a known prefix when `prime = 0`.
 
 The polynomial arithmetic used by the lattice code lives in `src/polynomials.rs`.
 
@@ -104,14 +104,19 @@ This is useful when you want to verify the basis layout or test a specific `m` /
 
 ## RSA Helper Usage
 
-Use `run_rsa_coppersmith` when you want the RSA-specific flow for a prime factor `p` with a small unknown low-order tail `x`.
+Use `run_rsa_coppersmith` when you want the RSA-specific flow for either:
 
-The helper derives:
+- a prime factor `p` with a small unknown low-order tail `x`, or
+- a test setup where you already know the high-order prefix and want `prime = 0`.
+
+When `prime != 0`, the helper derives:
 
 ```text
 known_prefix = p - x
 f(x) = x + known_prefix
 ```
+
+When `prime == 0`, it uses the supplied `known_prefix` directly and skips factor-divisibility validation.
 
 and then builds the corresponding Coppersmith lattice for the supplied `m` and `d`.
 
@@ -122,6 +127,7 @@ use rsademo::lattices::{run_rsa_coppersmith, RsaCoppersmithInput};
 let input = RsaCoppersmithInput {
     modulus: BigUint::from(11413u32),
     prime: BigUint::from(101u8),
+    known_prefix: BigUint::zero(),
     unknown_part: BigUint::from(5u8),
     m: 3,
     dimension: 6,
@@ -142,6 +148,24 @@ The returned `RsaCoppersmithRun` includes:
 - `reduced_polynomials`
 - `recovered_unknown`
 
+If you do not want the helper to depend on the full factor `p`, pass:
+
+- `prime = 0`
+- `known_prefix =` the known high-order portion used in `f(x) = x + known_prefix`
+
+Example:
+
+```rust
+let input = RsaCoppersmithInput {
+    modulus: BigUint::from(11413u32),
+    prime: BigUint::zero(),
+    known_prefix: BigUint::from(96u8),
+    unknown_part: BigUint::from(5u8),
+    m: 3,
+    dimension: 6,
+};
+```
+
 `bound` is derived from the bit width of `unknown_part`:
 
 - if `x = 0`, the bound is `1`
@@ -159,11 +183,13 @@ The builder rejects malformed requests before constructing the basis:
 - `polynomial` must have degree at least `1`
 - `dimension >= degree(f) * m`
 
-The RSA helper adds RSA-specific checks:
+The RSA helper adds RSA-specific checks when `prime != 0`:
 
 - `prime <= modulus`
 - `unknown_part <= prime`
 - `prime` must divide `modulus`
+
+When `prime == 0`, those checks are skipped and the helper treats the call as a reduced-basis test harness driven only by `known_prefix`.
 
 ## Choosing `m` and `d`
 
@@ -180,9 +206,11 @@ Practical guidance for the current implementation:
 `run_rsa_coppersmith` currently does two things after LLL:
 
 1. It converts reduced lattice vectors back into ordinary integer polynomials.
-2. It brute-forces candidates in `[0, X)` and accepts a candidate only if:
+2. It brute-forces candidates in `[0, X)`.
+3. If `prime != 0`, it accepts a candidate only if:
    - at least one reduced polynomial evaluates to zero at that candidate, and
    - `known_prefix + candidate` divides the RSA modulus.
+4. If `prime == 0`, it accepts the first candidate for which a reduced polynomial evaluates to zero.
 
 This makes the current helper suitable for:
 
