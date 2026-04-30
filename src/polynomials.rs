@@ -2,7 +2,8 @@
 /// SPDX-License-Identifier: EPL-2.0
 /// Copyright (c) 2025 Nicholas LaRoche <nlaroche@cryptifier.dev>
 use num_bigint::{BigInt, BigUint};
-use num_traits::{One, Signed, Zero};
+use num_integer::Roots;
+use num_traits::{One, Signed, ToPrimitive, Zero};
 
 /// Dense univariate integer polynomial stored in ascending coefficient order.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -412,7 +413,7 @@ impl Poly {
     /// - None.
     ///
     /// # Returns
-    /// - `Option<Vec<BigInt>>`: `Some(roots)` for degrees `0`, `1`, and `2`, or `None` for higher degrees.
+    /// - `Option<Vec<BigInt>>`: `Some(roots)` for supported low-degree cases, or `None` when exact extraction is not available.
     ///
     /// # Expected Output
     /// - Returns sorted unique integer roots for supported degrees; no side effects.
@@ -421,6 +422,7 @@ impl Poly {
             0 => Some(Vec::new()),
             1 => Some(self.exact_integer_roots_linear()),
             2 => Some(self.exact_integer_roots_quadratic()),
+            3..=5 => self.exact_integer_roots_degree_three_to_five(),
             _ => None,
         }
     }
@@ -493,6 +495,77 @@ impl Poly {
         roots.sort();
         roots
     }
+
+    /// Solves cubic, quartic, and quintic polynomials by exact integer-root extraction.
+    fn exact_integer_roots_degree_three_to_five(&self) -> Option<Vec<BigInt>> {
+        let mut polynomial = self.clone();
+        let mut roots = Vec::new();
+
+        while polynomial.degree() > 0 && polynomial.coeff(0).is_zero() {
+            roots.push(BigInt::zero());
+            polynomial = polynomial.divide_by_linear_factor_exact(&BigInt::zero())?;
+        }
+
+        loop {
+            match polynomial.degree() {
+                0 => break,
+                1 => {
+                    roots.extend(polynomial.exact_integer_roots_linear());
+                    break;
+                }
+                2 => {
+                    roots.extend(polynomial.exact_integer_roots_quadratic());
+                    break;
+                }
+                3..=5 => {
+                    let candidates = integer_root_candidates(&polynomial.coeff(0))?;
+                    let mut found = None;
+
+                    for candidate in candidates {
+                        if polynomial.eval(&candidate).is_zero() {
+                            found = Some(candidate);
+                            break;
+                        }
+                    }
+
+                    let Some(root) = found else {
+                        break;
+                    };
+                    roots.push(root.clone());
+                    polynomial = polynomial.divide_by_linear_factor_exact(&root)?;
+                }
+                _ => return None,
+            }
+        }
+
+        roots.sort();
+        roots.dedup();
+        Some(roots)
+    }
+
+    /// Divides the polynomial by `x - root` when `root` is an exact integer root.
+    fn divide_by_linear_factor_exact(&self, root: &BigInt) -> Option<Self> {
+        if self.degree() == 0 {
+            return None;
+        }
+
+        let degree = self.degree();
+        let mut quotient_desc = vec![BigInt::zero(); degree];
+        let mut carry = self.coeff(degree);
+        quotient_desc[degree - 1] = carry.clone();
+
+        for k in (1..degree).rev() {
+            carry = self.coeff(k) + root * &carry;
+            quotient_desc[k - 1] = carry.clone();
+        }
+
+        let remainder = self.coeff(0) + root * carry;
+        if !remainder.is_zero() {
+            return None;
+        }
+
+        Some(Self::new(quotient_desc))
+    }
 }
 
 /// Removes trailing zero coefficients while preserving a single zero for the zero polynomial.
@@ -526,6 +599,41 @@ fn exact_bigint_square_root(value: &BigInt) -> Option<BigInt> {
     } else {
         None
     }
+}
+
+/// Returns all signed integer-root candidates implied by the constant term.
+fn integer_root_candidates(constant: &BigInt) -> Option<Vec<BigInt>> {
+    let abs_constant = constant.abs();
+    if abs_constant.is_zero() {
+        return Some(vec![BigInt::zero()]);
+    }
+
+    let constant_u64 = abs_constant.to_u64()?;
+    let mut divisors = Vec::new();
+    let limit = (constant_u64 as u128).sqrt() as u64;
+
+    for divisor in 1..=limit {
+        if constant_u64 % divisor == 0 {
+            divisors.push(BigInt::from(divisor));
+
+            let paired = constant_u64 / divisor;
+            if paired != divisor {
+                divisors.push(BigInt::from(paired));
+            }
+        }
+    }
+
+    divisors.sort();
+
+    let mut candidates = Vec::with_capacity(divisors.len() * 2);
+    for divisor in divisors {
+        candidates.push(-divisor.clone());
+        candidates.push(divisor);
+    }
+
+    candidates.sort();
+    candidates.dedup();
+    Some(candidates)
 }
 
 #[cfg(test)]
@@ -649,5 +757,65 @@ mod tests {
         let roots = polynomial.exact_integer_roots_low_degree();
 
         assert_eq!(roots, Some(Vec::new()));
+    }
+
+    #[test]
+    fn polynomial_exact_integer_roots_cubic_returns_three_roots() {
+        let polynomial = Poly::new(vec![
+            BigInt::from(-6),
+            BigInt::from(11),
+            BigInt::from(-6),
+            BigInt::from(1),
+        ]);
+
+        let roots = polynomial.exact_integer_roots_low_degree();
+
+        assert_eq!(
+            roots,
+            Some(vec![BigInt::from(1), BigInt::from(2), BigInt::from(3)])
+        );
+    }
+
+    #[test]
+    fn polynomial_exact_integer_roots_quartic_handles_zero_and_repeated_roots() {
+        let polynomial = Poly::new(vec![
+            BigInt::from(0),
+            BigInt::from(-8),
+            BigInt::from(4),
+            BigInt::from(2),
+            BigInt::from(-1),
+        ]);
+
+        let roots = polynomial.exact_integer_roots_low_degree();
+
+        assert_eq!(
+            roots,
+            Some(vec![BigInt::from(-2), BigInt::from(0), BigInt::from(2)])
+        );
+    }
+
+    #[test]
+    fn polynomial_exact_integer_roots_quintic_returns_signed_roots() {
+        let polynomial = Poly::new(vec![
+            BigInt::from(0),
+            BigInt::from(4),
+            BigInt::from(0),
+            BigInt::from(-5),
+            BigInt::from(0),
+            BigInt::from(1),
+        ]);
+
+        let roots = polynomial.exact_integer_roots_low_degree();
+
+        assert_eq!(
+            roots,
+            Some(vec![
+                BigInt::from(-2),
+                BigInt::from(-1),
+                BigInt::from(0),
+                BigInt::from(1),
+                BigInt::from(2),
+            ])
+        );
     }
 }
