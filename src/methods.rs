@@ -1807,6 +1807,89 @@ fn log_parallel_progress_every_interval(
     }
 }
 
+/// Computes a chunk size that keeps enough parallel work in flight for progress-aware scans.
+///
+/// # Parameters
+/// - `total_items`: Number of items that will be processed in parallel.
+///
+/// # Returns
+/// - `usize`: Chunk size for Rayon chunk-based work; always at least `1`.
+///
+/// # Expected Output
+/// - Returns a chunk size only; no stdout/stderr output.
+fn parallel_progress_chunk_size(total_items: usize) -> usize {
+    if total_items == 0 {
+        return 1;
+    }
+
+    let target_chunks = rayon::current_num_threads().saturating_mul(8).max(1);
+    total_items.div_ceil(target_chunks).max(1)
+}
+
+/// Loads cached scored-input pages in parallel while preserving page order.
+///
+/// # Parameters
+/// - `total_rows`: Total cached row count expected from the scan.
+/// - `progress_label`: Human-readable label used for interval progress logging.
+/// - `load_page`: Callback that loads and decodes one page starting at the provided row offset.
+///
+/// # Returns
+/// - `Result<Vec<T>, String>`: Flattened decoded page items in page order.
+///
+/// # Expected Output
+/// - Prints interval progress updates while loading cached pages and returns the decoded items.
+fn load_cached_scored_input_pages_in_parallel<T, F>(
+    total_rows: usize,
+    progress_label: &str,
+    load_page: F,
+) -> Result<Vec<T>, String>
+where
+    T: Send,
+    F: Fn(i64) -> Result<Vec<T>, String> + Sync + Send,
+{
+    if total_rows == 0 {
+        return Ok(Vec::new());
+    }
+
+    let page_rows = usize::try_from(AVALANCHE_CACHE_PAGE_ROWS)
+        .map_err(|_| "AVALANCHE_CACHE_PAGE_ROWS exceeds usize range".to_string())?
+        .max(1);
+    let total_pages = total_rows.div_ceil(page_rows);
+    println!("{progress_label}: loading {total_pages} cached page(s)");
+
+    let progress_total = total_pages.min(u64::MAX as usize) as u64;
+    let progress_started_at = Instant::now();
+    let progress_done = AtomicU64::new(0);
+    let progress_next_log_at_ms =
+        AtomicU64::new(Duration::from_secs(5).as_millis().min(u128::from(u64::MAX)) as u64);
+    let mut page_items = (0..total_pages)
+        .into_par_iter()
+        .map(|page_index| {
+            let offset_rows = i64::try_from(page_index.saturating_mul(page_rows))
+                .map_err(|_| "cached scored-input page offset exceeds i64 range".to_string())?;
+            let decoded = load_page(offset_rows)?;
+            let done = progress_done.fetch_add(1, Ordering::Relaxed) + 1;
+            log_parallel_progress_every_interval(
+                done,
+                progress_total,
+                &progress_started_at,
+                &progress_next_log_at_ms,
+                progress_label,
+                Duration::from_secs(5),
+            );
+            Ok::<_, String>((page_index, decoded))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    page_items.par_sort_unstable_by_key(|(page_index, _)| *page_index);
+
+    let total_items = page_items.iter().map(|(_, items)| items.len()).sum();
+    let mut flattened = Vec::with_capacity(total_items);
+    for (_, mut items) in page_items {
+        flattened.append(&mut items);
+    }
+    Ok(flattened)
+}
+
 /// Computes an increasing odd exponent `x` per batch instance so that `e * x` remains odd.
 ///
 /// # Parameters
@@ -5538,8 +5621,8 @@ struct HammingDistancePrunedPool {
     preferred_outlier_count: usize,
 }
 
-/// Prunes scored avalanche inputs to a central Hamming-distance percentile band and optionally
-/// adds back preferred tail outliers.
+/// Prunes scored avalanche inputs to a central Hamming-distance percentile band with optional
+/// interval progress logging.
 ///
 /// # Parameters
 /// - `inputs`: Flattened scored avalanche inputs available for sampled-avalanche selection.
@@ -5547,19 +5630,22 @@ struct HammingDistancePrunedPool {
 /// - `keep_percentile`: Central percentile of Hamming distances to retain.
 /// - `outlier_preference_pct`: Percentage of the retained inlier count to add back from the
 ///   Hamming-distance outlier tails.
+/// - `progress_label`: Optional human-readable label used for interval progress logging.
 ///
 /// # Returns
 /// - `HammingDistancePrunedPool`: Filtered pool plus counts describing the retained inliers and
 ///   preferred outliers.
 ///
 /// # Expected Output
-/// - Returns the filtered inputs in their original order; falls back to the unpruned pool when
-///   pruning would remove every input or when the requested percentile does not trim any tails.
-fn prune_scored_inputs_by_hamming_distance_percentile(
+/// - Optionally prints interval progress updates and returns the filtered inputs in original
+///   order; falls back to the unpruned pool when pruning would remove every input or when the
+///   requested percentile does not trim any tails.
+fn prune_scored_inputs_by_hamming_distance_percentile_with_progress(
     inputs: &[ScoredAvalancheInput],
     reference_message_bits: &PackedBits,
     keep_percentile: f64,
     outlier_preference_pct: f64,
+    progress_label: Option<&str>,
 ) -> HammingDistancePrunedPool {
     let original_pool = HammingDistancePrunedPool {
         selected_inputs: inputs.to_vec(),
@@ -5576,18 +5662,50 @@ fn prune_scored_inputs_by_hamming_distance_percentile(
         return original_pool;
     }
 
+    let chunk_size = parallel_progress_chunk_size(inputs.len());
+    let total_chunks = inputs.len().div_ceil(chunk_size);
+    let progress_total = total_chunks.min(u64::MAX as usize) as u64;
+    let progress_started_at = Instant::now();
+    let progress_done = AtomicU64::new(0);
+    let progress_next_log_at_ms =
+        AtomicU64::new(Duration::from_secs(5).as_millis().min(u128::from(u64::MAX)) as u64);
+    if let Some(label) = progress_label {
+        println!("{label}: scoring Hamming distances across {total_chunks} chunk(s)");
+    }
     let distances = inputs
-        .iter()
+        .par_chunks(chunk_size)
         .enumerate()
-        .map(|(index, input)| {
-            (
-                index,
-                hamming_distance_packed_bytes(
-                    input.message_bits.bytes_le(),
-                    reference_message_bits.bytes_le(),
-                ),
-            )
+        .map(|(chunk_index, chunk)| {
+            let start_index = chunk_index.saturating_mul(chunk_size);
+            let distances = chunk
+                .iter()
+                .enumerate()
+                .map(|(offset, input)| {
+                    (
+                        start_index + offset,
+                        hamming_distance_packed_bytes(
+                            input.message_bits.bytes_le(),
+                            reference_message_bits.bytes_le(),
+                        ),
+                    )
+                })
+                .collect::<Vec<_>>();
+            if let Some(label) = progress_label {
+                let done = progress_done.fetch_add(1, Ordering::Relaxed) + 1;
+                log_parallel_progress_every_interval(
+                    done,
+                    progress_total,
+                    &progress_started_at,
+                    &progress_next_log_at_ms,
+                    label,
+                    Duration::from_secs(5),
+                );
+            }
+            distances
         })
+        .collect::<Vec<_>>()
+        .into_iter()
+        .flatten()
         .collect::<Vec<_>>();
     let mut sorted_distances = distances
         .iter()
@@ -5653,29 +5771,78 @@ fn prune_scored_inputs_by_hamming_distance_percentile(
     }
 }
 
-/// Groups scored avalanche inputs by their originating r candidate.
+/// Groups scored avalanche inputs by their originating r candidate with optional interval
+/// progress logging.
 ///
 /// # Parameters
 /// - `inputs`: Scored candidate decryptions produced for the batch.
+/// - `progress_label`: Optional human-readable label used for interval progress logging.
 ///
 /// # Returns
 /// - `Vec<ScoredAvalancheInputGroup>`: Distinct r-candidate groups preserving every `c^x` input.
 ///
 /// # Expected Output
-/// - Returns grouped inputs ordered by batch-candidate index; no stdout/stderr output.
-fn group_scored_inputs_by_r_candidate(
+/// - Optionally prints interval progress updates and returns grouped inputs ordered by
+///   batch-candidate index.
+fn group_scored_inputs_by_r_candidate_with_progress(
     inputs: &[ScoredAvalancheInput],
+    progress_label: Option<&str>,
 ) -> Vec<ScoredAvalancheInputGroup> {
-    let mut grouped = BTreeMap::<usize, Vec<ScoredAvalancheInput>>::new();
-    for input in inputs {
-        grouped
-            .entry(input.batch_candidate_index)
-            .or_default()
-            .push(input.clone());
+    if inputs.is_empty() {
+        return Vec::new();
     }
 
-    grouped
+    let chunk_size = parallel_progress_chunk_size(inputs.len());
+    let total_chunks = inputs.len().div_ceil(chunk_size);
+    let progress_total = total_chunks.min(u64::MAX as usize) as u64;
+    let progress_started_at = Instant::now();
+    let progress_done = AtomicU64::new(0);
+    let progress_next_log_at_ms =
+        AtomicU64::new(Duration::from_secs(5).as_millis().min(u128::from(u64::MAX)) as u64);
+    if let Some(label) = progress_label {
+        println!(
+            "{label}: grouping {} scored inputs across {total_chunks} chunk(s)",
+            inputs.len()
+        );
+    }
+
+    let mut grouped_inputs = inputs
+        .par_chunks(chunk_size)
+        .map(|chunk| {
+            let mut grouped = HashMap::<usize, Vec<ScoredAvalancheInput>>::new();
+            for input in chunk {
+                grouped
+                    .entry(input.batch_candidate_index)
+                    .or_default()
+                    .push(input.clone());
+            }
+            if let Some(label) = progress_label {
+                let done = progress_done.fetch_add(1, Ordering::Relaxed) + 1;
+                log_parallel_progress_every_interval(
+                    done,
+                    progress_total,
+                    &progress_started_at,
+                    &progress_next_log_at_ms,
+                    label,
+                    Duration::from_secs(5),
+                );
+            }
+            grouped
+        })
+        .reduce(HashMap::new, |mut left, right| {
+            for (batch_candidate_index, mut chunk_inputs) in right {
+                left.entry(batch_candidate_index)
+                    .or_default()
+                    .append(&mut chunk_inputs);
+            }
+            left
+        })
         .into_iter()
+        .collect::<Vec<_>>();
+    grouped_inputs.par_sort_unstable_by_key(|(batch_candidate_index, _)| *batch_candidate_index);
+
+    grouped_inputs
+        .into_par_iter()
         .map(|(batch_candidate_index, mut grouped_inputs)| {
             grouped_inputs.sort_by(|left, right| {
                 left.message_index
@@ -5794,34 +5961,35 @@ fn load_cached_scored_input_summaries(
     batch_number: usize,
 ) -> Result<Vec<CachedScoredInputSummary>, Box<dyn Error>> {
     let total_rows = count_cached_scored_inputs(cache, batch_number)?;
-    let mut offset_rows = 0i64;
-    let mut summaries = Vec::with_capacity(total_rows);
-    while summaries.len() < total_rows {
+    let progress_label = format!("Accuracy batch {} cached summary loading", batch_number);
+    load_cached_scored_input_pages_in_parallel(total_rows, &progress_label, |offset_rows| {
         let rows = load_cached_scored_input_rows_page(
             cache,
             batch_number,
             offset_rows,
             AVALANCHE_CACHE_PAGE_ROWS,
-        )?;
-        if rows.is_empty() {
-            break;
-        }
-        offset_rows +=
-            i64::try_from(rows.len()).map_err(|_| "row page length exceeds i64 range")?;
-        for row in rows {
-            summaries.push(CachedScoredInputSummary {
-                id: row.id,
-                batch_candidate_index: usize::try_from(row.batch_candidate_index)
-                    .map_err(|_| "cached batch candidate index exceeds usize range")?,
-                message_index: usize::try_from(row.message_index)
-                    .map_err(|_| "cached message index exceeds usize range")?,
-                score_match_pct: row.score_match_pct,
-                x: row.x_text.parse::<BigUint>()?,
-                fitness_score: 0,
-            });
-        }
-    }
-    Ok(summaries)
+        )
+        .map_err(|err| err.to_string())?;
+        rows.into_iter()
+            .map(|row| {
+                Ok::<_, String>(CachedScoredInputSummary {
+                    id: row.id,
+                    batch_candidate_index: usize::try_from(row.batch_candidate_index).map_err(
+                        |_| "cached batch candidate index exceeds usize range".to_string(),
+                    )?,
+                    message_index: usize::try_from(row.message_index)
+                        .map_err(|_| "cached message index exceeds usize range".to_string())?,
+                    score_match_pct: row.score_match_pct,
+                    x: row
+                        .x_text
+                        .parse::<BigUint>()
+                        .map_err(|err| err.to_string())?,
+                    fitness_score: 0,
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()
+    })
+    .map_err(|err| -> Box<dyn Error> { err.into() })
 }
 
 /// Applies the trailing-zero fitness pass to cached scored Avalanche inputs.
@@ -5863,57 +6031,106 @@ fn apply_cached_scored_avalanche_fitness_pass(
         return Ok(Vec::new());
     }
 
-    let mut grouped = BTreeMap::<usize, Vec<CachedScoredInputSummary>>::new();
-    let mut offset_rows = 0i64;
-    while offset_rows
-        < i64::try_from(total_rows).map_err(|_| "cached row count exceeds i64 range")?
-    {
-        let rows = load_cached_scored_input_rows_page(
-            cache,
-            batch_number,
-            offset_rows,
-            AVALANCHE_CACHE_PAGE_ROWS,
-        )?;
-        if rows.is_empty() {
-            break;
-        }
-        offset_rows +=
-            i64::try_from(rows.len()).map_err(|_| "row page length exceeds i64 range")?;
-        for row in rows {
-            let fitness_score = lsb_zero_fitness(
-                &PackedBits::from_bytes_le(
-                    &row.message_bits,
-                    usize::try_from(row.message_bit_len)
-                        .map_err(|_| "cached message bit length exceeds usize range")?,
-                ),
-                fitness_bit_width,
+    let page_progress_label = format!(
+        "Accuracy batch {} cached fitness page scoring",
+        batch_number
+    );
+    let scored_inputs = load_cached_scored_input_pages_in_parallel(
+        total_rows,
+        &page_progress_label,
+        |offset_rows| {
+            let rows = load_cached_scored_input_rows_page(
+                cache,
+                batch_number,
+                offset_rows,
+                AVALANCHE_CACHE_PAGE_ROWS,
+            )
+            .map_err(|err| err.to_string())?;
+            rows.into_iter()
+                .map(|row| {
+                    let message_bit_len = usize::try_from(row.message_bit_len)
+                        .map_err(|_| "cached message bit length exceeds usize range".to_string())?;
+                    let batch_candidate_index = usize::try_from(row.batch_candidate_index)
+                        .map_err(|_| {
+                            "cached batch candidate index exceeds usize range".to_string()
+                        })?;
+                    Ok::<_, String>(CachedScoredInputSummary {
+                        id: row.id,
+                        batch_candidate_index,
+                        message_index: usize::try_from(row.message_index)
+                            .map_err(|_| "cached message index exceeds usize range".to_string())?,
+                        score_match_pct: row.score_match_pct,
+                        x: row
+                            .x_text
+                            .parse::<BigUint>()
+                            .map_err(|err| err.to_string())?,
+                        fitness_score: lsb_zero_fitness(
+                            &PackedBits::from_bytes_le(&row.message_bits, message_bit_len),
+                            fitness_bit_width,
+                        ),
+                    })
+                })
+                .collect::<Result<Vec<_>, _>>()
+        },
+    )
+    .map_err(|err| -> Box<dyn Error> { err.into() })?;
+
+    let chunk_size = parallel_progress_chunk_size(scored_inputs.len());
+    let total_chunks = scored_inputs.len().div_ceil(chunk_size);
+    let grouping_progress_label =
+        format!("Accuracy batch {} cached fitness grouping", batch_number);
+    let grouping_total = total_chunks.min(u64::MAX as usize) as u64;
+    let grouping_started_at = Instant::now();
+    let grouping_done = AtomicU64::new(0);
+    let grouping_next_log_at_ms =
+        AtomicU64::new(Duration::from_secs(5).as_millis().min(u128::from(u64::MAX)) as u64);
+    println!(
+        "{grouping_progress_label}: grouping {} cached scored inputs across {total_chunks} chunk(s)",
+        scored_inputs.len()
+    );
+    let grouped = scored_inputs
+        .par_chunks(chunk_size)
+        .map(|chunk| {
+            let mut grouped = HashMap::<usize, Vec<CachedScoredInputSummary>>::new();
+            for summary in chunk {
+                grouped
+                    .entry(summary.batch_candidate_index)
+                    .or_default()
+                    .push(summary.clone());
+            }
+            let done = grouping_done.fetch_add(1, Ordering::Relaxed) + 1;
+            log_parallel_progress_every_interval(
+                done,
+                grouping_total,
+                &grouping_started_at,
+                &grouping_next_log_at_ms,
+                &grouping_progress_label,
+                Duration::from_secs(5),
             );
             grouped
-                .entry(
-                    usize::try_from(row.batch_candidate_index)
-                        .map_err(|_| "cached batch candidate index exceeds usize range")?,
-                )
-                .or_default()
-                .push(CachedScoredInputSummary {
-                    id: row.id,
-                    batch_candidate_index: usize::try_from(row.batch_candidate_index)
-                        .map_err(|_| "cached batch candidate index exceeds usize range")?,
-                    message_index: usize::try_from(row.message_index)
-                        .map_err(|_| "cached message index exceeds usize range")?,
-                    score_match_pct: row.score_match_pct,
-                    x: row.x_text.parse::<BigUint>()?,
-                    fitness_score,
-                });
-        }
-    }
+        })
+        .reduce(HashMap::new, |mut left, right| {
+            for (batch_candidate_index, mut chunk_inputs) in right {
+                left.entry(batch_candidate_index)
+                    .or_default()
+                    .append(&mut chunk_inputs);
+            }
+            left
+        });
 
     println!(
         "Avalanche fitness pass: scoring {} cached r-candidate groups",
         grouped.len()
     );
     let total_groups = grouped.len();
+    let group_progress_label = format!("Accuracy batch {} cached fitness ranking", batch_number);
+    let group_progress_total = total_groups.min(u64::MAX as usize) as u64;
+    let group_progress_started_at = Instant::now();
+    let group_progress_done = AtomicU64::new(0);
+    let group_progress_next_log_at_ms =
+        AtomicU64::new(Duration::from_secs(5).as_millis().min(u128::from(u64::MAX)) as u64);
     let ranked_groups = grouped
-        .into_iter()
+        .into_par_iter()
         .map(|(batch_candidate_index, mut ranked_inputs)| {
             if use_fitness_threshold {
                 ranked_inputs.retain(|input| {
@@ -5953,6 +6170,18 @@ fn apply_cached_scored_avalanche_fitness_pass(
                 },
                 retained_by_threshold,
             )
+        })
+        .map(|(group, retained_by_threshold)| {
+            let done = group_progress_done.fetch_add(1, Ordering::Relaxed) + 1;
+            log_parallel_progress_every_interval(
+                done,
+                group_progress_total,
+                &group_progress_started_at,
+                &group_progress_next_log_at_ms,
+                &group_progress_label,
+                Duration::from_secs(5),
+            );
+            (group, retained_by_threshold)
         })
         .collect::<Vec<_>>();
     let threshold_retained_input_count = ranked_groups
@@ -6036,7 +6265,8 @@ fn apply_cached_scored_avalanche_fitness_pass(
     Ok(retained_inputs)
 }
 
-/// Prunes cached scored-input summaries to a central Hamming-distance percentile band.
+/// Prunes cached scored-input summaries to a central Hamming-distance percentile band with
+/// optional interval progress logging.
 ///
 /// # Parameters
 /// - `cache`: Shared SQLite cache wrapper.
@@ -6044,18 +6274,22 @@ fn apply_cached_scored_avalanche_fitness_pass(
 /// - `reference_message_bits`: Original plaintext bits packed for Hamming-distance scoring.
 /// - `keep_percentile`: Central percentile of Hamming distances to retain.
 /// - `outlier_preference_pct`: Percentage of the retained inlier count to add back from outlier tails.
+/// - `progress_label`: Optional human-readable label used for interval progress logging.
 ///
 /// # Returns
-/// - `Result<(Vec<CachedScoredInputSummary>, usize, usize, usize), Box<dyn Error>>`: Retained summaries plus inlier/outlier counts.
+/// - `Result<(Vec<CachedScoredInputSummary>, usize, usize, usize), Box<dyn Error>>`: Retained
+///   summaries plus inlier/outlier counts.
 ///
 /// # Expected Output
-/// - Streams only the selected rows needed for Hamming-distance scoring and returns retained summaries in original order.
-fn prune_cached_scored_inputs_by_hamming_distance_percentile(
+/// - Optionally prints interval progress updates while loading cached rows needed for
+///   Hamming-distance scoring and returns retained summaries in original order.
+fn prune_cached_scored_inputs_by_hamming_distance_percentile_with_progress(
     cache: &AvalancheCacheGuard,
     summaries: &[CachedScoredInputSummary],
     reference_message_bits: &PackedBits,
     keep_percentile: f64,
     outlier_preference_pct: f64,
+    progress_label: Option<&str>,
 ) -> Result<(Vec<CachedScoredInputSummary>, usize, usize, usize), Box<dyn Error>> {
     if summaries.len() < 2 || keep_percentile >= 100.0 {
         return Ok((summaries.to_vec(), summaries.len(), 0, 0));
@@ -6070,13 +6304,54 @@ fn prune_cached_scored_inputs_by_hamming_distance_percentile(
         .iter()
         .map(|summary| summary.id)
         .collect::<Vec<_>>();
+    let chunk_size = usize::try_from(AVALANCHE_CACHE_PAGE_ROWS)
+        .map_err(|_| "AVALANCHE_CACHE_PAGE_ROWS exceeds usize range")?
+        .max(1);
+    let total_chunks = ids.len().div_ceil(chunk_size);
+    let progress_total = total_chunks.min(u64::MAX as usize) as u64;
+    let progress_started_at = Instant::now();
+    let progress_done = AtomicU64::new(0);
+    let progress_next_log_at_ms =
+        AtomicU64::new(Duration::from_secs(5).as_millis().min(u128::from(u64::MAX)) as u64);
+    if let Some(label) = progress_label {
+        println!("{label}: scoring cached Hamming distances across {total_chunks} chunk(s)");
+    }
+    let distance_pairs = ids
+        .par_chunks(chunk_size)
+        .map(|id_chunk| {
+            let rows = load_cached_scored_input_rows_by_ids(cache, id_chunk)
+                .map_err(|err| err.to_string())?;
+            let distances = rows
+                .into_iter()
+                .map(|row| {
+                    (
+                        row.id,
+                        hamming_distance_packed_bytes(
+                            &row.message_bits,
+                            reference_message_bits.bytes_le(),
+                        ),
+                    )
+                })
+                .collect::<Vec<_>>();
+            if let Some(label) = progress_label {
+                let done = progress_done.fetch_add(1, Ordering::Relaxed) + 1;
+                log_parallel_progress_every_interval(
+                    done,
+                    progress_total,
+                    &progress_started_at,
+                    &progress_next_log_at_ms,
+                    label,
+                    Duration::from_secs(5),
+                );
+            }
+            Ok::<_, String>(distances)
+        })
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|err| -> Box<dyn Error> { err.into() })?;
     let mut distance_by_id = HashMap::with_capacity(ids.len());
-    for id_chunk in ids.chunks(usize::try_from(AVALANCHE_CACHE_PAGE_ROWS).unwrap_or(4096)) {
-        for row in load_cached_scored_input_rows_by_ids(cache, id_chunk)? {
-            distance_by_id.insert(
-                row.id,
-                hamming_distance_packed_bytes(&row.message_bits, reference_message_bits.bytes_le()),
-            );
+    for distance_chunk in distance_pairs {
+        for (id, distance) in distance_chunk {
+            distance_by_id.insert(id, distance);
         }
     }
 
@@ -6152,29 +6427,78 @@ fn prune_cached_scored_inputs_by_hamming_distance_percentile(
     ))
 }
 
-/// Groups cached scored-input summaries by their originating r candidate.
+/// Groups cached scored-input summaries by their originating r candidate with optional interval
+/// progress logging.
 ///
 /// # Parameters
 /// - `summaries`: Lightweight cached scored-input summaries produced for the batch.
+/// - `progress_label`: Optional human-readable label used for interval progress logging.
 ///
 /// # Returns
 /// - `Vec<CachedScoredInputGroup>`: Distinct r-candidate groups preserving every cached row id.
 ///
 /// # Expected Output
-/// - Returns grouped cached summaries ordered by batch-candidate index.
-fn group_cached_scored_inputs_by_r_candidate(
+/// - Optionally prints interval progress updates and returns grouped cached summaries ordered by
+///   batch-candidate index.
+fn group_cached_scored_inputs_by_r_candidate_with_progress(
     summaries: &[CachedScoredInputSummary],
+    progress_label: Option<&str>,
 ) -> Vec<CachedScoredInputGroup> {
-    let mut grouped = BTreeMap::<usize, Vec<CachedScoredInputSummary>>::new();
-    for summary in summaries {
-        grouped
-            .entry(summary.batch_candidate_index)
-            .or_default()
-            .push(summary.clone());
+    if summaries.is_empty() {
+        return Vec::new();
     }
 
-    grouped
+    let chunk_size = parallel_progress_chunk_size(summaries.len());
+    let total_chunks = summaries.len().div_ceil(chunk_size);
+    let progress_total = total_chunks.min(u64::MAX as usize) as u64;
+    let progress_started_at = Instant::now();
+    let progress_done = AtomicU64::new(0);
+    let progress_next_log_at_ms =
+        AtomicU64::new(Duration::from_secs(5).as_millis().min(u128::from(u64::MAX)) as u64);
+    if let Some(label) = progress_label {
+        println!(
+            "{label}: grouping {} cached scored inputs across {total_chunks} chunk(s)",
+            summaries.len()
+        );
+    }
+
+    let mut grouped_inputs = summaries
+        .par_chunks(chunk_size)
+        .map(|chunk| {
+            let mut grouped = HashMap::<usize, Vec<CachedScoredInputSummary>>::new();
+            for summary in chunk {
+                grouped
+                    .entry(summary.batch_candidate_index)
+                    .or_default()
+                    .push(summary.clone());
+            }
+            if let Some(label) = progress_label {
+                let done = progress_done.fetch_add(1, Ordering::Relaxed) + 1;
+                log_parallel_progress_every_interval(
+                    done,
+                    progress_total,
+                    &progress_started_at,
+                    &progress_next_log_at_ms,
+                    label,
+                    Duration::from_secs(5),
+                );
+            }
+            grouped
+        })
+        .reduce(HashMap::new, |mut left, right| {
+            for (batch_candidate_index, mut chunk_inputs) in right {
+                left.entry(batch_candidate_index)
+                    .or_default()
+                    .append(&mut chunk_inputs);
+            }
+            left
+        })
         .into_iter()
+        .collect::<Vec<_>>();
+    grouped_inputs.par_sort_unstable_by_key(|(batch_candidate_index, _)| *batch_candidate_index);
+
+    grouped_inputs
+        .into_par_iter()
         .map(|(_, mut grouped_inputs)| {
             grouped_inputs.sort_by(|left, right| {
                 left.message_index
@@ -6979,9 +7303,7 @@ fn load_cached_recursive_sample_summaries(
         offset_rows +=
             i64::try_from(rows.len()).map_err(|_| "row page length exceeds i64 range")?;
         for row in rows {
-            summaries.push(CachedRecursiveSampleSummary {
-                id: row.id,
-            });
+            summaries.push(CachedRecursiveSampleSummary { id: row.id });
         }
     }
     Ok(summaries)
@@ -7295,23 +7617,32 @@ fn run_sampled_avalanche_beam_search_cached(
             .unwrap_or_else(|| resolve_avalanche_bit_width(engine)),
     );
     let packed_message_bits = PackedBits::from_bools(&reference_bits);
+    let hamming_prune_label = format!("Accuracy batch {} cached Hamming prune", batch_number);
     let (
         pruned_scored_inputs,
         retained_inlier_count,
         available_outlier_count,
         preferred_outlier_count,
     ) = if engine.avalanche_combination_hamming_distance_prune {
-        prune_cached_scored_inputs_by_hamming_distance_percentile(
+        prune_cached_scored_inputs_by_hamming_distance_percentile_with_progress(
             cache,
             &scored_inputs,
             &packed_message_bits,
             engine.avalanche_combination_hamming_distance_keep_percentile,
             engine.avalanche_combination_hamming_distance_outlier_preference_pct,
+            Some(&hamming_prune_label),
         )?
     } else {
         (scored_inputs.clone(), scored_inputs.len(), 0, 0)
     };
-    let grouped_inputs = group_cached_scored_inputs_by_r_candidate(&pruned_scored_inputs);
+    let grouping_label = format!(
+        "Accuracy batch {} cached avalanche input grouping",
+        batch_number
+    );
+    let grouped_inputs = group_cached_scored_inputs_by_r_candidate_with_progress(
+        &pruned_scored_inputs,
+        Some(&grouping_label),
+    );
     let pool_size = pruned_scored_inputs.len();
     let r_candidate_pool_size = grouped_inputs.len();
     if r_candidate_pool_size == 0 {
@@ -8008,12 +8339,14 @@ fn run_sampled_avalanche_beam_search(
     let reference_bits =
         biguint_to_bits_le(&transformed_message, scored_inputs[0].message_bits.len());
     let packed_message_bits = PackedBits::from_bools(&reference_bits);
+    let hamming_prune_label = format!("Accuracy batch {} Hamming prune", batch_number);
     let pruned_pool = if engine.avalanche_combination_hamming_distance_prune {
-        prune_scored_inputs_by_hamming_distance_percentile(
+        prune_scored_inputs_by_hamming_distance_percentile_with_progress(
             &scored_inputs,
             &packed_message_bits,
             engine.avalanche_combination_hamming_distance_keep_percentile,
             engine.avalanche_combination_hamming_distance_outlier_preference_pct,
+            Some(&hamming_prune_label),
         )
     } else {
         HammingDistancePrunedPool {
@@ -8027,7 +8360,11 @@ fn run_sampled_avalanche_beam_search(
     let available_outlier_count = pruned_pool.available_outlier_count;
     let preferred_outlier_count = pruned_pool.preferred_outlier_count;
     let pruned_scored_inputs = pruned_pool.selected_inputs;
-    let grouped_inputs = group_scored_inputs_by_r_candidate(&pruned_scored_inputs);
+    let grouping_label = format!("Accuracy batch {} avalanche input grouping", batch_number);
+    let grouped_inputs = group_scored_inputs_by_r_candidate_with_progress(
+        &pruned_scored_inputs,
+        Some(&grouping_label),
+    );
     let pool_size = pruned_scored_inputs.len();
     let r_candidate_pool_size = grouped_inputs.len();
     if r_candidate_pool_size == 0 {
@@ -9599,7 +9936,7 @@ mod tests {
             },
         ];
 
-        let grouped_inputs = group_scored_inputs_by_r_candidate(&inputs);
+        let grouped_inputs = group_scored_inputs_by_r_candidate_with_progress(&inputs, None);
         assert_eq!(grouped_inputs.len(), 2);
 
         let mut rng = RngChoice::from_seed(RngMode::Standard, 7);
@@ -9687,8 +10024,13 @@ mod tests {
             })
             .collect::<Vec<_>>();
 
-        let pruned =
-            prune_scored_inputs_by_hamming_distance_percentile(&inputs, &reference_bits, 60.0, 0.0);
+        let pruned = prune_scored_inputs_by_hamming_distance_percentile_with_progress(
+            &inputs,
+            &reference_bits,
+            60.0,
+            0.0,
+            None,
+        );
         let retained = pruned
             .selected_inputs
             .iter()
@@ -9722,11 +10064,12 @@ mod tests {
             })
             .collect::<Vec<_>>();
 
-        let pruned = prune_scored_inputs_by_hamming_distance_percentile(
+        let pruned = prune_scored_inputs_by_hamming_distance_percentile_with_progress(
             &inputs,
             &reference_bits,
             60.0,
             50.0,
+            None,
         );
         let retained = pruned
             .selected_inputs
