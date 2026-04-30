@@ -1,6 +1,9 @@
 *.log
 *.logs
 *.lock
+*.aux
+*.out
+*.pdf
 !Cargo.lock
 target/
 images/
