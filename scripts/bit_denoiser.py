@@ -1,13 +1,12 @@
 #!/usr/bin/env python3
 
-import torch
 import argparse
 from pathlib import Path
 
+import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import DataLoader, Dataset
-
 
 DEFAULT_MODEL_NAME = "bit_denoiser_model.pt"
 
@@ -180,7 +179,7 @@ def save_model(model, path, bit_len, num_copies):
         "state_dict": model.state_dict(),
         "bit_len": bit_len,
         "num_copies": num_copies,
-        "d_model": 48,
+        "d_model": 96,
         "num_heads": 4,
         "num_layers": 2,
     }
@@ -209,10 +208,10 @@ def load_model(path, device):
 
 def train(model_path):
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    # device = "cpu"
+    #device = "cpu"
 
-    bit_len = 64
-    num_copies = 64
+    bit_len = 128
+    num_copies = 32
 
     train_ds = NoisyBitstringDataset(
         num_samples=80_000,
@@ -236,7 +235,7 @@ def train(model_path):
     model = BitDenoiser(
         bit_len=bit_len,
         num_copies=num_copies,
-        d_model=48,  # Was 96
+        d_model=96,  # Was 96
         num_heads=4,
         num_layers=2,
     ).to(device)
