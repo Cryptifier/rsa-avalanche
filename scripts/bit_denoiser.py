@@ -1,8 +1,15 @@
-# bit_denoiser.py
+#!/usr/bin/env python3
+
 import torch
+import argparse
+from pathlib import Path
+
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import DataLoader, Dataset
+
+
+DEFAULT_MODEL_NAME = "bit_denoiser_model.pt"
 
 # -----------------------------
 # Synthetic noisy-bitstring data
@@ -164,12 +171,43 @@ def bit_accuracy(pred_bits, target_bits):
     return (pred_bits == target_bits).float().mean().item()
 
 
+def default_model_path():
+    return Path.cwd() / DEFAULT_MODEL_NAME
+
+
+def save_model(model, path, bit_len, num_copies):
+    checkpoint = {
+        "state_dict": model.state_dict(),
+        "bit_len": bit_len,
+        "num_copies": num_copies,
+        "d_model": 48,
+        "num_heads": 4,
+        "num_layers": 2,
+    }
+    torch.save(checkpoint, path)
+    print(f"saved model to {path}")
+
+
+def load_model(path, device):
+    checkpoint = torch.load(path, map_location=device)
+    model = BitDenoiser(
+        bit_len=checkpoint["bit_len"],
+        num_copies=checkpoint["num_copies"],
+        d_model=checkpoint["d_model"],
+        num_heads=checkpoint["num_heads"],
+        num_layers=checkpoint["num_layers"],
+    ).to(device)
+    model.load_state_dict(checkpoint["state_dict"])
+    model.eval()
+    return model, checkpoint
+
+
 # -----------------------------
 # Training
 # -----------------------------
 
 
-def train():
+def train(model_path):
     device = "cuda" if torch.cuda.is_available() else "cpu"
     # device = "cpu"
 
@@ -253,8 +291,83 @@ def train():
             f"majority_acc={sum(majority_accs) / len(majority_accs):.4f}"
         )
 
+    save_model(model, model_path, bit_len=bit_len, num_copies=num_copies)
     return model
 
 
+def run_inference(model_path, num_samples):
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    model, checkpoint = load_model(model_path, device)
+
+    dataset = NoisyBitstringDataset(
+        num_samples=num_samples,
+        bit_len=checkpoint["bit_len"],
+        num_copies=checkpoint["num_copies"],
+        p_correct_min=0.52,
+        p_correct_max=0.60,
+    )
+
+    print(f"loaded model from {model_path}")
+    with torch.no_grad():
+        for sample_idx in range(num_samples):
+            y, x = dataset[sample_idx]
+            y = y.unsqueeze(0).to(device)
+            x = x.to(device)
+
+            logits = model(y)
+            probs = torch.sigmoid(logits)
+            pred = (probs > 0.5).float().squeeze(0)
+            mv = majority_vote(y).squeeze(0)
+
+            neural_acc = bit_accuracy(pred, x)
+            majority_acc = bit_accuracy(mv, x)
+
+            observed = "".join(str(int(bit)) for bit in y[0, 0].cpu().tolist())
+            predicted = "".join(str(int(bit)) for bit in pred.cpu().tolist())
+            target = "".join(str(int(bit)) for bit in x.cpu().tolist())
+
+            print(
+                f"sample={sample_idx} "
+                f"neural_acc={neural_acc:.4f} "
+                f"majority_acc={majority_acc:.4f}"
+            )
+            print(f"  first_copy={observed}")
+            print(f"  predicted={predicted}")
+            print(f"  target={target}")
+
+
+def parse_args():
+    parser = argparse.ArgumentParser(
+        description="Train or run sample inference with the bit denoiser.",
+    )
+    parser.add_argument(
+        "mode",
+        nargs="?",
+        choices=("train", "infer"),
+        default="train",
+        help="Choose whether to train a model or run inference on sample data.",
+    )
+    parser.add_argument(
+        "--model-path",
+        type=Path,
+        default=default_model_path(),
+        help=(
+            "Checkpoint path. Defaults to bit_denoiser_model.pt in the "
+            "current working directory."
+        ),
+    )
+    parser.add_argument(
+        "--samples",
+        type=int,
+        default=3,
+        help="Number of synthetic samples to evaluate in inference mode.",
+    )
+    return parser.parse_args()
+
+
 if __name__ == "__main__":
-    train()
+    args = parse_args()
+    if args.mode == "train":
+        train(args.model_path)
+    else:
+        run_inference(args.model_path, args.samples)
