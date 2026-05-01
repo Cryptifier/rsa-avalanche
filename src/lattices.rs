@@ -1,6 +1,7 @@
 /// Eclipse Public License 2.0
 /// SPDX-License-Identifier: EPL-2.0
 /// Copyright (c) 2025 Nicholas LaRoche <nlaroche@cryptifier.dev>
+use bigdecimal::{BigDecimal, FromPrimitive};
 use ndarray::{Array1, Array2};
 use num_bigint::{BigInt, BigUint};
 use num_integer::Integer;
@@ -11,12 +12,99 @@ use std::fmt::{Display, Formatter};
 
 use crate::poly::Poly;
 use crate::polynomials::IntegerPolynomial;
+use crate::math::cosine_bigdecimal;
 
 /// Integer matrix used for lattice basis construction.
 pub type BigIntMatrix = Array2<BigInt>;
 
 /// Integer vector used for lattice rows and reduced basis vectors.
 pub type BigIntVector = Array1<BigInt>;
+
+/// Decimal matrix used for rotated lattice bases and decimal lattice metrics.
+pub type BigDecimalMatrix = Array2<BigDecimal>;
+
+/// Decimal vector used for rotated lattice rows.
+pub type BigDecimalVector = Array1<BigDecimal>;
+
+/// Error returned when lattice metric inputs are incompatible.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LatticeMetricError {
+    ShapeMismatch {
+        left_rows: usize,
+        left_cols: usize,
+        right_rows: usize,
+        right_cols: usize,
+    },
+    InconsistentRowLength {
+        row: usize,
+        expected: usize,
+        actual: usize,
+    },
+}
+
+impl Display for LatticeMetricError {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::ShapeMismatch {
+                left_rows,
+                left_cols,
+                right_rows,
+                right_cols,
+            } => write!(
+                f,
+                "frobenius inner product requires matching shapes, got ({left_rows}, {left_cols}) and ({right_rows}, {right_cols})"
+            ),
+            Self::InconsistentRowLength { row, expected, actual } => write!(
+                f,
+                "lattice row {row} has length {actual}, expected {expected}"
+            ),
+        }
+    }
+}
+
+impl Error for LatticeMetricError {}
+
+/// Error returned when a lattice rotation or decimal flattening request is malformed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LatticeTransformError {
+    InvalidPlane {
+        axis_a: usize,
+        axis_b: usize,
+        dimension: usize,
+    },
+    NegativeDigits {
+        digits: i64,
+    },
+    InconsistentRowLength {
+        row: usize,
+        expected: usize,
+        actual: usize,
+    },
+}
+
+impl Display for LatticeTransformError {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::InvalidPlane {
+                axis_a,
+                axis_b,
+                dimension,
+            } => write!(
+                f,
+                "rotation plane ({axis_a}, {axis_b}) is invalid for lattice dimension {dimension}"
+            ),
+            Self::NegativeDigits { digits } => {
+                write!(f, "decimal digit count must be non-negative, got {digits}")
+            }
+            Self::InconsistentRowLength { row, expected, actual } => write!(
+                f,
+                "lattice row {row} has length {actual}, expected {expected}"
+            ),
+        }
+    }
+}
+
+impl Error for LatticeTransformError {}
 
 /// Error returned when a Coppersmith lattice request is malformed.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -173,6 +261,46 @@ impl CoppersmithLattice {
         }
 
         Ok(IntegerPolynomial::new(coefficients))
+    }
+
+    /// Computes the Frobenius inner product of this lattice basis with another basis.
+    ///
+    /// # Parameters
+    /// - `other`: Lattice whose basis matrix is compared against `self`.
+    ///
+    /// # Returns
+    /// - `Result<BigDecimal, LatticeMetricError>`: Exact Frobenius inner product or a shape error.
+    ///
+    /// # Expected Output
+    /// - Returns an exact `BigDecimal` metric value; no side effects.
+    pub fn frobenius_inner_product_basis(
+        &self,
+        other: &Self,
+    ) -> Result<BigDecimal, LatticeMetricError> {
+        frobenius_inner_product_bigdecimal(&self.basis, &other.basis)
+    }
+
+    /// Rotates this lattice basis within a selected 2D coordinate plane using decimal arithmetic.
+    ///
+    /// # Parameters
+    /// - `axis_a`: First coordinate axis participating in the rotation plane.
+    /// - `axis_b`: Second coordinate axis participating in the rotation plane.
+    /// - `theta`: Rotation angle in radians.
+    /// - `digits`: Decimal digits retained in the trigonometric coefficients and output entries.
+    ///
+    /// # Returns
+    /// - `Result<BigDecimalMatrix, LatticeTransformError>`: Rotated decimal basis or a validation error.
+    ///
+    /// # Expected Output
+    /// - Returns a rotated decimal matrix; no side effects.
+    pub fn rotate_basis_plane_bigdecimal(
+        &self,
+        axis_a: usize,
+        axis_b: usize,
+        theta: &BigDecimal,
+        digits: i64,
+    ) -> Result<BigDecimalMatrix, LatticeTransformError> {
+        rotate_lattice_plane_bigdecimal(&self.basis, axis_a, axis_b, theta, digits)
     }
 }
 
@@ -668,6 +796,281 @@ pub fn lll_reduce_delta(input: &BigIntMatrix, delta: BigRational) -> Vec<BigIntV
     basis
 }
 
+/// Computes the Frobenius inner product of two lattice matrices exactly as a `BigDecimal`.
+///
+/// # Parameters
+/// - `left`: Left lattice matrix.
+/// - `right`: Right lattice matrix with the same shape as `left`.
+///
+/// # Returns
+/// - `Result<BigDecimal, LatticeMetricError>`: Exact Frobenius inner product or a shape error.
+///
+/// # Expected Output
+/// - Returns an exact `BigDecimal` metric value; no side effects.
+pub fn frobenius_inner_product_bigdecimal(
+    left: &BigIntMatrix,
+    right: &BigIntMatrix,
+) -> Result<BigDecimal, LatticeMetricError> {
+    validate_same_shape(left.nrows(), left.ncols(), right.nrows(), right.ncols())?;
+
+    let sum = left
+        .iter()
+        .zip(right.iter())
+        .map(|(left_value, right_value)| left_value * right_value)
+        .fold(BigInt::zero(), |acc, value| acc + value);
+
+    Ok(BigDecimal::from(sum))
+}
+
+/// Computes the Frobenius inner product of two reduced or non-reduced lattice row collections.
+///
+/// # Parameters
+/// - `left`: Left row collection.
+/// - `right`: Right row collection with the same matrix shape as `left`.
+///
+/// # Returns
+/// - `Result<BigDecimal, LatticeMetricError>`: Exact Frobenius inner product or a shape error.
+///
+/// # Expected Output
+/// - Returns an exact `BigDecimal` metric value; no side effects.
+pub fn frobenius_inner_product_vectors_bigdecimal(
+    left: &[BigIntVector],
+    right: &[BigIntVector],
+) -> Result<BigDecimal, LatticeMetricError> {
+    let (left_rows, left_cols) = validate_bigint_vector_collection_shape_metric(left)?;
+    let (right_rows, right_cols) = validate_bigint_vector_collection_shape_metric(right)?;
+    validate_same_shape(left_rows, left_cols, right_rows, right_cols)?;
+
+    let left_matrix = as_matrix(left);
+    let right_matrix = as_matrix(right);
+    frobenius_inner_product_bigdecimal(&left_matrix, &right_matrix)
+}
+
+/// Computes the Frobenius inner product of two decimal lattice matrices.
+///
+/// # Parameters
+/// - `left`: Left decimal lattice matrix.
+/// - `right`: Right decimal lattice matrix with the same shape as `left`.
+///
+/// # Returns
+/// - `Result<BigDecimal, LatticeMetricError>`: Frobenius inner product or a shape error.
+///
+/// # Expected Output
+/// - Returns a decimal metric value; no side effects.
+pub fn frobenius_inner_product_decimal(
+    left: &BigDecimalMatrix,
+    right: &BigDecimalMatrix,
+) -> Result<BigDecimal, LatticeMetricError> {
+    validate_same_shape(left.nrows(), left.ncols(), right.nrows(), right.ncols())?;
+
+    Ok(left
+        .iter()
+        .zip(right.iter())
+        .fold(BigDecimal::zero(), |acc, (left_value, right_value)| {
+            acc + left_value * right_value
+        }))
+}
+
+/// Computes the Frobenius inner product of two decimal row-vector collections.
+///
+/// # Parameters
+/// - `left`: Left decimal row collection.
+/// - `right`: Right decimal row collection with the same matrix shape as `left`.
+///
+/// # Returns
+/// - `Result<BigDecimal, LatticeMetricError>`: Frobenius inner product or a shape error.
+///
+/// # Expected Output
+/// - Returns a decimal metric value; no side effects.
+pub fn frobenius_inner_product_decimal_vectors(
+    left: &[BigDecimalVector],
+    right: &[BigDecimalVector],
+) -> Result<BigDecimal, LatticeMetricError> {
+    let (left_rows, left_cols) = validate_bigdecimal_vector_collection_shape_metric(left)?;
+    let (right_rows, right_cols) = validate_bigdecimal_vector_collection_shape_metric(right)?;
+    validate_same_shape(left_rows, left_cols, right_rows, right_cols)?;
+
+    let left_matrix = as_decimal_matrix(left)?;
+    let right_matrix = as_decimal_matrix(right)?;
+    frobenius_inner_product_decimal(&left_matrix, &right_matrix)
+}
+
+/// Rotates an integer lattice matrix in a selected 2D coordinate plane using decimal arithmetic.
+///
+/// # Parameters
+/// - `matrix`: Integer lattice matrix whose rows are basis vectors.
+/// - `axis_a`: First coordinate axis participating in the rotation plane.
+/// - `axis_b`: Second coordinate axis participating in the rotation plane.
+/// - `theta`: Rotation angle in radians.
+/// - `digits`: Decimal digits retained in the trigonometric coefficients and output entries.
+///
+/// # Returns
+/// - `Result<BigDecimalMatrix, LatticeTransformError>`: Rotated decimal matrix or a validation error.
+///
+/// # Expected Output
+/// - Returns a rotated decimal matrix; no side effects.
+pub fn rotate_lattice_plane_bigdecimal(
+    matrix: &BigIntMatrix,
+    axis_a: usize,
+    axis_b: usize,
+    theta: &BigDecimal,
+    digits: i64,
+) -> Result<BigDecimalMatrix, LatticeTransformError> {
+    let decimal = matrix.mapv(BigDecimal::from);
+    rotate_decimal_lattice_plane_bigdecimal(&decimal, axis_a, axis_b, theta, digits)
+}
+
+/// Rotates an integer row-vector lattice in a selected 2D coordinate plane using decimal arithmetic.
+///
+/// # Parameters
+/// - `vectors`: Integer row collection whose rows are basis vectors.
+/// - `axis_a`: First coordinate axis participating in the rotation plane.
+/// - `axis_b`: Second coordinate axis participating in the rotation plane.
+/// - `theta`: Rotation angle in radians.
+/// - `digits`: Decimal digits retained in the trigonometric coefficients and output entries.
+///
+/// # Returns
+/// - `Result<Vec<BigDecimalVector>, LatticeTransformError>`: Rotated decimal vectors or a validation error.
+///
+/// # Expected Output
+/// - Returns rotated decimal row vectors; no side effects.
+pub fn rotate_lattice_vectors_plane_bigdecimal(
+    vectors: &[BigIntVector],
+    axis_a: usize,
+    axis_b: usize,
+    theta: &BigDecimal,
+    digits: i64,
+) -> Result<Vec<BigDecimalVector>, LatticeTransformError> {
+    let matrix = as_matrix(vectors);
+    let rotated = rotate_lattice_plane_bigdecimal(&matrix, axis_a, axis_b, theta, digits)?;
+    decimal_matrix_to_vectors(&rotated)
+}
+
+/// Rotates a decimal lattice matrix in a selected 2D coordinate plane.
+///
+/// # Parameters
+/// - `matrix`: Decimal lattice matrix whose rows are basis vectors.
+/// - `axis_a`: First coordinate axis participating in the rotation plane.
+/// - `axis_b`: Second coordinate axis participating in the rotation plane.
+/// - `theta`: Rotation angle in radians.
+/// - `digits`: Decimal digits retained in the trigonometric coefficients and output entries.
+///
+/// # Returns
+/// - `Result<BigDecimalMatrix, LatticeTransformError>`: Rotated decimal matrix or a validation error.
+///
+/// # Expected Output
+/// - Returns a rotated decimal matrix; no side effects.
+pub fn rotate_decimal_lattice_plane_bigdecimal(
+    matrix: &BigDecimalMatrix,
+    axis_a: usize,
+    axis_b: usize,
+    theta: &BigDecimal,
+    digits: i64,
+) -> Result<BigDecimalMatrix, LatticeTransformError> {
+    if digits < 0 {
+        return Err(LatticeTransformError::NegativeDigits { digits });
+    }
+
+    let dimension = matrix.ncols();
+    validate_rotation_plane(axis_a, axis_b, dimension)?;
+    let precision = digits + 12;
+    let (cos_theta, sin_theta) = rotation_coefficients(theta, precision)?;
+    let mut rotated = matrix.clone();
+
+    for row in 0..matrix.nrows() {
+        let x = matrix[[row, axis_a]].clone();
+        let y = matrix[[row, axis_b]].clone();
+        let rotated_x = (&cos_theta * &x - &sin_theta * &y).with_scale(digits);
+        let rotated_y = (&sin_theta * &x + &cos_theta * &y).with_scale(digits);
+        rotated[[row, axis_a]] = rotated_x;
+        rotated[[row, axis_b]] = rotated_y;
+    }
+
+    Ok(rotated)
+}
+
+/// Rotates a decimal row-vector lattice in a selected 2D coordinate plane.
+///
+/// # Parameters
+/// - `vectors`: Decimal row collection whose rows are basis vectors.
+/// - `axis_a`: First coordinate axis participating in the rotation plane.
+/// - `axis_b`: Second coordinate axis participating in the rotation plane.
+/// - `theta`: Rotation angle in radians.
+/// - `digits`: Decimal digits retained in the trigonometric coefficients and output entries.
+///
+/// # Returns
+/// - `Result<Vec<BigDecimalVector>, LatticeTransformError>`: Rotated decimal vectors or a validation error.
+///
+/// # Expected Output
+/// - Returns rotated decimal row vectors; no side effects.
+pub fn rotate_decimal_lattice_vectors_plane_bigdecimal(
+    vectors: &[BigDecimalVector],
+    axis_a: usize,
+    axis_b: usize,
+    theta: &BigDecimal,
+    digits: i64,
+) -> Result<Vec<BigDecimalVector>, LatticeTransformError> {
+    let matrix = as_decimal_matrix_transform(vectors)?;
+    let rotated = rotate_decimal_lattice_plane_bigdecimal(&matrix, axis_a, axis_b, theta, digits)?;
+    decimal_matrix_to_vectors(&rotated)
+}
+
+/// Flattens a decimal lattice matrix back into integers by rounding `value * 10^digits`.
+///
+/// # Parameters
+/// - `matrix`: Decimal lattice matrix to quantize.
+/// - `digits`: Number of decimal digits to preserve before rounding into integers.
+///
+/// # Returns
+/// - `Result<BigIntMatrix, LatticeTransformError>`: Quantized integer matrix or a validation error.
+///
+/// # Expected Output
+/// - Returns an integer matrix; no side effects.
+pub fn flatten_decimal_lattice_to_bigints(
+    matrix: &BigDecimalMatrix,
+    digits: i64,
+) -> Result<BigIntMatrix, LatticeTransformError> {
+    if digits < 0 {
+        return Err(LatticeTransformError::NegativeDigits { digits });
+    }
+
+    let quantized: Vec<BigInt> = matrix
+        .iter()
+        .map(|value| round_scaled_bigdecimal_to_bigint(value, digits))
+        .collect();
+
+    Array2::from_shape_vec((matrix.nrows(), matrix.ncols()), quantized)
+        .map_err(|_| LatticeTransformError::InconsistentRowLength {
+            row: 0,
+            expected: matrix.ncols(),
+            actual: matrix.ncols(),
+        })
+}
+
+/// Flattens decimal row vectors back into integer vectors by rounding `value * 10^digits`.
+///
+/// # Parameters
+/// - `vectors`: Decimal row collection to quantize.
+/// - `digits`: Number of decimal digits to preserve before rounding into integers.
+///
+/// # Returns
+/// - `Result<Vec<BigIntVector>, LatticeTransformError>`: Quantized integer row vectors or a validation error.
+///
+/// # Expected Output
+/// - Returns integer row vectors; no side effects.
+pub fn flatten_decimal_lattice_vectors_to_bigints(
+    vectors: &[BigDecimalVector],
+    digits: i64,
+) -> Result<Vec<BigIntVector>, LatticeTransformError> {
+    let matrix = as_decimal_matrix_transform(vectors)?;
+    let quantized = flatten_decimal_lattice_to_bigints(&matrix, digits)?;
+    Ok(quantized
+        .rows()
+        .into_iter()
+        .map(|row| row.to_owned())
+        .collect())
+}
+
 /// Converts a row vector collection into an `ndarray` matrix.
 ///
 /// # Parameters
@@ -689,6 +1092,221 @@ pub fn as_matrix(vectors: &[BigIntVector]) -> BigIntMatrix {
     let flat: Vec<BigInt> = vectors.iter().flat_map(|row| row.iter().cloned()).collect();
 
     Array2::from_shape_vec((rows, cols), flat).expect("valid lattice matrix shape")
+}
+
+/// Converts decimal row vectors into an `ndarray` matrix.
+fn as_decimal_matrix(vectors: &[BigDecimalVector]) -> Result<BigDecimalMatrix, LatticeMetricError> {
+    let (rows, cols) = validate_bigdecimal_vector_collection_shape_metric(vectors)?;
+    let flat: Vec<BigDecimal> = vectors
+        .iter()
+        .flat_map(|row| row.iter().cloned())
+        .collect();
+
+    Array2::from_shape_vec((rows, cols), flat).map_err(|_| LatticeMetricError::InconsistentRowLength {
+        row: 0,
+        expected: cols,
+        actual: cols,
+    })
+}
+
+/// Converts decimal row vectors into an `ndarray` matrix for lattice transforms.
+fn as_decimal_matrix_transform(
+    vectors: &[BigDecimalVector],
+) -> Result<BigDecimalMatrix, LatticeTransformError> {
+    let (rows, cols) = validate_bigdecimal_vector_collection_shape_transform(vectors)?;
+    let flat: Vec<BigDecimal> = vectors
+        .iter()
+        .flat_map(|row| row.iter().cloned())
+        .collect();
+
+    Array2::from_shape_vec((rows, cols), flat).map_err(|_| LatticeTransformError::InconsistentRowLength {
+        row: 0,
+        expected: cols,
+        actual: cols,
+    })
+}
+
+/// Converts a decimal matrix into owned decimal row vectors.
+fn decimal_matrix_to_vectors(
+    matrix: &BigDecimalMatrix,
+) -> Result<Vec<BigDecimalVector>, LatticeTransformError> {
+    Ok(matrix
+        .rows()
+        .into_iter()
+        .map(|row| row.to_owned())
+        .collect())
+}
+
+/// Validates that two matrix-like shapes match exactly.
+fn validate_same_shape(
+    left_rows: usize,
+    left_cols: usize,
+    right_rows: usize,
+    right_cols: usize,
+) -> Result<(), LatticeMetricError> {
+    if left_rows == right_rows && left_cols == right_cols {
+        Ok(())
+    } else {
+        Err(LatticeMetricError::ShapeMismatch {
+            left_rows,
+            left_cols,
+            right_rows,
+            right_cols,
+        })
+    }
+}
+
+/// Returns the effective matrix shape for an integer row-vector collection.
+fn validate_bigint_vector_collection_shape_metric(
+    vectors: &[BigIntVector],
+) -> Result<(usize, usize), LatticeMetricError> {
+    if vectors.is_empty() {
+        return Ok((0, 0));
+    }
+
+    let cols = vectors[0].len();
+    for (row_index, row) in vectors.iter().enumerate().skip(1) {
+        if row.len() != cols {
+            return Err(LatticeMetricError::InconsistentRowLength {
+                row: row_index,
+                expected: cols,
+                actual: row.len(),
+            });
+        }
+    }
+
+    Ok((vectors.len(), cols))
+}
+
+/// Returns the effective matrix shape for a decimal row-vector collection.
+fn validate_bigdecimal_vector_collection_shape_metric(
+    vectors: &[BigDecimalVector],
+) -> Result<(usize, usize), LatticeMetricError> {
+    if vectors.is_empty() {
+        return Ok((0, 0));
+    }
+
+    let cols = vectors[0].len();
+    for (row_index, row) in vectors.iter().enumerate().skip(1) {
+        if row.len() != cols {
+            return Err(LatticeMetricError::InconsistentRowLength {
+                row: row_index,
+                expected: cols,
+                actual: row.len(),
+            });
+        }
+    }
+
+    Ok((vectors.len(), cols))
+}
+
+/// Returns the effective matrix shape for a decimal row-vector collection for transforms.
+fn validate_bigdecimal_vector_collection_shape_transform(
+    vectors: &[BigDecimalVector],
+) -> Result<(usize, usize), LatticeTransformError> {
+    if vectors.is_empty() {
+        return Ok((0, 0));
+    }
+
+    let cols = vectors[0].len();
+    for (row_index, row) in vectors.iter().enumerate().skip(1) {
+        if row.len() != cols {
+            return Err(LatticeTransformError::InconsistentRowLength {
+                row: row_index,
+                expected: cols,
+                actual: row.len(),
+            });
+        }
+    }
+
+    Ok((vectors.len(), cols))
+}
+
+/// Validates a 2D rotation plane against a lattice dimension.
+fn validate_rotation_plane(
+    axis_a: usize,
+    axis_b: usize,
+    dimension: usize,
+) -> Result<(), LatticeTransformError> {
+    if axis_a >= dimension || axis_b >= dimension || axis_a == axis_b {
+        Err(LatticeTransformError::InvalidPlane {
+            axis_a,
+            axis_b,
+            dimension,
+        })
+    } else {
+        Ok(())
+    }
+}
+
+/// Computes cosine and sine for a rotation angle using decimal approximations.
+fn rotation_coefficients(
+    theta: &BigDecimal,
+    digits: i64,
+) -> Result<(BigDecimal, BigDecimal), LatticeTransformError> {
+    if digits < 0 {
+        return Err(LatticeTransformError::NegativeDigits { digits });
+    }
+
+    Ok((
+        cosine_bigdecimal(theta.clone(), digits),
+        sine_bigdecimal(theta.clone(), digits),
+    ))
+}
+
+/// Returns `10^-scale` as a `BigDecimal`.
+fn pow10_neg_bigdecimal(scale: i64) -> BigDecimal {
+    BigDecimal::new(1.into(), scale)
+}
+
+/// Returns the sine of `x` using a big decimal approximation with `digits` precision.
+fn sine_bigdecimal(x: BigDecimal, digits: i64) -> BigDecimal {
+    let tolerance = pow10_neg_bigdecimal(digits + 8);
+
+    let mut sum = x.clone();
+    let mut term = x.clone();
+    let x2 = &x * &x;
+
+    for n in 1..20_000_i64 {
+        let denom = BigDecimal::from_i64((2 * n) * (2 * n + 1))
+            .expect("small sine series denominator");
+        term = -(&term * &x2) / denom;
+        term = term.with_scale(digits + 16);
+
+        sum += &term;
+        sum = sum.with_scale(digits + 16);
+
+        if term.abs() < tolerance {
+            break;
+        }
+    }
+
+    sum.with_scale(digits)
+}
+
+/// Rounds `value * 10^digits` to the nearest integer using symmetric half-up behavior.
+fn round_scaled_bigdecimal_to_bigint(value: &BigDecimal, digits: i64) -> BigInt {
+    let (coefficient, scale) = value.clone().into_bigint_and_exponent();
+    let target = scale - digits;
+
+    if target <= 0 {
+        return coefficient * BigInt::from(10u8).pow((-target) as u32);
+    }
+
+    let divisor = BigInt::from(10u8).pow(target as u32);
+    let quotient = &coefficient / &divisor;
+    let remainder = &coefficient % &divisor;
+    let doubled_remainder = remainder.abs() * 2;
+
+    if doubled_remainder >= divisor {
+        if coefficient.is_negative() {
+            quotient - BigInt::one()
+        } else {
+            quotient + BigInt::one()
+        }
+    } else {
+        quotient
+    }
 }
 
 /// Validates the mandatory inputs for a Coppersmith lattice construction.
@@ -877,6 +1495,178 @@ mod tests {
         assert_eq!(reduced.len(), 3);
         assert_eq!(reduced[0].len(), 3);
         assert_eq!(dot_i(&reduced[0], &reduced[0]).sign(), num_bigint::Sign::Plus);
+    }
+
+    #[test]
+    fn frobenius_inner_product_bigdecimal_returns_exact_integer_value() {
+        let left = array![
+            [BigInt::from(1), BigInt::from(2)],
+            [BigInt::from(3), BigInt::from(4)],
+        ];
+        let right = array![
+            [BigInt::from(5), BigInt::from(6)],
+            [BigInt::from(7), BigInt::from(8)],
+        ];
+
+        let product = frobenius_inner_product_bigdecimal(&left, &right).expect("product");
+
+        assert_eq!(product, BigDecimal::from(BigInt::from(70)));
+    }
+
+    #[test]
+    fn frobenius_inner_product_vectors_bigdecimal_supports_reduced_bases() {
+        let basis = array![
+            [BigInt::from(1), BigInt::from(1)],
+            [BigInt::from(1), BigInt::from(0)],
+        ];
+        let reduced = lll_reduce(&basis);
+
+        let product =
+            frobenius_inner_product_vectors_bigdecimal(&reduced, &reduced).expect("product");
+
+        assert_eq!(product, BigDecimal::from(BigInt::from(2)));
+    }
+
+    #[test]
+    fn frobenius_inner_product_basis_uses_lattice_bases() {
+        let polynomial = IntegerPolynomial::new(vec![BigInt::from(12), BigInt::one()]);
+        let lattice = CoppersmithLatticeBuilder::new(BigUint::from(77u8), polynomial)
+            .with_bound(BigUint::from(8u8))
+            .with_exponent(2)
+            .with_dimension(4)
+            .build()
+            .expect("lattice");
+
+        let product = lattice
+            .frobenius_inner_product_basis(&lattice)
+            .expect("product");
+
+        assert_eq!(product, BigDecimal::from(BigInt::from(40396513u32)));
+    }
+
+    #[test]
+    fn frobenius_inner_product_bigdecimal_rejects_shape_mismatch() {
+        let left = array![[BigInt::from(1), BigInt::from(2)]];
+        let right = array![
+            [BigInt::from(1), BigInt::from(2)],
+            [BigInt::from(3), BigInt::from(4)],
+        ];
+
+        let error = frobenius_inner_product_bigdecimal(&left, &right).expect_err("shape mismatch");
+
+        assert_eq!(
+            error,
+            LatticeMetricError::ShapeMismatch {
+                left_rows: 1,
+                left_cols: 2,
+                right_rows: 2,
+                right_cols: 2,
+            }
+        );
+    }
+
+    #[test]
+    fn frobenius_inner_product_decimal_supports_rotated_decimal_matrices() {
+        let left = Array2::from_shape_vec(
+            (1, 2),
+            vec!["1.5".parse::<BigDecimal>().unwrap(), BigDecimal::from(2)],
+        )
+        .expect("decimal matrix");
+        let right = Array2::from_shape_vec(
+            (1, 2),
+            vec!["3.0".parse::<BigDecimal>().unwrap(), BigDecimal::from(-4)],
+        )
+        .expect("decimal matrix");
+
+        let product = frobenius_inner_product_decimal(&left, &right).expect("product");
+
+        assert_eq!(product, "-3.5".parse::<BigDecimal>().unwrap());
+    }
+
+    #[test]
+    fn rotate_lattice_plane_bigdecimal_quarter_turn_flattens_to_integer_rotation() {
+        let basis = array![
+            [BigInt::from(1), BigInt::from(0)],
+            [BigInt::from(0), BigInt::from(1)],
+        ];
+        let theta = "1.57079632679489661923".parse::<BigDecimal>().expect("theta");
+
+        let rotated = rotate_lattice_plane_bigdecimal(&basis, 0, 1, &theta, 18).expect("rotate");
+        let flattened = flatten_decimal_lattice_to_bigints(&rotated, 0).expect("flatten");
+
+        assert_eq!(
+            flattened,
+            array![
+                [BigInt::from(0), BigInt::from(1)],
+                [BigInt::from(-1), BigInt::from(0)],
+            ]
+        );
+    }
+
+    #[test]
+    fn rotate_lattice_vectors_plane_bigdecimal_preserves_self_frobenius_after_flattening() {
+        let basis = array![
+            [BigInt::from(1), BigInt::from(1)],
+            [BigInt::from(1), BigInt::from(0)],
+        ];
+        let reduced = lll_reduce(&basis);
+        let theta = "1.57079632679489661923".parse::<BigDecimal>().expect("theta");
+
+        let rotated =
+            rotate_lattice_vectors_plane_bigdecimal(&reduced, 0, 1, &theta, 18).expect("rotate");
+        let flattened = flatten_decimal_lattice_vectors_to_bigints(&rotated, 0).expect("flatten");
+        let original_product =
+            frobenius_inner_product_vectors_bigdecimal(&reduced, &reduced).expect("product");
+        let rotated_product =
+            frobenius_inner_product_vectors_bigdecimal(&flattened, &flattened).expect("product");
+
+        assert_eq!(original_product, rotated_product);
+    }
+
+    #[test]
+    fn flatten_decimal_lattice_to_bigints_preserves_configured_digits() {
+        let matrix = Array2::from_shape_vec(
+            (1, 2),
+            vec![
+                "1.2345".parse::<BigDecimal>().unwrap(),
+                "-0.006".parse::<BigDecimal>().unwrap(),
+            ],
+        )
+        .expect("decimal matrix");
+
+        let flattened = flatten_decimal_lattice_to_bigints(&matrix, 3).expect("flatten");
+
+        assert_eq!(
+            flattened,
+            array![[BigInt::from(1235), BigInt::from(-6)]]
+        );
+    }
+
+    #[test]
+    fn rotate_lattice_plane_bigdecimal_rejects_invalid_plane() {
+        let basis = array![[BigInt::from(1), BigInt::from(0)]];
+        let theta = BigDecimal::from(0);
+
+        let error = rotate_lattice_plane_bigdecimal(&basis, 1, 1, &theta, 8).expect_err("plane");
+
+        assert_eq!(
+            error,
+            LatticeTransformError::InvalidPlane {
+                axis_a: 1,
+                axis_b: 1,
+                dimension: 2,
+            }
+        );
+    }
+
+    #[test]
+    fn flatten_decimal_lattice_to_bigints_rejects_negative_digits() {
+        let matrix = Array2::from_shape_vec((0, 0), Vec::<BigDecimal>::new()).expect("matrix");
+
+        let error =
+            flatten_decimal_lattice_to_bigints(&matrix, -1).expect_err("negative digits");
+
+        assert_eq!(error, LatticeTransformError::NegativeDigits { digits: -1 });
     }
 
     #[test]
