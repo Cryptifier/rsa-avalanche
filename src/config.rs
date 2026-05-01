@@ -209,10 +209,10 @@ pub struct EngineConfig {
     /// Number of least-significant bits inspected when computing zero-count fitness.
     #[serde(default = "default_avalanche_fitness_bit_width")]
     pub avalanche_fitness_bit_width: usize,
-    /// Maximum number of r-candidate groups retained by the fitness pass; `0` keeps every group.
+    /// Primary retention dimension used to derive the global retained-input cap for the fitness pass; `0` disables this dimension.
     #[serde(default = "default_avalanche_fitness_r_candidate_limit")]
     pub avalanche_fitness_r_candidate_limit: usize,
-    /// Maximum number of `c^x` inputs retained per r-candidate group by the fitness pass; `0` keeps every input.
+    /// Secondary retention dimension used to derive the global retained-input cap for the fitness pass; `0` disables this dimension.
     #[serde(default = "default_avalanche_fitness_cx_candidate_limit")]
     pub avalanche_fitness_cx_candidate_limit: usize,
     /// Whether the fitness pass drops candidates whose normalized fitness falls below the configured threshold.
@@ -1460,13 +1460,13 @@ fn default_avalanche_fitness_bit_width() -> usize {
     32
 }
 
-/// Default cap on retained r-candidate groups for the fitness pass.
+/// Default primary retention dimension for the global Avalanche fitness cap.
 ///
 /// # Parameters
 /// - None.
 ///
 /// # Returns
-/// - `usize`: Default r-group retention limit, where `0` disables truncation.
+/// - `usize`: Default primary cap dimension, where `0` disables this dimension.
 ///
 /// # Expected Output
 /// - Returns a constant default value; no side effects.
@@ -1474,13 +1474,13 @@ fn default_avalanche_fitness_r_candidate_limit() -> usize {
     0
 }
 
-/// Default cap on retained `c^x` inputs per r-candidate group for the fitness pass.
+/// Default secondary retention dimension for the global Avalanche fitness cap.
 ///
 /// # Parameters
 /// - None.
 ///
 /// # Returns
-/// - `usize`: Default per-group retention limit, where `0` disables truncation.
+/// - `usize`: Default secondary cap dimension, where `0` disables this dimension.
 ///
 /// # Expected Output
 /// - Returns a constant default value; no side effects.

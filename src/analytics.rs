@@ -96,9 +96,9 @@ pub struct AnalyticsCliArgs {
     pub avalanche_fitness_shift_bytes: usize,
     /// Number of least-significant bits inspected by the zero-count fitness score.
     pub avalanche_fitness_bit_width: usize,
-    /// Maximum number of retained r-candidate groups after fitness preprocessing.
+    /// Primary retention dimension used to derive the global retained-input cap after fitness preprocessing.
     pub avalanche_fitness_r_candidate_limit: usize,
-    /// Maximum number of retained `c^x` inputs per r-candidate group after fitness preprocessing.
+    /// Secondary retention dimension used to derive the global retained-input cap after fitness preprocessing.
     pub avalanche_fitness_cx_candidate_limit: usize,
     /// Expected bit width for decryptions.
     pub bits_decrypt: Option<u32>,

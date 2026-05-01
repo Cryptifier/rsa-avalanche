@@ -7,7 +7,7 @@ use diesel::prelude::*;
 use diesel::r2d2::{ConnectionManager, CustomizeConnection, Error as R2D2Error, Pool};
 use diesel::sql_query;
 use std::{
-    collections::{BTreeMap, HashMap, HashSet},
+    collections::{HashMap, HashSet},
     error::Error,
     fs,
     path::PathBuf,
@@ -1158,6 +1158,29 @@ fn normalize_avalanche_fitness_score(fitness_score: usize, fitness_bit_width: us
     }
 
     fitness_score as f64 / fitness_bit_width as f64
+}
+
+/// Resolves the retained-input cap for the global Avalanche fitness pool.
+///
+/// # Parameters
+/// - `r_candidate_limit`: Configured primary retention dimension for the fitness pass.
+/// - `cx_candidate_limit`: Configured secondary retention dimension for the fitness pass.
+///
+/// # Returns
+/// - `usize`: Maximum number of globally ranked inputs to retain, or `0` for no cap.
+///
+/// # Expected Output
+/// - Returns the derived pool cap with no side effects.
+fn resolve_avalanche_fitness_retained_input_limit(
+    r_candidate_limit: usize,
+    cx_candidate_limit: usize,
+) -> usize {
+    match (r_candidate_limit, cx_candidate_limit) {
+        (0, 0) => 0,
+        (0, cx_limit) => cx_limit,
+        (r_limit, 0) => r_limit,
+        (r_limit, cx_limit) => r_limit.saturating_mul(cx_limit),
+    }
 }
 
 /// Validates the configured normalized Avalanche fitness threshold when thresholding is enabled.
@@ -5344,8 +5367,8 @@ fn build_scored_avalanche_fitness_pass(
 /// # Parameters
 /// - `inputs`: Flattened scored inputs to rank and downselect.
 /// - `fitness_bit_width`: Number of least-significant bits used for the zero-count fitness score.
-/// - `r_candidate_limit`: Maximum number of retained r-candidate groups; `0` keeps every group.
-/// - `cx_candidate_limit`: Maximum number of retained `c^x` inputs per r group; `0` keeps every input.
+/// - `r_candidate_limit`: Primary retention dimension used to derive the global retained-input cap.
+/// - `cx_candidate_limit`: Secondary retention dimension used to derive the global retained-input cap.
 /// - `use_fitness_threshold`: Whether candidates below the normalized threshold should be dropped.
 /// - `fitness_threshold`: Minimum normalized zero-count fitness required when thresholding is enabled.
 ///
@@ -5372,117 +5395,40 @@ fn apply_scored_avalanche_fitness_pass(
         fitness_score: usize,
     }
 
-    #[derive(Debug)]
-    struct RankedGroup {
-        batch_candidate_index: usize,
-        best_fitness_score: usize,
-        total_fitness_score: usize,
-        best_match_score: f64,
-        inputs: Vec<RankedInput>,
-    }
-
-    let mut grouped = BTreeMap::<usize, Vec<ScoredAvalancheInput>>::new();
-    for input in inputs {
-        grouped
-            .entry(input.batch_candidate_index)
-            .or_default()
-            .push(input);
-    }
-
-    let grouped_inputs = grouped.into_iter().collect::<Vec<_>>();
-    let total_inputs = grouped_inputs
+    let total_inputs = inputs.len();
+    let total_groups = inputs
         .iter()
-        .map(|(_, grouped_inputs)| grouped_inputs.len())
-        .sum::<usize>();
-    let total_groups = grouped_inputs.len() as u64;
-    let progress_started_at = Instant::now();
-    let progress_done = AtomicU64::new(0);
-    let progress_next_log_at_ms =
-        AtomicU64::new(Duration::from_secs(5).as_millis().min(u128::from(u64::MAX)) as u64);
+        .map(|input| input.batch_candidate_index)
+        .collect::<HashSet<_>>()
+        .len();
+    let retained_input_limit =
+        resolve_avalanche_fitness_retained_input_limit(r_candidate_limit, cx_candidate_limit);
     println!(
-        "Avalanche fitness pass: scoring {} r-candidate groups",
-        total_groups
+        "Avalanche fitness pass: scoring {} scored inputs in one global pool spanning {} r-candidate groups",
+        total_inputs, total_groups
     );
 
-    let ranked_groups = grouped_inputs
+    let mut ranked_inputs = inputs
         .into_par_iter()
-        .map(|(batch_candidate_index, group_inputs)| {
-            let mut ranked_inputs = group_inputs
-                .into_iter()
-                .map(|input| RankedInput {
-                    fitness_score: lsb_zero_count_fitness(&input.message_bits, fitness_bit_width),
-                    input,
-                })
-                .filter(|input| {
-                    !use_fitness_threshold
-                        || normalize_avalanche_fitness_score(input.fitness_score, fitness_bit_width)
-                            >= fitness_threshold
-                })
-                .collect::<Vec<_>>();
-            let retained_by_threshold = ranked_inputs.len();
-            ranked_inputs.sort_by(|left, right| {
-                right
-                    .fitness_score
-                    .cmp(&left.fitness_score)
-                    .then_with(|| {
-                        right
-                            .input
-                            .score_match_pct
-                            .total_cmp(&left.input.score_match_pct)
-                    })
-                    .then_with(|| left.input.message_index.cmp(&right.input.message_index))
-                    .then_with(|| left.input.x.cmp(&right.input.x))
-            });
-            if cx_candidate_limit > 0 && ranked_inputs.len() > cx_candidate_limit {
-                ranked_inputs.truncate(cx_candidate_limit);
-            }
-
-            let best_fitness_score = ranked_inputs
-                .first()
-                .map(|input| input.fitness_score)
-                .unwrap_or(0);
-            let total_fitness_score = ranked_inputs.iter().map(|input| input.fitness_score).sum();
-            let best_match_score = ranked_inputs
-                .iter()
-                .map(|input| input.input.score_match_pct)
-                .max_by(|left, right| left.total_cmp(right))
-                .unwrap_or(0.0);
-
-            (
-                RankedGroup {
-                    batch_candidate_index,
-                    best_fitness_score,
-                    total_fitness_score,
-                    best_match_score,
-                    inputs: ranked_inputs,
-                },
-                retained_by_threshold,
-            )
+        .map(|input| RankedInput {
+            fitness_score: lsb_zero_count_fitness(&input.message_bits, fitness_bit_width),
+            input,
         })
-        .map(|(ranked_group, retained_by_threshold)| {
-            let done = progress_done.fetch_add(1, Ordering::Relaxed) + 1;
-            log_parallel_progress_every_interval(
-                done,
-                total_groups,
-                &progress_started_at,
-                &progress_next_log_at_ms,
-                "Avalanche fitness pass",
-                Duration::from_secs(5),
-            );
-            (ranked_group, retained_by_threshold)
+        .filter(|input| {
+            !use_fitness_threshold
+                || normalize_avalanche_fitness_score(input.fitness_score, fitness_bit_width)
+                    >= fitness_threshold
         })
         .collect::<Vec<_>>();
-    let threshold_retained_input_count = ranked_groups
+    let threshold_retained_input_count = ranked_inputs.len();
+    let threshold_retained_group_count = ranked_inputs
         .iter()
-        .map(|(_, retained_by_threshold)| *retained_by_threshold)
-        .sum::<usize>();
-    let threshold_retained_group_count = ranked_groups
-        .iter()
-        .filter(|(group, _)| !group.inputs.is_empty())
-        .count();
+        .map(|input| input.input.batch_candidate_index)
+        .collect::<HashSet<_>>()
+        .len();
     if use_fitness_threshold {
         println!(
-            "Avalanche fitness threshold: retained {} of {} scored inputs across {} of {} r-candidate groups at normalized threshold {}",
+            "Avalanche fitness threshold: retained {} of {} scored inputs spanning {} of {} r-candidate groups at normalized threshold {}",
             threshold_retained_input_count,
             total_inputs,
             threshold_retained_group_count,
@@ -5490,81 +5436,51 @@ fn apply_scored_avalanche_fitness_pass(
             format_beam_float(fitness_threshold, 3)
         );
     }
-    let mut ranked_groups = ranked_groups
-        .into_iter()
-        .filter_map(|(group, _)| (!group.inputs.is_empty()).then_some(group))
-        .collect::<Vec<_>>();
-    ranked_groups.sort_by(|left, right| {
+    ranked_inputs.sort_by(|left, right| {
         right
-            .best_fitness_score
-            .cmp(&left.best_fitness_score)
-            .then_with(|| right.total_fitness_score.cmp(&left.total_fitness_score))
-            .then_with(|| right.best_match_score.total_cmp(&left.best_match_score))
-            .then_with(|| left.batch_candidate_index.cmp(&right.batch_candidate_index))
+            .fitness_score
+            .cmp(&left.fitness_score)
+            .then_with(|| {
+                right
+                    .input
+                    .score_match_pct
+                    .total_cmp(&left.input.score_match_pct)
+            })
+            .then_with(|| {
+                left.input
+                    .batch_candidate_index
+                    .cmp(&right.input.batch_candidate_index)
+            })
+            .then_with(|| left.input.message_index.cmp(&right.input.message_index))
+            .then_with(|| left.input.x.cmp(&right.input.x))
     });
-    if let Some(best_r_group) = ranked_groups.first() {
-        let best_fitness_pct =
-            normalize_avalanche_fitness_score(best_r_group.best_fitness_score, fitness_bit_width)
-                * 100.0;
-        println!(
-            "Avalanche fitness maxima: best r candidate batch-index {} fitness {} ({}%) total-fitness {} best-match {}%",
-            best_r_group.batch_candidate_index,
-            best_r_group.best_fitness_score,
-            format_beam_float(best_fitness_pct, BEAM_PCT_DECIMALS),
-            best_r_group.total_fitness_score,
-            format_beam_float(best_r_group.best_match_score, BEAM_PCT_DECIMALS),
-        );
+    if retained_input_limit > 0 && ranked_inputs.len() > retained_input_limit {
+        ranked_inputs.truncate(retained_input_limit);
     }
-    if let Some((best_cx_group, best_cx_input)) = ranked_groups
+    let retained_group_count = ranked_inputs
         .iter()
-        .flat_map(|group| group.inputs.iter().map(move |input| (group, input)))
-        .max_by(|(left_group, left_input), (right_group, right_input)| {
-            left_input
-                .fitness_score
-                .cmp(&right_input.fitness_score)
-                .then_with(|| {
-                    left_input
-                        .input
-                        .score_match_pct
-                        .total_cmp(&right_input.input.score_match_pct)
-                })
-                .then_with(|| {
-                    right_group
-                        .batch_candidate_index
-                        .cmp(&left_group.batch_candidate_index)
-                })
-                .then_with(|| {
-                    right_input
-                        .input
-                        .message_index
-                        .cmp(&left_input.input.message_index)
-                })
-                .then_with(|| right_input.input.x.cmp(&left_input.input.x))
-        })
-    {
+        .map(|input| input.input.batch_candidate_index)
+        .collect::<HashSet<_>>()
+        .len();
+    println!(
+        "Avalanche fitness pass: retained {} scored inputs spanning {} r-candidate groups after global ranking",
+        ranked_inputs.len(),
+        retained_group_count
+    );
+    if let Some(best_input) = ranked_inputs.first() {
         let best_fitness_pct =
-            normalize_avalanche_fitness_score(best_cx_input.fitness_score, fitness_bit_width)
-                * 100.0;
+            normalize_avalanche_fitness_score(best_input.fitness_score, fitness_bit_width) * 100.0;
         println!(
-            "Avalanche fitness maxima: best c^x candidate batch-index {} message-index {} x {} fitness {} ({}%) match {}%",
-            best_cx_group.batch_candidate_index,
-            best_cx_input.input.message_index,
-            best_cx_input.input.x,
-            best_cx_input.fitness_score,
+            "Avalanche fitness maxima: best candidate batch-index {} message-index {} x {} fitness {} ({}%) match {}%",
+            best_input.input.batch_candidate_index,
+            best_input.input.message_index,
+            best_input.input.x,
+            best_input.fitness_score,
             format_beam_float(best_fitness_pct, BEAM_PCT_DECIMALS),
-            format_beam_float(best_cx_input.input.score_match_pct, BEAM_PCT_DECIMALS),
+            format_beam_float(best_input.input.score_match_pct, BEAM_PCT_DECIMALS),
         );
     }
-    if r_candidate_limit > 0 && ranked_groups.len() > r_candidate_limit {
-        ranked_groups.truncate(r_candidate_limit);
-    }
-
-    let retained_input_count = ranked_groups.iter().map(|group| group.inputs.len()).sum();
-    let mut retained_inputs = Vec::with_capacity(retained_input_count);
-    for group in ranked_groups {
-        retained_inputs.extend(group.inputs.into_iter().map(|input| input.input));
-    }
-    retained_inputs
+    ranked_inputs.into_iter().map(|input| input.input).collect()
 }
 
 /// Randomizes recursive-tier sample indices before grouping.
@@ -6004,8 +5920,8 @@ fn load_cached_scored_input_summaries(
 /// - `cache`: Shared SQLite cache wrapper.
 /// - `batch_number`: One-based analysis batch number.
 /// - `fitness_bit_width`: Number of least-significant bits used for the zero-count fitness score.
-/// - `r_candidate_limit`: Maximum number of retained r-candidate groups; `0` keeps every group.
-/// - `cx_candidate_limit`: Maximum number of retained `c^x` inputs per r group; `0` keeps every input.
+/// - `r_candidate_limit`: Primary retention dimension used to derive the global retained-input cap.
+/// - `cx_candidate_limit`: Secondary retention dimension used to derive the global retained-input cap.
 /// - `use_fitness_threshold`: Whether candidates below the normalized threshold should be dropped.
 /// - `fitness_threshold`: Minimum normalized zero-count fitness required when thresholding is enabled.
 ///
@@ -6023,15 +5939,6 @@ fn apply_cached_scored_avalanche_fitness_pass(
     use_fitness_threshold: bool,
     fitness_threshold: f64,
 ) -> Result<Vec<CachedScoredInputSummary>, Box<dyn Error>> {
-    #[derive(Debug)]
-    struct RankedGroup {
-        batch_candidate_index: usize,
-        best_fitness_score: usize,
-        total_fitness_score: usize,
-        best_match_score: f64,
-        inputs: Vec<CachedScoredInputSummary>,
-    }
-
     let total_rows = count_cached_scored_inputs(cache, batch_number)?;
     if total_rows == 0 {
         return Ok(Vec::new());
@@ -6080,127 +5987,34 @@ fn apply_cached_scored_avalanche_fitness_pass(
         },
     )
     .map_err(|err| -> Box<dyn Error> { err.into() })?;
-
-    let chunk_size = parallel_progress_chunk_size(scored_inputs.len());
-    let total_chunks = scored_inputs.len().div_ceil(chunk_size);
-    let grouping_progress_label =
-        format!("Accuracy batch {} cached fitness grouping", batch_number);
-    let grouping_total = total_chunks.min(u64::MAX as usize) as u64;
-    let grouping_started_at = Instant::now();
-    let grouping_done = AtomicU64::new(0);
-    let grouping_next_log_at_ms =
-        AtomicU64::new(Duration::from_secs(5).as_millis().min(u128::from(u64::MAX)) as u64);
+    let total_groups = scored_inputs
+        .iter()
+        .map(|input| input.batch_candidate_index)
+        .collect::<HashSet<_>>()
+        .len();
+    let retained_input_limit =
+        resolve_avalanche_fitness_retained_input_limit(r_candidate_limit, cx_candidate_limit);
     println!(
-        "{grouping_progress_label}: grouping {} cached scored inputs across {total_chunks} chunk(s)",
-        scored_inputs.len()
+        "Avalanche fitness pass: scoring {} cached scored inputs in one global pool spanning {} r-candidate groups",
+        scored_inputs.len(),
+        total_groups
     );
-    let grouped = scored_inputs
-        .par_chunks(chunk_size)
-        .map(|chunk| {
-            let mut grouped = HashMap::<usize, Vec<CachedScoredInputSummary>>::new();
-            for summary in chunk {
-                grouped
-                    .entry(summary.batch_candidate_index)
-                    .or_default()
-                    .push(summary.clone());
-            }
-            let done = grouping_done.fetch_add(1, Ordering::Relaxed) + 1;
-            log_parallel_progress_every_interval(
-                done,
-                grouping_total,
-                &grouping_started_at,
-                &grouping_next_log_at_ms,
-                &grouping_progress_label,
-                Duration::from_secs(5),
-            );
-            grouped
-        })
-        .reduce(HashMap::new, |mut left, right| {
-            for (batch_candidate_index, mut chunk_inputs) in right {
-                left.entry(batch_candidate_index)
-                    .or_default()
-                    .append(&mut chunk_inputs);
-            }
-            left
+    let mut ranked_inputs = scored_inputs;
+    if use_fitness_threshold {
+        ranked_inputs.retain(|input| {
+            normalize_avalanche_fitness_score(input.fitness_score, fitness_bit_width)
+                >= fitness_threshold
         });
-
-    println!(
-        "Avalanche fitness pass: scoring {} cached r-candidate groups",
-        grouped.len()
-    );
-    let total_groups = grouped.len();
-    let group_progress_label = format!("Accuracy batch {} cached fitness ranking", batch_number);
-    let group_progress_total = total_groups.min(u64::MAX as usize) as u64;
-    let group_progress_started_at = Instant::now();
-    let group_progress_done = AtomicU64::new(0);
-    let group_progress_next_log_at_ms =
-        AtomicU64::new(Duration::from_secs(5).as_millis().min(u128::from(u64::MAX)) as u64);
-    let ranked_groups = grouped
-        .into_par_iter()
-        .map(|(batch_candidate_index, mut ranked_inputs)| {
-            if use_fitness_threshold {
-                ranked_inputs.retain(|input| {
-                    normalize_avalanche_fitness_score(input.fitness_score, fitness_bit_width)
-                        >= fitness_threshold
-                });
-            }
-            let retained_by_threshold = ranked_inputs.len();
-            ranked_inputs.sort_by(|left, right| {
-                right
-                    .fitness_score
-                    .cmp(&left.fitness_score)
-                    .then_with(|| right.score_match_pct.total_cmp(&left.score_match_pct))
-                    .then_with(|| left.message_index.cmp(&right.message_index))
-                    .then_with(|| left.x.cmp(&right.x))
-            });
-            if cx_candidate_limit > 0 && ranked_inputs.len() > cx_candidate_limit {
-                ranked_inputs.truncate(cx_candidate_limit);
-            }
-            let best_fitness_score = ranked_inputs
-                .first()
-                .map(|input| input.fitness_score)
-                .unwrap_or(0);
-            let total_fitness_score = ranked_inputs.iter().map(|input| input.fitness_score).sum();
-            let best_match_score = ranked_inputs
-                .iter()
-                .map(|input| input.score_match_pct)
-                .max_by(|left, right| left.total_cmp(right))
-                .unwrap_or(0.0);
-            (
-                RankedGroup {
-                    batch_candidate_index,
-                    best_fitness_score,
-                    total_fitness_score,
-                    best_match_score,
-                    inputs: ranked_inputs,
-                },
-                retained_by_threshold,
-            )
-        })
-        .map(|(group, retained_by_threshold)| {
-            let done = group_progress_done.fetch_add(1, Ordering::Relaxed) + 1;
-            log_parallel_progress_every_interval(
-                done,
-                group_progress_total,
-                &group_progress_started_at,
-                &group_progress_next_log_at_ms,
-                &group_progress_label,
-                Duration::from_secs(5),
-            );
-            (group, retained_by_threshold)
-        })
-        .collect::<Vec<_>>();
-    let threshold_retained_input_count = ranked_groups
+    }
+    let threshold_retained_input_count = ranked_inputs.len();
+    let threshold_retained_group_count = ranked_inputs
         .iter()
-        .map(|(_, retained_by_threshold)| *retained_by_threshold)
-        .sum::<usize>();
-    let threshold_retained_group_count = ranked_groups
-        .iter()
-        .filter(|(group, _)| !group.inputs.is_empty())
-        .count();
+        .map(|input| input.batch_candidate_index)
+        .collect::<HashSet<_>>()
+        .len();
     if use_fitness_threshold {
         println!(
-            "Avalanche fitness threshold: retained {} of {} cached scored inputs across {} of {} r-candidate groups at normalized threshold {}",
+            "Avalanche fitness threshold: retained {} of {} cached scored inputs spanning {} of {} r-candidate groups at normalized threshold {}",
             threshold_retained_input_count,
             total_rows,
             threshold_retained_group_count,
@@ -6208,75 +6022,42 @@ fn apply_cached_scored_avalanche_fitness_pass(
             format_beam_float(fitness_threshold, 3)
         );
     }
-    let mut ranked_groups = ranked_groups
-        .into_iter()
-        .filter_map(|(group, _)| (!group.inputs.is_empty()).then_some(group))
-        .collect::<Vec<_>>();
-    ranked_groups.sort_by(|left, right| {
+    ranked_inputs.sort_by(|left, right| {
         right
-            .best_fitness_score
-            .cmp(&left.best_fitness_score)
-            .then_with(|| right.total_fitness_score.cmp(&left.total_fitness_score))
-            .then_with(|| right.best_match_score.total_cmp(&left.best_match_score))
+            .fitness_score
+            .cmp(&left.fitness_score)
+            .then_with(|| right.score_match_pct.total_cmp(&left.score_match_pct))
             .then_with(|| left.batch_candidate_index.cmp(&right.batch_candidate_index))
+            .then_with(|| left.message_index.cmp(&right.message_index))
+            .then_with(|| left.x.cmp(&right.x))
     });
-    if let Some(best_r_group) = ranked_groups.first() {
-        let best_fitness_pct =
-            normalize_avalanche_fitness_score(best_r_group.best_fitness_score, fitness_bit_width)
-                * 100.0;
-        println!(
-            "Avalanche fitness maxima: best cached r candidate batch-index {} fitness {} ({}%) total-fitness {} best-match {}%",
-            best_r_group.batch_candidate_index,
-            best_r_group.best_fitness_score,
-            format_beam_float(best_fitness_pct, BEAM_PCT_DECIMALS),
-            best_r_group.total_fitness_score,
-            format_beam_float(best_r_group.best_match_score, BEAM_PCT_DECIMALS),
-        );
+    if retained_input_limit > 0 && ranked_inputs.len() > retained_input_limit {
+        ranked_inputs.truncate(retained_input_limit);
     }
-    if let Some((best_cx_group, best_cx_input)) = ranked_groups
+    let retained_group_count = ranked_inputs
         .iter()
-        .flat_map(|group| group.inputs.iter().map(move |input| (group, input)))
-        .max_by(|(left_group, left_input), (right_group, right_input)| {
-            left_input
-                .fitness_score
-                .cmp(&right_input.fitness_score)
-                .then_with(|| {
-                    left_input
-                        .score_match_pct
-                        .total_cmp(&right_input.score_match_pct)
-                })
-                .then_with(|| {
-                    right_group
-                        .batch_candidate_index
-                        .cmp(&left_group.batch_candidate_index)
-                })
-                .then_with(|| right_input.message_index.cmp(&left_input.message_index))
-                .then_with(|| right_input.x.cmp(&left_input.x))
-        })
-    {
+        .map(|input| input.batch_candidate_index)
+        .collect::<HashSet<_>>()
+        .len();
+    println!(
+        "Avalanche fitness pass: retained {} cached scored inputs spanning {} r-candidate groups after global ranking",
+        ranked_inputs.len(),
+        retained_group_count
+    );
+    if let Some(best_input) = ranked_inputs.first() {
         let best_fitness_pct =
-            normalize_avalanche_fitness_score(best_cx_input.fitness_score, fitness_bit_width)
-                * 100.0;
+            normalize_avalanche_fitness_score(best_input.fitness_score, fitness_bit_width) * 100.0;
         println!(
-            "Avalanche fitness maxima: best cached c^x candidate batch-index {} message-index {} x {} fitness {} ({}%) match {}%",
-            best_cx_group.batch_candidate_index,
-            best_cx_input.message_index,
-            best_cx_input.x,
-            best_cx_input.fitness_score,
+            "Avalanche fitness maxima: best cached candidate batch-index {} message-index {} x {} fitness {} ({}%) match {}%",
+            best_input.batch_candidate_index,
+            best_input.message_index,
+            best_input.x,
+            best_input.fitness_score,
             format_beam_float(best_fitness_pct, BEAM_PCT_DECIMALS),
-            format_beam_float(best_cx_input.score_match_pct, BEAM_PCT_DECIMALS),
+            format_beam_float(best_input.score_match_pct, BEAM_PCT_DECIMALS),
         );
     }
-    if r_candidate_limit > 0 && ranked_groups.len() > r_candidate_limit {
-        ranked_groups.truncate(r_candidate_limit);
-    }
-
-    let retained_input_count = ranked_groups.iter().map(|group| group.inputs.len()).sum();
-    let mut retained_inputs = Vec::with_capacity(retained_input_count);
-    for group in ranked_groups {
-        retained_inputs.extend(group.inputs);
-    }
-    Ok(retained_inputs)
+    Ok(ranked_inputs)
 }
 
 /// Prunes cached scored-input summaries to a central Hamming-distance percentile band with
@@ -7595,13 +7376,17 @@ fn run_sampled_avalanche_beam_search_cached(
             engine.avalanche_fitness_threshold,
         )?;
         println!(
-            "Avalanche fitness pass for batch {}: retained {} of {} cached scored inputs across up to {} r candidates and {} c^x inputs per r using {} LSB fitness bits (threshold-enabled {} threshold {})",
+            "Avalanche fitness pass for batch {}: retained {} of {} cached scored inputs in a globally ranked pool using {} LSB fitness bits with effective retained-input cap {} (r-limit {} cx-limit {}, threshold-enabled {} threshold {})",
             batch_number,
             preprocessed.len(),
             cached_input_total,
+            resolve_avalanche_fitness_bit_width(engine),
+            resolve_avalanche_fitness_retained_input_limit(
+                engine.avalanche_fitness_r_candidate_limit,
+                engine.avalanche_fitness_cx_candidate_limit,
+            ),
             engine.avalanche_fitness_r_candidate_limit,
             engine.avalanche_fitness_cx_candidate_limit,
-            resolve_avalanche_fitness_bit_width(engine),
             if engine.avalanche_fitness_use_threshold {
                 "on"
             } else {
@@ -8323,13 +8108,17 @@ fn run_sampled_avalanche_beam_search(
     let scored_inputs = if let Some(pass) = build_scored_avalanche_fitness_pass(engine) {
         let preprocessed = pass(scored_inputs.to_vec());
         println!(
-            "Avalanche fitness pass for batch {}: retained {} of {} scored inputs across up to {} r candidates and {} c^x inputs per r using {} LSB fitness bits (threshold-enabled {} threshold {})",
+            "Avalanche fitness pass for batch {}: retained {} of {} scored inputs in a globally ranked pool using {} LSB fitness bits with effective retained-input cap {} (r-limit {} cx-limit {}, threshold-enabled {} threshold {})",
             batch_number,
             preprocessed.len(),
             scored_inputs.len(),
+            resolve_avalanche_fitness_bit_width(engine),
+            resolve_avalanche_fitness_retained_input_limit(
+                engine.avalanche_fitness_r_candidate_limit,
+                engine.avalanche_fitness_cx_candidate_limit,
+            ),
             engine.avalanche_fitness_r_candidate_limit,
             engine.avalanche_fitness_cx_candidate_limit,
-            resolve_avalanche_fitness_bit_width(engine),
             if engine.avalanche_fitness_use_threshold {
                 "on"
             } else {
@@ -9812,6 +9601,14 @@ mod tests {
     }
 
     #[test]
+    fn test_resolve_avalanche_fitness_retained_input_limit_combines_limits() {
+        assert_eq!(resolve_avalanche_fitness_retained_input_limit(0, 0), 0);
+        assert_eq!(resolve_avalanche_fitness_retained_input_limit(3, 0), 3);
+        assert_eq!(resolve_avalanche_fitness_retained_input_limit(0, 4), 4);
+        assert_eq!(resolve_avalanche_fitness_retained_input_limit(3, 4), 12);
+    }
+
+    #[test]
     fn test_truncated_match_percentage_uses_reference_width() {
         let candidate = BigUint::from(0b1111_0000u8);
         let reference = biguint_to_bits_le(&BigUint::from(0b1110_0000u8), 4);
@@ -9920,6 +9717,52 @@ mod tests {
             .map(|input| (input.batch_candidate_index, input.message_index))
             .collect::<Vec<_>>();
         assert_eq!(retained_keys, vec![(0, 0)]);
+    }
+
+    #[test]
+    fn test_apply_scored_avalanche_fitness_pass_ranks_in_one_global_pool() {
+        let retained = apply_scored_avalanche_fitness_pass(
+            vec![
+                ScoredAvalancheInput {
+                    batch_candidate_index: 0,
+                    message_index: 0,
+                    r: BigUint::from(3u8),
+                    x: BigUint::from(1u8),
+                    score_match_pct: 92.0,
+                    message_bits: PackedBits::from_bools(&[false, false, false, false, true]),
+                    detail: None,
+                },
+                ScoredAvalancheInput {
+                    batch_candidate_index: 0,
+                    message_index: 1,
+                    r: BigUint::from(3u8),
+                    x: BigUint::from(3u8),
+                    score_match_pct: 88.0,
+                    message_bits: PackedBits::from_bools(&[false, false, false, true, true]),
+                    detail: None,
+                },
+                ScoredAvalancheInput {
+                    batch_candidate_index: 1,
+                    message_index: 0,
+                    r: BigUint::from(5u8),
+                    x: BigUint::from(1u8),
+                    score_match_pct: 40.0,
+                    message_bits: PackedBits::from_bools(&[false, true, true, true, true]),
+                    detail: None,
+                },
+            ],
+            4,
+            2,
+            1,
+            false,
+            0.580,
+        );
+
+        let retained_keys = retained
+            .iter()
+            .map(|input| (input.batch_candidate_index, input.message_index))
+            .collect::<Vec<_>>();
+        assert_eq!(retained_keys, vec![(0, 0), (0, 1)]);
     }
 
     #[test]
