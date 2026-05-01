@@ -302,7 +302,12 @@ impl Poly {
             return Self::constant(BigInt::zero());
         }
 
-        Self::new(self.coefficients.iter().map(|value| value * scalar).collect())
+        Self::new(
+            self.coefficients
+                .iter()
+                .map(|value| value * scalar)
+                .collect(),
+        )
     }
 
     /// Substitutes `x <- factor * x`.

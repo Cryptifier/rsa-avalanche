@@ -10,9 +10,9 @@ use num_traits::{One, Signed, ToPrimitive, Zero};
 use std::error::Error;
 use std::fmt::{Display, Formatter};
 
+use crate::math::cosine_bigdecimal;
 use crate::poly::Poly;
 use crate::polynomials::IntegerPolynomial;
-use crate::math::cosine_bigdecimal;
 
 /// Integer matrix used for lattice basis construction.
 pub type BigIntMatrix = Array2<BigInt>;
@@ -54,7 +54,11 @@ impl Display for LatticeMetricError {
                 f,
                 "frobenius inner product requires matching shapes, got ({left_rows}, {left_cols}) and ({right_rows}, {right_cols})"
             ),
-            Self::InconsistentRowLength { row, expected, actual } => write!(
+            Self::InconsistentRowLength {
+                row,
+                expected,
+                actual,
+            } => write!(
                 f,
                 "lattice row {row} has length {actual}, expected {expected}"
             ),
@@ -96,7 +100,11 @@ impl Display for LatticeTransformError {
             Self::NegativeDigits { digits } => {
                 write!(f, "decimal digit count must be non-negative, got {digits}")
             }
-            Self::InconsistentRowLength { row, expected, actual } => write!(
+            Self::InconsistentRowLength {
+                row,
+                expected,
+                actual,
+            } => write!(
                 f,
                 "lattice row {row} has length {actual}, expected {expected}"
             ),
@@ -151,7 +159,10 @@ impl Display for CoppersmithError {
                 "reduced basis column {column} could not be converted back to an unscaled polynomial"
             ),
             Self::UnknownPartExceedsPrime => {
-                write!(f, "rsa unknown part x must be less than or equal to prime p")
+                write!(
+                    f,
+                    "rsa unknown part x must be less than or equal to prime p"
+                )
             }
             Self::PrimeDoesNotDivideModulus => {
                 write!(f, "provided rsa prime p does not divide the modulus")
@@ -555,7 +566,8 @@ pub fn run_rsa_coppersmith(
         input.known_prefix.clone()
     };
     let bound = rsa_unknown_bound(&input.unknown_part);
-    let polynomial = IntegerPolynomial::new(vec![BigInt::from(known_prefix.clone()), BigInt::one()]);
+    let polynomial =
+        IntegerPolynomial::new(vec![BigInt::from(known_prefix.clone()), BigInt::one()]);
     let lattice = CoppersmithLatticeBuilder::new(input.modulus.clone(), polynomial)
         .with_bound(bound.clone())
         .with_exponent(input.m)
@@ -611,8 +623,8 @@ pub fn univariate_coppersmith(
     assert_eq!(f.coeff(d), BigInt::one(), "f(x) should be monic");
 
     let modulus = BigUint::try_from(n.clone()).expect("univariate_coppersmith requires n >= 0");
-    let bound = BigUint::try_from(x_bound.clone())
-        .expect("univariate_coppersmith requires x_bound >= 0");
+    let bound =
+        BigUint::try_from(x_bound.clone()).expect("univariate_coppersmith requires x_bound >= 0");
     let dimension = d
         .checked_mul(m)
         .and_then(|value| value.checked_add(t))
@@ -1039,12 +1051,13 @@ pub fn flatten_decimal_lattice_to_bigints(
         .map(|value| round_scaled_bigdecimal_to_bigint(value, digits))
         .collect();
 
-    Array2::from_shape_vec((matrix.nrows(), matrix.ncols()), quantized)
-        .map_err(|_| LatticeTransformError::InconsistentRowLength {
+    Array2::from_shape_vec((matrix.nrows(), matrix.ncols()), quantized).map_err(|_| {
+        LatticeTransformError::InconsistentRowLength {
             row: 0,
             expected: matrix.ncols(),
             actual: matrix.ncols(),
-        })
+        }
+    })
 }
 
 /// Flattens decimal row vectors back into integer vectors by rounding `value * 10^digits`.
@@ -1097,15 +1110,14 @@ pub fn as_matrix(vectors: &[BigIntVector]) -> BigIntMatrix {
 /// Converts decimal row vectors into an `ndarray` matrix.
 fn as_decimal_matrix(vectors: &[BigDecimalVector]) -> Result<BigDecimalMatrix, LatticeMetricError> {
     let (rows, cols) = validate_bigdecimal_vector_collection_shape_metric(vectors)?;
-    let flat: Vec<BigDecimal> = vectors
-        .iter()
-        .flat_map(|row| row.iter().cloned())
-        .collect();
+    let flat: Vec<BigDecimal> = vectors.iter().flat_map(|row| row.iter().cloned()).collect();
 
-    Array2::from_shape_vec((rows, cols), flat).map_err(|_| LatticeMetricError::InconsistentRowLength {
-        row: 0,
-        expected: cols,
-        actual: cols,
+    Array2::from_shape_vec((rows, cols), flat).map_err(|_| {
+        LatticeMetricError::InconsistentRowLength {
+            row: 0,
+            expected: cols,
+            actual: cols,
+        }
     })
 }
 
@@ -1114,15 +1126,14 @@ fn as_decimal_matrix_transform(
     vectors: &[BigDecimalVector],
 ) -> Result<BigDecimalMatrix, LatticeTransformError> {
     let (rows, cols) = validate_bigdecimal_vector_collection_shape_transform(vectors)?;
-    let flat: Vec<BigDecimal> = vectors
-        .iter()
-        .flat_map(|row| row.iter().cloned())
-        .collect();
+    let flat: Vec<BigDecimal> = vectors.iter().flat_map(|row| row.iter().cloned()).collect();
 
-    Array2::from_shape_vec((rows, cols), flat).map_err(|_| LatticeTransformError::InconsistentRowLength {
-        row: 0,
-        expected: cols,
-        actual: cols,
+    Array2::from_shape_vec((rows, cols), flat).map_err(|_| {
+        LatticeTransformError::InconsistentRowLength {
+            row: 0,
+            expected: cols,
+            actual: cols,
+        }
     })
 }
 
@@ -1268,8 +1279,8 @@ fn sine_bigdecimal(x: BigDecimal, digits: i64) -> BigDecimal {
     let x2 = &x * &x;
 
     for n in 1..20_000_i64 {
-        let denom = BigDecimal::from_i64((2 * n) * (2 * n + 1))
-            .expect("small sine series denominator");
+        let denom =
+            BigDecimal::from_i64((2 * n) * (2 * n + 1)).expect("small sine series denominator");
         term = -(&term * &x2) / denom;
         term = term.with_scale(digits + 16);
 
@@ -1494,7 +1505,10 @@ mod tests {
 
         assert_eq!(reduced.len(), 3);
         assert_eq!(reduced[0].len(), 3);
-        assert_eq!(dot_i(&reduced[0], &reduced[0]).sign(), num_bigint::Sign::Plus);
+        assert_eq!(
+            dot_i(&reduced[0], &reduced[0]).sign(),
+            num_bigint::Sign::Plus
+        );
     }
 
     #[test]
@@ -1589,7 +1603,9 @@ mod tests {
             [BigInt::from(1), BigInt::from(0)],
             [BigInt::from(0), BigInt::from(1)],
         ];
-        let theta = "1.57079632679489661923".parse::<BigDecimal>().expect("theta");
+        let theta = "1.57079632679489661923"
+            .parse::<BigDecimal>()
+            .expect("theta");
 
         let rotated = rotate_lattice_plane_bigdecimal(&basis, 0, 1, &theta, 18).expect("rotate");
         let flattened = flatten_decimal_lattice_to_bigints(&rotated, 0).expect("flatten");
@@ -1610,7 +1626,9 @@ mod tests {
             [BigInt::from(1), BigInt::from(0)],
         ];
         let reduced = lll_reduce(&basis);
-        let theta = "1.57079632679489661923".parse::<BigDecimal>().expect("theta");
+        let theta = "1.57079632679489661923"
+            .parse::<BigDecimal>()
+            .expect("theta");
 
         let rotated =
             rotate_lattice_vectors_plane_bigdecimal(&reduced, 0, 1, &theta, 18).expect("rotate");
@@ -1636,10 +1654,7 @@ mod tests {
 
         let flattened = flatten_decimal_lattice_to_bigints(&matrix, 3).expect("flatten");
 
-        assert_eq!(
-            flattened,
-            array![[BigInt::from(1235), BigInt::from(-6)]]
-        );
+        assert_eq!(flattened, array![[BigInt::from(1235), BigInt::from(-6)]]);
     }
 
     #[test]
@@ -1663,8 +1678,7 @@ mod tests {
     fn flatten_decimal_lattice_to_bigints_rejects_negative_digits() {
         let matrix = Array2::from_shape_vec((0, 0), Vec::<BigDecimal>::new()).expect("matrix");
 
-        let error =
-            flatten_decimal_lattice_to_bigints(&matrix, -1).expect_err("negative digits");
+        let error = flatten_decimal_lattice_to_bigints(&matrix, -1).expect_err("negative digits");
 
         assert_eq!(error, LatticeTransformError::NegativeDigits { digits: -1 });
     }
@@ -1728,13 +1742,8 @@ mod tests {
     fn univariate_coppersmith_finds_small_linear_root() {
         let polynomial = Poly::new(vec![BigInt::from(-3), BigInt::one()]);
 
-        let roots = univariate_coppersmith(
-            &polynomial,
-            &BigInt::from(97u8),
-            &BigInt::from(4u8),
-            2,
-            2,
-        );
+        let roots =
+            univariate_coppersmith(&polynomial, &BigInt::from(97u8), &BigInt::from(4u8), 2, 2);
 
         assert_eq!(roots, vec![BigInt::from(3)]);
     }
@@ -1743,13 +1752,8 @@ mod tests {
     fn univariate_coppersmith_finds_negative_root_inside_bound() {
         let polynomial = Poly::new(vec![BigInt::from(2), BigInt::one()]);
 
-        let roots = univariate_coppersmith(
-            &polynomial,
-            &BigInt::from(97u8),
-            &BigInt::from(3u8),
-            2,
-            2,
-        );
+        let roots =
+            univariate_coppersmith(&polynomial, &BigInt::from(97u8), &BigInt::from(3u8), 2, 2);
 
         assert_eq!(roots, vec![BigInt::from(-2)]);
     }
@@ -1795,7 +1799,8 @@ mod tests {
 
     #[test]
     fn coppersmith_builder_rejects_small_dimension() {
-        let polynomial = IntegerPolynomial::new(vec![BigInt::from(5), BigInt::zero(), BigInt::one()]);
+        let polynomial =
+            IntegerPolynomial::new(vec![BigInt::from(5), BigInt::zero(), BigInt::one()]);
         let error = CoppersmithLatticeBuilder::new(BigUint::from(91u8), polynomial)
             .with_bound(BigUint::from(4u8))
             .with_exponent(2)
