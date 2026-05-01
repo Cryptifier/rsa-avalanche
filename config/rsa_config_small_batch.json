@@ -70,7 +70,7 @@
     // Small-batch feature: score a large pool once, then draw many avalanche
     // combinations from that scored batch to estimate per-bit agreement.
     "analysis_batch_enable": true,
-    "analysis_batch_messages": 10000, // Number of ciphertext variants scored per batch before avalanche sampling.
+    "analysis_batch_messages": 5000, // Number of ciphertext variants scored per batch before avalanche sampling.
     "analysis_batch_candidates": 500, // Number of r candidates scored in each batch before sampling combinations.
     "analysis_batch_batches": 1, // Number of scored batches to run for the small-batch beam workflow.
     "sqlite_soft_heap": 10737418240,
@@ -84,7 +84,7 @@
     "avalanche_fitness_scoring_pass": true,
     "avalanche_fitness_shift_bytes": 8,
     "avalanche_fitness_bit_width": 64,
-    "avalanche_fitness_r_candidate_limit": 100, // Cap how many r candidates can be scored by the avalanche fitness function; set to 0 for no limit.
+    "avalanche_fitness_r_candidate_limit": 0, // Cap how many r candidates can be scored by the avalanche fitness function; set to 0 for no limit.
     "avalanche_fitness_cx_candidate_limit": 200, // Cap how many c^x variants per r candidate can be scored by the avalanche fitness function; set to 0 for no limit.
     "avalanche_fitness_use_threshold": false,
     "avalanche_fitness_threshold": 0.510,
