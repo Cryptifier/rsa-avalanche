@@ -90,11 +90,11 @@ pub struct AnalyticsCliArgs {
     pub avalanche_statistics_collection: bool,
     /// Whether sampled avalanche used direct ChaCha20 input sampling instead of mixed-r combinations.
     pub avalanche_random_chacha20_inputs: bool,
-    /// Whether sampled avalanche applies the trailing-zero fitness preprocessing pass.
+    /// Whether sampled avalanche applies the zero-count fitness preprocessing pass.
     pub avalanche_fitness_scoring_pass: bool,
     /// Number of bytes used to shift plaintexts before candidate scoring.
     pub avalanche_fitness_shift_bytes: usize,
-    /// Number of least-significant bits inspected by the trailing-zero fitness score.
+    /// Number of least-significant bits inspected by the zero-count fitness score.
     pub avalanche_fitness_bit_width: usize,
     /// Maximum number of retained r-candidate groups after fitness preprocessing.
     pub avalanche_fitness_r_candidate_limit: usize,

@@ -200,13 +200,13 @@ pub struct EngineConfig {
     /// Whether sampled avalanche bypasses mixed-r combinations and samples raw scored inputs with ChaCha20.
     #[serde(default = "default_avalanche_random_chacha20_inputs")]
     pub avalanche_random_chacha20_inputs: bool,
-    /// Whether sampled avalanche applies the trailing-zero fitness pass before sampling.
+    /// Whether sampled avalanche applies the zero-count fitness pass before sampling.
     #[serde(default = "default_avalanche_fitness_scoring_pass")]
     pub avalanche_fitness_scoring_pass: bool,
     /// Number of bytes to left-shift the plaintext before candidate scoring to create the LSB fitness slice.
     #[serde(default = "default_avalanche_fitness_shift_bytes")]
     pub avalanche_fitness_shift_bytes: usize,
-    /// Number of least-significant bits inspected when computing trailing-zero fitness.
+    /// Number of least-significant bits inspected when computing zero-count fitness.
     #[serde(default = "default_avalanche_fitness_bit_width")]
     pub avalanche_fitness_bit_width: usize,
     /// Maximum number of r-candidate groups retained by the fitness pass; `0` keeps every group.
@@ -218,7 +218,7 @@ pub struct EngineConfig {
     /// Whether the fitness pass drops candidates whose normalized fitness falls below the configured threshold.
     #[serde(default = "default_avalanche_fitness_use_threshold")]
     pub avalanche_fitness_use_threshold: bool,
-    /// Minimum normalized trailing-zero fitness retained by the fitness pass when thresholding is enabled.
+    /// Minimum normalized zero-count fitness retained by the fitness pass when thresholding is enabled.
     #[serde(default = "default_avalanche_fitness_threshold")]
     pub avalanche_fitness_threshold: f64,
     #[serde(default = "default_same_r_batch")]
@@ -1418,7 +1418,7 @@ fn default_avalanche_statistics_collection() -> bool {
     true
 }
 
-/// Default flag for enabling the trailing-zero fitness preprocessing pass.
+/// Default flag for enabling the zero-count fitness preprocessing pass.
 ///
 /// # Parameters
 /// - None.
@@ -1446,7 +1446,7 @@ fn default_avalanche_fitness_shift_bytes() -> usize {
     0
 }
 
-/// Default trailing-zero fitness window width.
+/// Default zero-count fitness window width.
 ///
 /// # Parameters
 /// - None.
@@ -1508,7 +1508,7 @@ fn default_avalanche_fitness_use_threshold() -> bool {
 /// - None.
 ///
 /// # Returns
-/// - `f64`: Default minimum normalized trailing-zero fitness.
+/// - `f64`: Default minimum normalized zero-count fitness.
 ///
 /// # Expected Output
 /// - Returns a constant default value; no side effects.

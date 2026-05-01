@@ -1052,7 +1052,7 @@ fn resolve_avalanche_fitness_shift_bits(engine: &EngineConfig) -> usize {
     engine.avalanche_fitness_shift_bytes.saturating_mul(8)
 }
 
-/// Resolves the trailing-zero fitness window width capped to the effective avalanche width.
+/// Resolves the zero-count fitness window width capped to the effective avalanche width.
 ///
 /// # Parameters
 /// - `engine`: Engine configuration containing the configured fitness window size.
@@ -1123,30 +1123,28 @@ fn transform_message_for_candidate_scoring(
     Ok(transformed)
 }
 
-/// Counts consecutive zero bits starting at the least-significant bit up to a fixed width.
+/// Counts zero bits within the least-significant fitness window up to a fixed width.
 ///
 /// # Parameters
 /// - `bits`: Packed candidate bits scored from the least-significant side.
 /// - `width`: Maximum number of LSBs to inspect.
 ///
 /// # Returns
-/// - `usize`: Trailing-zero run length capped to `width`.
+/// - `usize`: Zero-bit count within the inspected LSB window.
 ///
 /// # Expected Output
 /// - Returns the computed fitness value; no stdout/stderr output.
-fn lsb_zero_fitness(bits: &PackedBits, width: usize) -> usize {
+fn lsb_zero_count_fitness(bits: &PackedBits, width: usize) -> usize {
     let capped_width = width.min(bits.len());
-    let mut fitness = 0usize;
-    while fitness < capped_width && !bits.bit(fitness) {
-        fitness += 1;
-    }
-    fitness
+    (0..capped_width)
+        .filter(|bit_index| !bits.bit(*bit_index))
+        .count()
 }
 
-/// Converts the integer trailing-zero fitness score into a normalized `[0, 1]` ratio.
+/// Converts the integer zero-count fitness score into a normalized `[0, 1]` ratio.
 ///
 /// # Parameters
-/// - `fitness_score`: Raw trailing-zero fitness count retained for one candidate.
+/// - `fitness_score`: Raw zero-count fitness retained for one candidate.
 /// - `fitness_bit_width`: Number of least-significant bits considered by the fitness pass.
 ///
 /// # Returns
@@ -5341,15 +5339,15 @@ fn build_scored_avalanche_fitness_pass(
     }))
 }
 
-/// Applies the trailing-zero fitness pass to scored Avalanche inputs.
+/// Applies the zero-count fitness pass to scored Avalanche inputs.
 ///
 /// # Parameters
 /// - `inputs`: Flattened scored inputs to rank and downselect.
-/// - `fitness_bit_width`: Number of least-significant bits used for the trailing-zero fitness score.
+/// - `fitness_bit_width`: Number of least-significant bits used for the zero-count fitness score.
 /// - `r_candidate_limit`: Maximum number of retained r-candidate groups; `0` keeps every group.
 /// - `cx_candidate_limit`: Maximum number of retained `c^x` inputs per r group; `0` keeps every input.
 /// - `use_fitness_threshold`: Whether candidates below the normalized threshold should be dropped.
-/// - `fitness_threshold`: Minimum normalized trailing-zero fitness required when thresholding is enabled.
+/// - `fitness_threshold`: Minimum normalized zero-count fitness required when thresholding is enabled.
 ///
 /// # Returns
 /// - `Vec<ScoredAvalancheInput>`: Fitness-ranked and truncated scored inputs.
@@ -5412,7 +5410,7 @@ fn apply_scored_avalanche_fitness_pass(
             let mut ranked_inputs = group_inputs
                 .into_iter()
                 .map(|input| RankedInput {
-                    fitness_score: lsb_zero_fitness(&input.message_bits, fitness_bit_width),
+                    fitness_score: lsb_zero_count_fitness(&input.message_bits, fitness_bit_width),
                     input,
                 })
                 .filter(|input| {
@@ -5505,10 +5503,14 @@ fn apply_scored_avalanche_fitness_pass(
             .then_with(|| left.batch_candidate_index.cmp(&right.batch_candidate_index))
     });
     if let Some(best_r_group) = ranked_groups.first() {
+        let best_fitness_pct =
+            normalize_avalanche_fitness_score(best_r_group.best_fitness_score, fitness_bit_width)
+                * 100.0;
         println!(
-            "Avalanche fitness maxima: best r candidate batch-index {} fitness {} total-fitness {} best-match {}%",
+            "Avalanche fitness maxima: best r candidate batch-index {} fitness {} ({}%) total-fitness {} best-match {}%",
             best_r_group.batch_candidate_index,
             best_r_group.best_fitness_score,
+            format_beam_float(best_fitness_pct, BEAM_PCT_DECIMALS),
             best_r_group.total_fitness_score,
             format_beam_float(best_r_group.best_match_score, BEAM_PCT_DECIMALS),
         );
@@ -5540,12 +5542,16 @@ fn apply_scored_avalanche_fitness_pass(
                 .then_with(|| right_input.input.x.cmp(&left_input.input.x))
         })
     {
+        let best_fitness_pct =
+            normalize_avalanche_fitness_score(best_cx_input.fitness_score, fitness_bit_width)
+                * 100.0;
         println!(
-            "Avalanche fitness maxima: best c^x candidate batch-index {} message-index {} x {} fitness {} match {}%",
+            "Avalanche fitness maxima: best c^x candidate batch-index {} message-index {} x {} fitness {} ({}%) match {}%",
             best_cx_group.batch_candidate_index,
             best_cx_input.input.message_index,
             best_cx_input.input.x,
             best_cx_input.fitness_score,
+            format_beam_float(best_fitness_pct, BEAM_PCT_DECIMALS),
             format_beam_float(best_cx_input.input.score_match_pct, BEAM_PCT_DECIMALS),
         );
     }
@@ -5992,16 +5998,16 @@ fn load_cached_scored_input_summaries(
     .map_err(|err| -> Box<dyn Error> { err.into() })
 }
 
-/// Applies the trailing-zero fitness pass to cached scored Avalanche inputs.
+/// Applies the zero-count fitness pass to cached scored Avalanche inputs.
 ///
 /// # Parameters
 /// - `cache`: Shared SQLite cache wrapper.
 /// - `batch_number`: One-based analysis batch number.
-/// - `fitness_bit_width`: Number of least-significant bits used for the trailing-zero fitness score.
+/// - `fitness_bit_width`: Number of least-significant bits used for the zero-count fitness score.
 /// - `r_candidate_limit`: Maximum number of retained r-candidate groups; `0` keeps every group.
 /// - `cx_candidate_limit`: Maximum number of retained `c^x` inputs per r group; `0` keeps every input.
 /// - `use_fitness_threshold`: Whether candidates below the normalized threshold should be dropped.
-/// - `fitness_threshold`: Minimum normalized trailing-zero fitness required when thresholding is enabled.
+/// - `fitness_threshold`: Minimum normalized zero-count fitness required when thresholding is enabled.
 ///
 /// # Returns
 /// - `Result<Vec<CachedScoredInputSummary>, Box<dyn Error>>`: Fitness-ranked and truncated cached summaries.
@@ -6064,7 +6070,7 @@ fn apply_cached_scored_avalanche_fitness_pass(
                             .x_text
                             .parse::<BigUint>()
                             .map_err(|err| err.to_string())?,
-                        fitness_score: lsb_zero_fitness(
+                        fitness_score: lsb_zero_count_fitness(
                             &PackedBits::from_bytes_le(&row.message_bits, message_bit_len),
                             fitness_bit_width,
                         ),
@@ -6215,10 +6221,14 @@ fn apply_cached_scored_avalanche_fitness_pass(
             .then_with(|| left.batch_candidate_index.cmp(&right.batch_candidate_index))
     });
     if let Some(best_r_group) = ranked_groups.first() {
+        let best_fitness_pct =
+            normalize_avalanche_fitness_score(best_r_group.best_fitness_score, fitness_bit_width)
+                * 100.0;
         println!(
-            "Avalanche fitness maxima: best cached r candidate batch-index {} fitness {} total-fitness {} best-match {}%",
+            "Avalanche fitness maxima: best cached r candidate batch-index {} fitness {} ({}%) total-fitness {} best-match {}%",
             best_r_group.batch_candidate_index,
             best_r_group.best_fitness_score,
+            format_beam_float(best_fitness_pct, BEAM_PCT_DECIMALS),
             best_r_group.total_fitness_score,
             format_beam_float(best_r_group.best_match_score, BEAM_PCT_DECIMALS),
         );
@@ -6244,12 +6254,16 @@ fn apply_cached_scored_avalanche_fitness_pass(
                 .then_with(|| right_input.x.cmp(&left_input.x))
         })
     {
+        let best_fitness_pct =
+            normalize_avalanche_fitness_score(best_cx_input.fitness_score, fitness_bit_width)
+                * 100.0;
         println!(
-            "Avalanche fitness maxima: best cached c^x candidate batch-index {} message-index {} x {} fitness {} match {}%",
+            "Avalanche fitness maxima: best cached c^x candidate batch-index {} message-index {} x {} fitness {} ({}%) match {}%",
             best_cx_group.batch_candidate_index,
             best_cx_input.message_index,
             best_cx_input.x,
             best_cx_input.fitness_score,
+            format_beam_float(best_fitness_pct, BEAM_PCT_DECIMALS),
             format_beam_float(best_cx_input.score_match_pct, BEAM_PCT_DECIMALS),
         );
     }
@@ -9791,10 +9805,10 @@ mod tests {
     }
 
     #[test]
-    fn test_lsb_zero_fitness_counts_trailing_zero_window() {
-        let bits = PackedBits::from_bools(&[false, false, false, true, true, false]);
-        assert_eq!(lsb_zero_fitness(&bits, 5), 3);
-        assert_eq!(lsb_zero_fitness(&bits, 2), 2);
+    fn test_lsb_zero_count_fitness_counts_zero_bits_in_window() {
+        let bits = PackedBits::from_bools(&[false, true, false, false, true, false]);
+        assert_eq!(lsb_zero_count_fitness(&bits, 5), 3);
+        assert_eq!(lsb_zero_count_fitness(&bits, 2), 1);
     }
 
     #[test]
@@ -9869,6 +9883,43 @@ mod tests {
             .map(|input| (input.batch_candidate_index, input.message_index))
             .collect::<Vec<_>>();
         assert_eq!(retained_keys, vec![(0, 0), (1, 0)]);
+    }
+
+    #[test]
+    fn test_apply_scored_avalanche_fitness_pass_prefers_total_zero_count_over_trailing_run() {
+        let retained = apply_scored_avalanche_fitness_pass(
+            vec![
+                ScoredAvalancheInput {
+                    batch_candidate_index: 0,
+                    message_index: 0,
+                    r: BigUint::from(3u8),
+                    x: BigUint::from(1u8),
+                    score_match_pct: 80.0,
+                    message_bits: PackedBits::from_bools(&[false, true, false, false, true]),
+                    detail: None,
+                },
+                ScoredAvalancheInput {
+                    batch_candidate_index: 1,
+                    message_index: 0,
+                    r: BigUint::from(5u8),
+                    x: BigUint::from(1u8),
+                    score_match_pct: 70.0,
+                    message_bits: PackedBits::from_bools(&[false, false, true, true, true]),
+                    detail: None,
+                },
+            ],
+            4,
+            1,
+            1,
+            false,
+            0.580,
+        );
+
+        let retained_keys = retained
+            .iter()
+            .map(|input| (input.batch_candidate_index, input.message_index))
+            .collect::<Vec<_>>();
+        assert_eq!(retained_keys, vec![(0, 0)]);
     }
 
     #[test]
