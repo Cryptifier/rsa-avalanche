@@ -10,8 +10,9 @@ use bigdecimal::BigDecimal;
 use clap::Parser;
 use rsademo::analytics::{AnalyticsCliArgs, SessionAnalytics};
 use rsademo::config::load_config;
+use rsademo::database::cleanup_avalanche_cache_db;
 use rsademo::logs::write_session_log;
-use rsademo::methods::{DemoArgs, cleanup_avalanche_cache_db, run_demo};
+use rsademo::methods::{DemoArgs, run_demo};
 
 #[derive(Parser, Debug)]
 #[command(
