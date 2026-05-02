@@ -7,10 +7,10 @@ use diesel::prelude::*;
 use diesel::r2d2::{ConnectionManager, CustomizeConnection, Error as R2D2Error, Pool};
 use diesel::sql_query;
 use std::{
-    collections::{BTreeMap, HashMap, HashSet},
+    collections::{HashMap, HashSet},
     error::Error,
     fs,
-    path::PathBuf,
+    path::{Path, PathBuf},
     sync::{
         Arc, Mutex,
         atomic::{AtomicU64, Ordering},
@@ -86,7 +86,6 @@ pub struct DemoArgs {
 type AvalancheSqlitePool = Pool<ConnectionManager<SqliteConnection>>;
 
 const AVALANCHE_CACHE_FLUSH_BYTES: usize = 1 << 30;
-const AVALANCHE_CACHE_PAGE_ROWS: i64 = 4_096;
 
 diesel::table! {
     avalanche_cache_inputs (id) {
@@ -233,6 +232,44 @@ struct AvalancheSqliteSettings {
     mmap_size_bytes: i64,
 }
 
+#[derive(Debug, Default, Clone, Copy)]
+struct CachedPageLoadTiming {
+    connection_wait: Duration,
+    sql_query: Duration,
+    row_decode: Duration,
+}
+
+impl CachedPageLoadTiming {
+    /// Returns the total elapsed time captured by the timing breakdown.
+    ///
+    /// # Parameters
+    /// - None.
+    ///
+    /// # Returns
+    /// - `Duration`: Sum of connection wait, SQL execution, and row decoding.
+    ///
+    /// # Expected Output
+    /// - Returns the aggregated timing without side effects.
+    fn total(self) -> Duration {
+        self.connection_wait + self.sql_query + self.row_decode
+    }
+}
+
+impl std::ops::AddAssign for CachedPageLoadTiming {
+    fn add_assign(&mut self, rhs: Self) {
+        self.connection_wait += rhs.connection_wait;
+        self.sql_query += rhs.sql_query;
+        self.row_decode += rhs.row_decode;
+    }
+}
+
+#[derive(Debug)]
+struct CachedKeysetPage<T> {
+    items: Vec<T>,
+    last_row_id: Option<i64>,
+    timing: CachedPageLoadTiming,
+}
+
 #[derive(Debug, Clone, Copy)]
 struct AvalancheSqliteConnectionCustomizer {
     settings: AvalancheSqliteSettings,
@@ -300,32 +337,71 @@ impl CustomizeConnection<SqliteConnection, R2D2Error> for AvalancheSqliteConnect
     }
 }
 
+/// Normalizes the configured SQLite cache folder for temporary Avalanche databases.
+///
+/// # Parameters
+/// - `db_folder`: Configured filesystem folder for the SQLite cache database.
+///
+/// # Returns
+/// - `PathBuf`: Normalized cache folder path.
+///
+/// # Expected Output
+/// - Returns the configured folder or `/tmp` when the configured value is blank.
+fn normalize_avalanche_cache_db_folder(db_folder: &str) -> PathBuf {
+    let trimmed = db_folder.trim();
+    if trimmed.is_empty() {
+        PathBuf::from("/tmp")
+    } else {
+        PathBuf::from(trimmed)
+    }
+}
+
 /// Resolves the on-disk SQLite path used for the temporary Avalanche cache.
 ///
 /// # Parameters
 /// - `seed`: Optional deterministic analysis seed used to key the cache filename.
+/// - `db_folder`: Configured filesystem folder for the SQLite cache database.
 ///
 /// # Returns
-/// - `PathBuf`: Cache path in `/tmp` using the configured or fallback seed.
+/// - `PathBuf`: Cache path in the configured folder using the configured or fallback seed.
 ///
 /// # Expected Output
 /// - Returns a deterministic filesystem path; no stdout/stderr output.
-pub fn resolve_avalanche_cache_db_path(seed: Option<u64>) -> PathBuf {
-    PathBuf::from(format!("/tmp/rsa_avalanche_{}.db", seed.unwrap_or(0)))
+pub fn resolve_avalanche_cache_db_path(seed: Option<u64>, db_folder: &str) -> PathBuf {
+    normalize_avalanche_cache_db_folder(db_folder)
+        .join(format!("rsa_avalanche_{}.db", seed.unwrap_or(0)))
+}
+
+/// Creates the parent directory tree for the Avalanche cache database path.
+///
+/// # Parameters
+/// - `path`: Full SQLite database path whose parent directory must exist.
+///
+/// # Returns
+/// - `Result<(), Box<dyn Error>>`: `Ok(())` when the parent directory tree exists.
+///
+/// # Expected Output
+/// - Creates intermediate directories for the database parent path when needed.
+fn ensure_avalanche_cache_db_parent_dir(path: &Path) -> Result<(), Box<dyn Error>> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    Ok(())
 }
 
 /// Removes the temporary Avalanche cache file if it exists.
 ///
 /// # Parameters
 /// - `seed`: Optional deterministic analysis seed used to key the cache filename.
+/// - `db_folder`: Configured filesystem folder for the SQLite cache database.
 ///
 /// # Returns
 /// - `()`: This function returns nothing.
 ///
 /// # Expected Output
 /// - Deletes the cache file when present; no stdout/stderr output.
-pub fn cleanup_avalanche_cache_db(seed: Option<u64>) {
-    let path = resolve_avalanche_cache_db_path(seed);
+pub fn cleanup_avalanche_cache_db(seed: Option<u64>, db_folder: &str) {
+    let path = resolve_avalanche_cache_db_path(seed, db_folder);
     if path.exists() {
         let _ = fs::remove_file(path);
     }
@@ -344,6 +420,7 @@ pub fn cleanup_avalanche_cache_db(seed: Option<u64>) {
 struct AvalancheCacheGuard {
     path: PathBuf,
     pool: Option<AvalancheSqlitePool>,
+    page_rows: i64,
 }
 
 impl AvalancheCacheGuard {
@@ -357,17 +434,20 @@ impl AvalancheCacheGuard {
     /// - `Result<AvalancheCacheGuard, Box<dyn Error>>`: Ready-to-use cache wrapper.
     ///
     /// # Expected Output
-    /// - Creates the SQLite database under `/tmp` and initializes runtime tables.
+    /// - Creates the SQLite database under the configured folder, creating parent directories as needed.
     fn new(seed: Option<u64>, engine: &EngineConfig) -> Result<Self, Box<dyn Error>> {
-        let path = resolve_avalanche_cache_db_path(seed);
+        let path = resolve_avalanche_cache_db_path(seed, &engine.sqlite_db_folder);
+        ensure_avalanche_cache_db_parent_dir(&path)?;
         if path.exists() {
             let _ = fs::remove_file(&path);
         }
+        let page_rows = i64::try_from(engine.sqlite_avalanche_page_size.max(1))
+            .map_err(|_| "engine.sqlite_avalanche_page_size exceeds i64 range")?;
         let settings = resolve_avalanche_sqlite_settings(engine)?;
         let manager =
             ConnectionManager::<SqliteConnection>::new(path.to_string_lossy().to_string());
         let pool = Pool::builder()
-            .max_size(16)
+            .max_size(engine.sqlite_worker_count)
             .connection_customizer(Box::new(AvalancheSqliteConnectionCustomizer { settings }))
             .build(manager)?;
         let mut connection = pool.get()?;
@@ -391,6 +471,11 @@ impl AvalancheCacheGuard {
         sql_query(
             "CREATE INDEX IF NOT EXISTS avalanche_cache_inputs_batch_idx
                 ON avalanche_cache_inputs (batch_number, batch_candidate_index, message_index)",
+        )
+        .execute(&mut connection)?;
+        sql_query(
+            "CREATE INDEX IF NOT EXISTS avalanche_cache_inputs_batch_id_idx
+                ON avalanche_cache_inputs (batch_number, id)",
         )
         .execute(&mut connection)?;
         sql_query(
@@ -424,6 +509,7 @@ impl AvalancheCacheGuard {
         Ok(Self {
             path,
             pool: Some(pool),
+            page_rows,
         })
     }
 
@@ -441,6 +527,34 @@ impl AvalancheCacheGuard {
         self.pool
             .as_ref()
             .ok_or_else(|| "avalanche cache pool is unavailable".into())
+    }
+
+    /// Returns the configured SQLite Avalanche cache page size as a row count.
+    ///
+    /// # Parameters
+    /// - None.
+    ///
+    /// # Returns
+    /// - `usize`: Positive page size in rows.
+    ///
+    /// # Expected Output
+    /// - Returns the normalized cached page size; no stdout/stderr output.
+    fn page_rows_usize(&self) -> usize {
+        usize::try_from(self.page_rows).unwrap_or(1)
+    }
+
+    /// Returns the configured SQLite Avalanche cache page size as an `i64`.
+    ///
+    /// # Parameters
+    /// - None.
+    ///
+    /// # Returns
+    /// - `i64`: Positive page size in rows.
+    ///
+    /// # Expected Output
+    /// - Returns the normalized cached page size; no stdout/stderr output.
+    fn page_rows_i64(&self) -> i64 {
+        self.page_rows
     }
 
     /// Deletes cached inputs and samples for one analysis batch.
@@ -616,7 +730,7 @@ fn deserialize_scored_avalanche_input_row(
     })
 }
 
-/// Inserts scored Avalanche inputs into the SQLite cache in one batch.
+/// Inserts scored Avalanche inputs into the SQLite cache in page-sized batches.
 ///
 /// # Parameters
 /// - `cache`: Shared SQLite cache wrapper.
@@ -627,7 +741,7 @@ fn deserialize_scored_avalanche_input_row(
 /// - `Result<(), Box<dyn Error>>`: `Ok(())` on success.
 ///
 /// # Expected Output
-/// - Writes input rows to SQLite using one Diesel insert batch.
+/// - Writes input rows to SQLite using page-sized Diesel insert batches.
 fn insert_cached_scored_inputs(
     cache: &AvalancheCacheGuard,
     batch_number: usize,
@@ -641,41 +755,55 @@ fn insert_cached_scored_inputs(
         .map(|input| serialize_scored_avalanche_input_for_cache(batch_number, input))
         .collect::<Result<Vec<_>, _>>()?;
     let mut connection = cache.pool()?.get()?;
-    diesel::insert_into(avalanche_cache_inputs::table)
-        .values(&rows)
-        .execute(&mut connection)?;
+    for row_chunk in rows.chunks(cache.page_rows_usize().max(1)) {
+        diesel::insert_into(avalanche_cache_inputs::table)
+            .values(row_chunk)
+            .execute(&mut connection)?;
+    }
     Ok(())
 }
 
-/// Loads one page of cached scored-input rows for a batch.
+/// Loads one keyset page of cached scored-input rows for a batch.
 ///
 /// # Parameters
 /// - `cache`: Shared SQLite cache wrapper.
 /// - `batch_number`: One-based analysis batch number.
-/// - `offset_rows`: Number of rows to skip before reading.
+/// - `after_row_id`: Optional last-seen row id from the prior page.
 /// - `limit_rows`: Maximum rows to return.
 ///
 /// # Returns
-/// - `Result<Vec<CachedAvalancheInputRow>, Box<dyn Error>>`: One page of cached input rows.
+/// - `Result<(Vec<CachedAvalancheInputRow>, CachedPageLoadTiming), Box<dyn Error>>`: One page of
+///   cached input rows plus connection/sql timing.
 ///
 /// # Expected Output
-/// - Reads a bounded page of cached rows from SQLite.
-fn load_cached_scored_input_rows_page(
+/// - Reads a bounded page of cached rows from SQLite ordered by increasing row id.
+fn load_cached_scored_input_rows_after_id_page(
     cache: &AvalancheCacheGuard,
     batch_number: usize,
-    offset_rows: i64,
+    after_row_id: Option<i64>,
     limit_rows: i64,
-) -> Result<Vec<CachedAvalancheInputRow>, Box<dyn Error>> {
+) -> Result<(Vec<CachedAvalancheInputRow>, CachedPageLoadTiming), Box<dyn Error>> {
     let batch_number = i32::try_from(batch_number).map_err(|_| "batch number exceeds i32 range")?;
+    let connection_wait_start = Instant::now();
     let mut connection = cache.pool()?.get()?;
+    let connection_wait = connection_wait_start.elapsed();
+    let sql_query_start = Instant::now();
     let rows = avalanche_cache_inputs::table
         .filter(avalanche_cache_inputs::batch_number.eq(batch_number))
+        .filter(avalanche_cache_inputs::id.gt(after_row_id.unwrap_or(0)))
         .order(avalanche_cache_inputs::id.asc())
         .limit(limit_rows)
-        .offset(offset_rows)
         .select(CachedAvalancheInputRow::as_select())
         .load::<CachedAvalancheInputRow>(&mut connection)?;
-    Ok(rows)
+    let sql_query = sql_query_start.elapsed();
+    Ok((
+        rows,
+        CachedPageLoadTiming {
+            connection_wait,
+            sql_query,
+            row_decode: Duration::ZERO,
+        },
+    ))
 }
 
 /// Loads raw cached scored-input rows for a selected id set.
@@ -821,7 +949,7 @@ fn serialize_selected_sample_for_cache(
 /// - `Result<(), Box<dyn Error>>`: `Ok(())` on success.
 ///
 /// # Expected Output
-/// - Writes finalized sample rows to SQLite.
+/// - Writes finalized sample rows to SQLite using page-sized Diesel insert batches.
 fn insert_cached_selected_samples(
     cache: &AvalancheCacheGuard,
     batch_number: usize,
@@ -836,9 +964,11 @@ fn insert_cached_selected_samples(
         .map(|sample| serialize_selected_sample_for_cache(batch_number, sample, engine))
         .collect::<Result<Vec<_>, _>>()?;
     let mut connection = cache.pool()?.get()?;
-    diesel::insert_into(avalanche_cache_samples::table)
-        .values(&rows)
-        .execute(&mut connection)?;
+    for row_chunk in rows.chunks(cache.page_rows_usize().max(1)) {
+        diesel::insert_into(avalanche_cache_samples::table)
+            .values(row_chunk)
+            .execute(&mut connection)?;
+    }
     Ok(())
 }
 
@@ -1052,7 +1182,7 @@ fn resolve_avalanche_fitness_shift_bits(engine: &EngineConfig) -> usize {
     engine.avalanche_fitness_shift_bytes.saturating_mul(8)
 }
 
-/// Resolves the trailing-zero fitness window width capped to the effective avalanche width.
+/// Resolves the zero-count fitness window width capped to the effective avalanche width.
 ///
 /// # Parameters
 /// - `engine`: Engine configuration containing the configured fitness window size.
@@ -1123,30 +1253,28 @@ fn transform_message_for_candidate_scoring(
     Ok(transformed)
 }
 
-/// Counts consecutive zero bits starting at the least-significant bit up to a fixed width.
+/// Counts zero bits within the least-significant fitness window up to a fixed width.
 ///
 /// # Parameters
 /// - `bits`: Packed candidate bits scored from the least-significant side.
 /// - `width`: Maximum number of LSBs to inspect.
 ///
 /// # Returns
-/// - `usize`: Trailing-zero run length capped to `width`.
+/// - `usize`: Zero-bit count within the inspected LSB window.
 ///
 /// # Expected Output
 /// - Returns the computed fitness value; no stdout/stderr output.
-fn lsb_zero_fitness(bits: &PackedBits, width: usize) -> usize {
+fn lsb_zero_count_fitness(bits: &PackedBits, width: usize) -> usize {
     let capped_width = width.min(bits.len());
-    let mut fitness = 0usize;
-    while fitness < capped_width && !bits.bit(fitness) {
-        fitness += 1;
-    }
-    fitness
+    (0..capped_width)
+        .filter(|bit_index| !bits.bit(*bit_index))
+        .count()
 }
 
-/// Converts the integer trailing-zero fitness score into a normalized `[0, 1]` ratio.
+/// Converts the integer zero-count fitness score into a normalized `[0, 1]` ratio.
 ///
 /// # Parameters
-/// - `fitness_score`: Raw trailing-zero fitness count retained for one candidate.
+/// - `fitness_score`: Raw zero-count fitness retained for one candidate.
 /// - `fitness_bit_width`: Number of least-significant bits considered by the fitness pass.
 ///
 /// # Returns
@@ -1160,6 +1288,29 @@ fn normalize_avalanche_fitness_score(fitness_score: usize, fitness_bit_width: us
     }
 
     fitness_score as f64 / fitness_bit_width as f64
+}
+
+/// Resolves the retained-input cap for the global Avalanche fitness pool.
+///
+/// # Parameters
+/// - `r_candidate_limit`: Configured primary retention dimension for the fitness pass.
+/// - `cx_candidate_limit`: Configured secondary retention dimension for the fitness pass.
+///
+/// # Returns
+/// - `usize`: Maximum number of globally ranked inputs to retain, or `0` for no cap.
+///
+/// # Expected Output
+/// - Returns the derived pool cap with no side effects.
+fn resolve_avalanche_fitness_retained_input_limit(
+    r_candidate_limit: usize,
+    cx_candidate_limit: usize,
+) -> usize {
+    match (r_candidate_limit, cx_candidate_limit) {
+        (0, 0) => 0,
+        (0, cx_limit) => cx_limit,
+        (r_limit, 0) => r_limit,
+        (r_limit, cx_limit) => r_limit.saturating_mul(cx_limit),
+    }
 }
 
 /// Validates the configured normalized Avalanche fitness threshold when thresholding is enabled.
@@ -1826,67 +1977,90 @@ fn parallel_progress_chunk_size(total_items: usize) -> usize {
     total_items.div_ceil(target_chunks).max(1)
 }
 
-/// Loads cached scored-input pages in parallel while preserving page order.
+/// Loads cached scored-input pages with keyset pagination and detailed timing logs.
 ///
 /// # Parameters
 /// - `total_rows`: Total cached row count expected from the scan.
 /// - `progress_label`: Human-readable label used for interval progress logging.
-/// - `load_page`: Callback that loads and decodes one page starting at the provided row offset.
+/// - `load_page`: Callback that loads and decodes one page after the provided row id cursor.
 ///
 /// # Returns
 /// - `Result<Vec<T>, String>`: Flattened decoded page items in page order.
 ///
 /// # Expected Output
-/// - Prints interval progress updates while loading cached pages and returns the decoded items.
-fn load_cached_scored_input_pages_in_parallel<T, F>(
+/// - Prints interval progress plus connection/sql/decode timing summaries while loading cached pages.
+fn load_cached_scored_input_pages_with_progress<T, F>(
     total_rows: usize,
+    page_rows: usize,
     progress_label: &str,
-    load_page: F,
+    mut load_page: F,
 ) -> Result<Vec<T>, String>
 where
-    T: Send,
-    F: Fn(i64) -> Result<Vec<T>, String> + Sync + Send,
+    F: FnMut(Option<i64>) -> Result<CachedKeysetPage<T>, String>,
 {
     if total_rows == 0 {
         return Ok(Vec::new());
     }
 
-    let page_rows = usize::try_from(AVALANCHE_CACHE_PAGE_ROWS)
-        .map_err(|_| "AVALANCHE_CACHE_PAGE_ROWS exceeds usize range".to_string())?
-        .max(1);
+    let page_rows = page_rows.max(1);
     let total_pages = total_rows.div_ceil(page_rows);
-    println!("{progress_label}: loading {total_pages} cached page(s)");
+    println!("{progress_label}: loading {total_pages} cached page(s) via keyset pagination");
 
-    let progress_total = total_pages.min(u64::MAX as usize) as u64;
     let progress_started_at = Instant::now();
-    let progress_done = AtomicU64::new(0);
-    let progress_next_log_at_ms =
-        AtomicU64::new(Duration::from_secs(5).as_millis().min(u128::from(u64::MAX)) as u64);
-    let mut page_items = (0..total_pages)
-        .into_par_iter()
-        .map(|page_index| {
-            let offset_rows = i64::try_from(page_index.saturating_mul(page_rows))
-                .map_err(|_| "cached scored-input page offset exceeds i64 range".to_string())?;
-            let decoded = load_page(offset_rows)?;
-            let done = progress_done.fetch_add(1, Ordering::Relaxed) + 1;
-            log_parallel_progress_every_interval(
-                done,
-                progress_total,
-                &progress_started_at,
-                &progress_next_log_at_ms,
-                progress_label,
-                Duration::from_secs(5),
-            );
-            Ok::<_, String>((page_index, decoded))
-        })
-        .collect::<Result<Vec<_>, _>>()?;
-    page_items.par_sort_unstable_by_key(|(page_index, _)| *page_index);
+    let log_interval = Duration::from_secs(5);
+    let mut next_log_at = log_interval;
+    let mut last_row_id = None;
+    let mut page_count = 0usize;
+    let mut flattened = Vec::with_capacity(total_rows);
+    let mut timing_totals = CachedPageLoadTiming::default();
 
-    let total_items = page_items.iter().map(|(_, items)| items.len()).sum();
-    let mut flattened = Vec::with_capacity(total_items);
-    for (_, mut items) in page_items {
-        flattened.append(&mut items);
+    while flattened.len() < total_rows {
+        let page = load_page(last_row_id)?;
+        let page_rows_loaded = page.items.len();
+        if page_rows_loaded == 0 {
+            break;
+        }
+        last_row_id = page.last_row_id;
+        page_count += 1;
+        timing_totals += page.timing;
+        flattened.extend(page.items);
+
+        let elapsed = progress_started_at.elapsed();
+        if elapsed >= next_log_at || flattened.len() >= total_rows || page_count == total_pages {
+            let pct = ((page_count as f64) * 100.0 / (total_pages as f64)).min(100.0);
+            println!(
+                "{progress_label}: loaded {:.5}% ({}/{}) cached page(s), rows {} of {}, connection-wait {:.3}s sql {:.3}s decode {:.3}s total {:.3}s",
+                pct,
+                page_count,
+                total_pages,
+                flattened.len().min(total_rows),
+                total_rows,
+                timing_totals.connection_wait.as_secs_f64(),
+                timing_totals.sql_query.as_secs_f64(),
+                timing_totals.row_decode.as_secs_f64(),
+                timing_totals.total().as_secs_f64(),
+            );
+            while elapsed >= next_log_at {
+                next_log_at += log_interval;
+            }
+        }
     }
+    if flattened.len() != total_rows {
+        return Err(format!(
+            "{progress_label}: loaded {} of {} cached rows before keyset pagination exhausted the batch",
+            flattened.len(),
+            total_rows
+        ));
+    }
+    println!(
+        "{progress_label}: completed {} cached page(s) with {} row(s) in {:.3}s (connection-wait {:.3}s sql {:.3}s decode {:.3}s)",
+        page_count,
+        flattened.len(),
+        progress_started_at.elapsed().as_secs_f64(),
+        timing_totals.connection_wait.as_secs_f64(),
+        timing_totals.sql_query.as_secs_f64(),
+        timing_totals.row_decode.as_secs_f64(),
+    );
     Ok(flattened)
 }
 
@@ -5341,15 +5515,15 @@ fn build_scored_avalanche_fitness_pass(
     }))
 }
 
-/// Applies the trailing-zero fitness pass to scored Avalanche inputs.
+/// Applies the zero-count fitness pass to scored Avalanche inputs.
 ///
 /// # Parameters
 /// - `inputs`: Flattened scored inputs to rank and downselect.
-/// - `fitness_bit_width`: Number of least-significant bits used for the trailing-zero fitness score.
-/// - `r_candidate_limit`: Maximum number of retained r-candidate groups; `0` keeps every group.
-/// - `cx_candidate_limit`: Maximum number of retained `c^x` inputs per r group; `0` keeps every input.
+/// - `fitness_bit_width`: Number of least-significant bits used for the zero-count fitness score.
+/// - `r_candidate_limit`: Primary retention dimension used to derive the global retained-input cap.
+/// - `cx_candidate_limit`: Secondary retention dimension used to derive the global retained-input cap.
 /// - `use_fitness_threshold`: Whether candidates below the normalized threshold should be dropped.
-/// - `fitness_threshold`: Minimum normalized trailing-zero fitness required when thresholding is enabled.
+/// - `fitness_threshold`: Minimum normalized zero-count fitness required when thresholding is enabled.
 ///
 /// # Returns
 /// - `Vec<ScoredAvalancheInput>`: Fitness-ranked and truncated scored inputs.
@@ -5374,117 +5548,40 @@ fn apply_scored_avalanche_fitness_pass(
         fitness_score: usize,
     }
 
-    #[derive(Debug)]
-    struct RankedGroup {
-        batch_candidate_index: usize,
-        best_fitness_score: usize,
-        total_fitness_score: usize,
-        best_match_score: f64,
-        inputs: Vec<RankedInput>,
-    }
-
-    let mut grouped = BTreeMap::<usize, Vec<ScoredAvalancheInput>>::new();
-    for input in inputs {
-        grouped
-            .entry(input.batch_candidate_index)
-            .or_default()
-            .push(input);
-    }
-
-    let grouped_inputs = grouped.into_iter().collect::<Vec<_>>();
-    let total_inputs = grouped_inputs
+    let total_inputs = inputs.len();
+    let total_groups = inputs
         .iter()
-        .map(|(_, grouped_inputs)| grouped_inputs.len())
-        .sum::<usize>();
-    let total_groups = grouped_inputs.len() as u64;
-    let progress_started_at = Instant::now();
-    let progress_done = AtomicU64::new(0);
-    let progress_next_log_at_ms =
-        AtomicU64::new(Duration::from_secs(5).as_millis().min(u128::from(u64::MAX)) as u64);
+        .map(|input| input.batch_candidate_index)
+        .collect::<HashSet<_>>()
+        .len();
+    let retained_input_limit =
+        resolve_avalanche_fitness_retained_input_limit(r_candidate_limit, cx_candidate_limit);
     println!(
-        "Avalanche fitness pass: scoring {} r-candidate groups",
-        total_groups
+        "Avalanche fitness pass: scoring {} scored inputs in one global pool spanning {} r-candidate groups",
+        total_inputs, total_groups
     );
 
-    let ranked_groups = grouped_inputs
+    let mut ranked_inputs = inputs
         .into_par_iter()
-        .map(|(batch_candidate_index, group_inputs)| {
-            let mut ranked_inputs = group_inputs
-                .into_iter()
-                .map(|input| RankedInput {
-                    fitness_score: lsb_zero_fitness(&input.message_bits, fitness_bit_width),
-                    input,
-                })
-                .filter(|input| {
-                    !use_fitness_threshold
-                        || normalize_avalanche_fitness_score(input.fitness_score, fitness_bit_width)
-                            >= fitness_threshold
-                })
-                .collect::<Vec<_>>();
-            let retained_by_threshold = ranked_inputs.len();
-            ranked_inputs.sort_by(|left, right| {
-                right
-                    .fitness_score
-                    .cmp(&left.fitness_score)
-                    .then_with(|| {
-                        right
-                            .input
-                            .score_match_pct
-                            .total_cmp(&left.input.score_match_pct)
-                    })
-                    .then_with(|| left.input.message_index.cmp(&right.input.message_index))
-                    .then_with(|| left.input.x.cmp(&right.input.x))
-            });
-            if cx_candidate_limit > 0 && ranked_inputs.len() > cx_candidate_limit {
-                ranked_inputs.truncate(cx_candidate_limit);
-            }
-
-            let best_fitness_score = ranked_inputs
-                .first()
-                .map(|input| input.fitness_score)
-                .unwrap_or(0);
-            let total_fitness_score = ranked_inputs.iter().map(|input| input.fitness_score).sum();
-            let best_match_score = ranked_inputs
-                .iter()
-                .map(|input| input.input.score_match_pct)
-                .max_by(|left, right| left.total_cmp(right))
-                .unwrap_or(0.0);
-
-            (
-                RankedGroup {
-                    batch_candidate_index,
-                    best_fitness_score,
-                    total_fitness_score,
-                    best_match_score,
-                    inputs: ranked_inputs,
-                },
-                retained_by_threshold,
-            )
+        .map(|input| RankedInput {
+            fitness_score: lsb_zero_count_fitness(&input.message_bits, fitness_bit_width),
+            input,
         })
-        .map(|(ranked_group, retained_by_threshold)| {
-            let done = progress_done.fetch_add(1, Ordering::Relaxed) + 1;
-            log_parallel_progress_every_interval(
-                done,
-                total_groups,
-                &progress_started_at,
-                &progress_next_log_at_ms,
-                "Avalanche fitness pass",
-                Duration::from_secs(5),
-            );
-            (ranked_group, retained_by_threshold)
+        .filter(|input| {
+            !use_fitness_threshold
+                || normalize_avalanche_fitness_score(input.fitness_score, fitness_bit_width)
+                    >= fitness_threshold
         })
         .collect::<Vec<_>>();
-    let threshold_retained_input_count = ranked_groups
+    let threshold_retained_input_count = ranked_inputs.len();
+    let threshold_retained_group_count = ranked_inputs
         .iter()
-        .map(|(_, retained_by_threshold)| *retained_by_threshold)
-        .sum::<usize>();
-    let threshold_retained_group_count = ranked_groups
-        .iter()
-        .filter(|(group, _)| !group.inputs.is_empty())
-        .count();
+        .map(|input| input.input.batch_candidate_index)
+        .collect::<HashSet<_>>()
+        .len();
     if use_fitness_threshold {
         println!(
-            "Avalanche fitness threshold: retained {} of {} scored inputs across {} of {} r-candidate groups at normalized threshold {}",
+            "Avalanche fitness threshold: retained {} of {} scored inputs spanning {} of {} r-candidate groups at normalized threshold {}",
             threshold_retained_input_count,
             total_inputs,
             threshold_retained_group_count,
@@ -5492,73 +5589,51 @@ fn apply_scored_avalanche_fitness_pass(
             format_beam_float(fitness_threshold, 3)
         );
     }
-    let mut ranked_groups = ranked_groups
-        .into_iter()
-        .filter_map(|(group, _)| (!group.inputs.is_empty()).then_some(group))
-        .collect::<Vec<_>>();
-    ranked_groups.sort_by(|left, right| {
+    ranked_inputs.sort_by(|left, right| {
         right
-            .best_fitness_score
-            .cmp(&left.best_fitness_score)
-            .then_with(|| right.total_fitness_score.cmp(&left.total_fitness_score))
-            .then_with(|| right.best_match_score.total_cmp(&left.best_match_score))
-            .then_with(|| left.batch_candidate_index.cmp(&right.batch_candidate_index))
+            .fitness_score
+            .cmp(&left.fitness_score)
+            .then_with(|| {
+                right
+                    .input
+                    .score_match_pct
+                    .total_cmp(&left.input.score_match_pct)
+            })
+            .then_with(|| {
+                left.input
+                    .batch_candidate_index
+                    .cmp(&right.input.batch_candidate_index)
+            })
+            .then_with(|| left.input.message_index.cmp(&right.input.message_index))
+            .then_with(|| left.input.x.cmp(&right.input.x))
     });
-    if let Some(best_r_group) = ranked_groups.first() {
-        println!(
-            "Avalanche fitness maxima: best r candidate batch-index {} fitness {} total-fitness {} best-match {}%",
-            best_r_group.batch_candidate_index,
-            best_r_group.best_fitness_score,
-            best_r_group.total_fitness_score,
-            format_beam_float(best_r_group.best_match_score, BEAM_PCT_DECIMALS),
-        );
+    if retained_input_limit > 0 && ranked_inputs.len() > retained_input_limit {
+        ranked_inputs.truncate(retained_input_limit);
     }
-    if let Some((best_cx_group, best_cx_input)) = ranked_groups
+    let retained_group_count = ranked_inputs
         .iter()
-        .flat_map(|group| group.inputs.iter().map(move |input| (group, input)))
-        .max_by(|(left_group, left_input), (right_group, right_input)| {
-            left_input
-                .fitness_score
-                .cmp(&right_input.fitness_score)
-                .then_with(|| {
-                    left_input
-                        .input
-                        .score_match_pct
-                        .total_cmp(&right_input.input.score_match_pct)
-                })
-                .then_with(|| {
-                    right_group
-                        .batch_candidate_index
-                        .cmp(&left_group.batch_candidate_index)
-                })
-                .then_with(|| {
-                    right_input
-                        .input
-                        .message_index
-                        .cmp(&left_input.input.message_index)
-                })
-                .then_with(|| right_input.input.x.cmp(&left_input.input.x))
-        })
-    {
+        .map(|input| input.input.batch_candidate_index)
+        .collect::<HashSet<_>>()
+        .len();
+    println!(
+        "Avalanche fitness pass: retained {} scored inputs spanning {} r-candidate groups after global ranking",
+        ranked_inputs.len(),
+        retained_group_count
+    );
+    if let Some(best_input) = ranked_inputs.first() {
+        let best_fitness_pct =
+            normalize_avalanche_fitness_score(best_input.fitness_score, fitness_bit_width) * 100.0;
         println!(
-            "Avalanche fitness maxima: best c^x candidate batch-index {} message-index {} x {} fitness {} match {}%",
-            best_cx_group.batch_candidate_index,
-            best_cx_input.input.message_index,
-            best_cx_input.input.x,
-            best_cx_input.fitness_score,
-            format_beam_float(best_cx_input.input.score_match_pct, BEAM_PCT_DECIMALS),
+            "Avalanche fitness maxima: best candidate batch-index {} message-index {} x {} fitness {} ({}%) match {}%",
+            best_input.input.batch_candidate_index,
+            best_input.input.message_index,
+            best_input.input.x,
+            best_input.fitness_score,
+            format_beam_float(best_fitness_pct, BEAM_PCT_DECIMALS),
+            format_beam_float(best_input.input.score_match_pct, BEAM_PCT_DECIMALS),
         );
     }
-    if r_candidate_limit > 0 && ranked_groups.len() > r_candidate_limit {
-        ranked_groups.truncate(r_candidate_limit);
-    }
-
-    let retained_input_count = ranked_groups.iter().map(|group| group.inputs.len()).sum();
-    let mut retained_inputs = Vec::with_capacity(retained_input_count);
-    for group in ranked_groups {
-        retained_inputs.extend(group.inputs.into_iter().map(|input| input.input));
-    }
-    retained_inputs
+    ranked_inputs.into_iter().map(|input| input.input).collect()
 }
 
 /// Randomizes recursive-tier sample indices before grouping.
@@ -5962,46 +6037,60 @@ fn load_cached_scored_input_summaries(
 ) -> Result<Vec<CachedScoredInputSummary>, Box<dyn Error>> {
     let total_rows = count_cached_scored_inputs(cache, batch_number)?;
     let progress_label = format!("Accuracy batch {} cached summary loading", batch_number);
-    load_cached_scored_input_pages_in_parallel(total_rows, &progress_label, |offset_rows| {
-        let rows = load_cached_scored_input_rows_page(
-            cache,
-            batch_number,
-            offset_rows,
-            AVALANCHE_CACHE_PAGE_ROWS,
-        )
-        .map_err(|err| err.to_string())?;
-        rows.into_iter()
-            .map(|row| {
-                Ok::<_, String>(CachedScoredInputSummary {
-                    id: row.id,
-                    batch_candidate_index: usize::try_from(row.batch_candidate_index).map_err(
-                        |_| "cached batch candidate index exceeds usize range".to_string(),
-                    )?,
-                    message_index: usize::try_from(row.message_index)
-                        .map_err(|_| "cached message index exceeds usize range".to_string())?,
-                    score_match_pct: row.score_match_pct,
-                    x: row
-                        .x_text
-                        .parse::<BigUint>()
-                        .map_err(|err| err.to_string())?,
-                    fitness_score: 0,
+    load_cached_scored_input_pages_with_progress(
+        total_rows,
+        cache.page_rows_usize(),
+        &progress_label,
+        |after_row_id| {
+            let (rows, mut timing) = load_cached_scored_input_rows_after_id_page(
+                cache,
+                batch_number,
+                after_row_id,
+                cache.page_rows_i64(),
+            )
+            .map_err(|err| err.to_string())?;
+            let last_row_id = rows.last().map(|row| row.id);
+            let decode_start = Instant::now();
+            let items = rows
+                .into_iter()
+                .map(|row| {
+                    Ok::<_, String>(CachedScoredInputSummary {
+                        id: row.id,
+                        batch_candidate_index: usize::try_from(row.batch_candidate_index).map_err(
+                            |_| "cached batch candidate index exceeds usize range".to_string(),
+                        )?,
+                        message_index: usize::try_from(row.message_index)
+                            .map_err(|_| "cached message index exceeds usize range".to_string())?,
+                        score_match_pct: row.score_match_pct,
+                        x: row
+                            .x_text
+                            .parse::<BigUint>()
+                            .map_err(|err| err.to_string())?,
+                        fitness_score: 0,
+                    })
                 })
+                .collect::<Result<Vec<_>, _>>()?;
+            timing.row_decode += decode_start.elapsed();
+            Ok(CachedKeysetPage {
+                items,
+                last_row_id,
+                timing,
             })
-            .collect::<Result<Vec<_>, _>>()
-    })
+        },
+    )
     .map_err(|err| -> Box<dyn Error> { err.into() })
 }
 
-/// Applies the trailing-zero fitness pass to cached scored Avalanche inputs.
+/// Applies the zero-count fitness pass to cached scored Avalanche inputs.
 ///
 /// # Parameters
 /// - `cache`: Shared SQLite cache wrapper.
 /// - `batch_number`: One-based analysis batch number.
-/// - `fitness_bit_width`: Number of least-significant bits used for the trailing-zero fitness score.
-/// - `r_candidate_limit`: Maximum number of retained r-candidate groups; `0` keeps every group.
-/// - `cx_candidate_limit`: Maximum number of retained `c^x` inputs per r group; `0` keeps every input.
+/// - `fitness_bit_width`: Number of least-significant bits used for the zero-count fitness score.
+/// - `r_candidate_limit`: Primary retention dimension used to derive the global retained-input cap.
+/// - `cx_candidate_limit`: Secondary retention dimension used to derive the global retained-input cap.
 /// - `use_fitness_threshold`: Whether candidates below the normalized threshold should be dropped.
-/// - `fitness_threshold`: Minimum normalized trailing-zero fitness required when thresholding is enabled.
+/// - `fitness_threshold`: Minimum normalized zero-count fitness required when thresholding is enabled.
 ///
 /// # Returns
 /// - `Result<Vec<CachedScoredInputSummary>, Box<dyn Error>>`: Fitness-ranked and truncated cached summaries.
@@ -6017,15 +6106,6 @@ fn apply_cached_scored_avalanche_fitness_pass(
     use_fitness_threshold: bool,
     fitness_threshold: f64,
 ) -> Result<Vec<CachedScoredInputSummary>, Box<dyn Error>> {
-    #[derive(Debug)]
-    struct RankedGroup {
-        batch_candidate_index: usize,
-        best_fitness_score: usize,
-        total_fitness_score: usize,
-        best_match_score: f64,
-        inputs: Vec<CachedScoredInputSummary>,
-    }
-
     let total_rows = count_cached_scored_inputs(cache, batch_number)?;
     if total_rows == 0 {
         return Ok(Vec::new());
@@ -6035,18 +6115,22 @@ fn apply_cached_scored_avalanche_fitness_pass(
         "Accuracy batch {} cached fitness page scoring",
         batch_number
     );
-    let scored_inputs = load_cached_scored_input_pages_in_parallel(
+    let scored_inputs = load_cached_scored_input_pages_with_progress(
         total_rows,
+        cache.page_rows_usize(),
         &page_progress_label,
-        |offset_rows| {
-            let rows = load_cached_scored_input_rows_page(
+        |after_row_id| {
+            let (rows, mut timing) = load_cached_scored_input_rows_after_id_page(
                 cache,
                 batch_number,
-                offset_rows,
-                AVALANCHE_CACHE_PAGE_ROWS,
+                after_row_id,
+                cache.page_rows_i64(),
             )
             .map_err(|err| err.to_string())?;
-            rows.into_iter()
+            let last_row_id = rows.last().map(|row| row.id);
+            let decode_start = Instant::now();
+            let items = rows
+                .into_iter()
                 .map(|row| {
                     let message_bit_len = usize::try_from(row.message_bit_len)
                         .map_err(|_| "cached message bit length exceeds usize range".to_string())?;
@@ -6064,137 +6148,50 @@ fn apply_cached_scored_avalanche_fitness_pass(
                             .x_text
                             .parse::<BigUint>()
                             .map_err(|err| err.to_string())?,
-                        fitness_score: lsb_zero_fitness(
+                        fitness_score: lsb_zero_count_fitness(
                             &PackedBits::from_bytes_le(&row.message_bits, message_bit_len),
                             fitness_bit_width,
                         ),
                     })
                 })
-                .collect::<Result<Vec<_>, _>>()
+                .collect::<Result<Vec<_>, _>>()?;
+            timing.row_decode += decode_start.elapsed();
+            Ok(CachedKeysetPage {
+                items,
+                last_row_id,
+                timing,
+            })
         },
     )
     .map_err(|err| -> Box<dyn Error> { err.into() })?;
-
-    let chunk_size = parallel_progress_chunk_size(scored_inputs.len());
-    let total_chunks = scored_inputs.len().div_ceil(chunk_size);
-    let grouping_progress_label =
-        format!("Accuracy batch {} cached fitness grouping", batch_number);
-    let grouping_total = total_chunks.min(u64::MAX as usize) as u64;
-    let grouping_started_at = Instant::now();
-    let grouping_done = AtomicU64::new(0);
-    let grouping_next_log_at_ms =
-        AtomicU64::new(Duration::from_secs(5).as_millis().min(u128::from(u64::MAX)) as u64);
+    let total_groups = scored_inputs
+        .iter()
+        .map(|input| input.batch_candidate_index)
+        .collect::<HashSet<_>>()
+        .len();
+    let retained_input_limit =
+        resolve_avalanche_fitness_retained_input_limit(r_candidate_limit, cx_candidate_limit);
     println!(
-        "{grouping_progress_label}: grouping {} cached scored inputs across {total_chunks} chunk(s)",
-        scored_inputs.len()
+        "Avalanche fitness pass: scoring {} cached scored inputs in one global pool spanning {} r-candidate groups",
+        scored_inputs.len(),
+        total_groups
     );
-    let grouped = scored_inputs
-        .par_chunks(chunk_size)
-        .map(|chunk| {
-            let mut grouped = HashMap::<usize, Vec<CachedScoredInputSummary>>::new();
-            for summary in chunk {
-                grouped
-                    .entry(summary.batch_candidate_index)
-                    .or_default()
-                    .push(summary.clone());
-            }
-            let done = grouping_done.fetch_add(1, Ordering::Relaxed) + 1;
-            log_parallel_progress_every_interval(
-                done,
-                grouping_total,
-                &grouping_started_at,
-                &grouping_next_log_at_ms,
-                &grouping_progress_label,
-                Duration::from_secs(5),
-            );
-            grouped
-        })
-        .reduce(HashMap::new, |mut left, right| {
-            for (batch_candidate_index, mut chunk_inputs) in right {
-                left.entry(batch_candidate_index)
-                    .or_default()
-                    .append(&mut chunk_inputs);
-            }
-            left
+    let mut ranked_inputs = scored_inputs;
+    if use_fitness_threshold {
+        ranked_inputs.retain(|input| {
+            normalize_avalanche_fitness_score(input.fitness_score, fitness_bit_width)
+                >= fitness_threshold
         });
-
-    println!(
-        "Avalanche fitness pass: scoring {} cached r-candidate groups",
-        grouped.len()
-    );
-    let total_groups = grouped.len();
-    let group_progress_label = format!("Accuracy batch {} cached fitness ranking", batch_number);
-    let group_progress_total = total_groups.min(u64::MAX as usize) as u64;
-    let group_progress_started_at = Instant::now();
-    let group_progress_done = AtomicU64::new(0);
-    let group_progress_next_log_at_ms =
-        AtomicU64::new(Duration::from_secs(5).as_millis().min(u128::from(u64::MAX)) as u64);
-    let ranked_groups = grouped
-        .into_par_iter()
-        .map(|(batch_candidate_index, mut ranked_inputs)| {
-            if use_fitness_threshold {
-                ranked_inputs.retain(|input| {
-                    normalize_avalanche_fitness_score(input.fitness_score, fitness_bit_width)
-                        >= fitness_threshold
-                });
-            }
-            let retained_by_threshold = ranked_inputs.len();
-            ranked_inputs.sort_by(|left, right| {
-                right
-                    .fitness_score
-                    .cmp(&left.fitness_score)
-                    .then_with(|| right.score_match_pct.total_cmp(&left.score_match_pct))
-                    .then_with(|| left.message_index.cmp(&right.message_index))
-                    .then_with(|| left.x.cmp(&right.x))
-            });
-            if cx_candidate_limit > 0 && ranked_inputs.len() > cx_candidate_limit {
-                ranked_inputs.truncate(cx_candidate_limit);
-            }
-            let best_fitness_score = ranked_inputs
-                .first()
-                .map(|input| input.fitness_score)
-                .unwrap_or(0);
-            let total_fitness_score = ranked_inputs.iter().map(|input| input.fitness_score).sum();
-            let best_match_score = ranked_inputs
-                .iter()
-                .map(|input| input.score_match_pct)
-                .max_by(|left, right| left.total_cmp(right))
-                .unwrap_or(0.0);
-            (
-                RankedGroup {
-                    batch_candidate_index,
-                    best_fitness_score,
-                    total_fitness_score,
-                    best_match_score,
-                    inputs: ranked_inputs,
-                },
-                retained_by_threshold,
-            )
-        })
-        .map(|(group, retained_by_threshold)| {
-            let done = group_progress_done.fetch_add(1, Ordering::Relaxed) + 1;
-            log_parallel_progress_every_interval(
-                done,
-                group_progress_total,
-                &group_progress_started_at,
-                &group_progress_next_log_at_ms,
-                &group_progress_label,
-                Duration::from_secs(5),
-            );
-            (group, retained_by_threshold)
-        })
-        .collect::<Vec<_>>();
-    let threshold_retained_input_count = ranked_groups
+    }
+    let threshold_retained_input_count = ranked_inputs.len();
+    let threshold_retained_group_count = ranked_inputs
         .iter()
-        .map(|(_, retained_by_threshold)| *retained_by_threshold)
-        .sum::<usize>();
-    let threshold_retained_group_count = ranked_groups
-        .iter()
-        .filter(|(group, _)| !group.inputs.is_empty())
-        .count();
+        .map(|input| input.batch_candidate_index)
+        .collect::<HashSet<_>>()
+        .len();
     if use_fitness_threshold {
         println!(
-            "Avalanche fitness threshold: retained {} of {} cached scored inputs across {} of {} r-candidate groups at normalized threshold {}",
+            "Avalanche fitness threshold: retained {} of {} cached scored inputs spanning {} of {} r-candidate groups at normalized threshold {}",
             threshold_retained_input_count,
             total_rows,
             threshold_retained_group_count,
@@ -6202,67 +6199,42 @@ fn apply_cached_scored_avalanche_fitness_pass(
             format_beam_float(fitness_threshold, 3)
         );
     }
-    let mut ranked_groups = ranked_groups
-        .into_iter()
-        .filter_map(|(group, _)| (!group.inputs.is_empty()).then_some(group))
-        .collect::<Vec<_>>();
-    ranked_groups.sort_by(|left, right| {
+    ranked_inputs.sort_by(|left, right| {
         right
-            .best_fitness_score
-            .cmp(&left.best_fitness_score)
-            .then_with(|| right.total_fitness_score.cmp(&left.total_fitness_score))
-            .then_with(|| right.best_match_score.total_cmp(&left.best_match_score))
+            .fitness_score
+            .cmp(&left.fitness_score)
+            .then_with(|| right.score_match_pct.total_cmp(&left.score_match_pct))
             .then_with(|| left.batch_candidate_index.cmp(&right.batch_candidate_index))
+            .then_with(|| left.message_index.cmp(&right.message_index))
+            .then_with(|| left.x.cmp(&right.x))
     });
-    if let Some(best_r_group) = ranked_groups.first() {
-        println!(
-            "Avalanche fitness maxima: best cached r candidate batch-index {} fitness {} total-fitness {} best-match {}%",
-            best_r_group.batch_candidate_index,
-            best_r_group.best_fitness_score,
-            best_r_group.total_fitness_score,
-            format_beam_float(best_r_group.best_match_score, BEAM_PCT_DECIMALS),
-        );
+    if retained_input_limit > 0 && ranked_inputs.len() > retained_input_limit {
+        ranked_inputs.truncate(retained_input_limit);
     }
-    if let Some((best_cx_group, best_cx_input)) = ranked_groups
+    let retained_group_count = ranked_inputs
         .iter()
-        .flat_map(|group| group.inputs.iter().map(move |input| (group, input)))
-        .max_by(|(left_group, left_input), (right_group, right_input)| {
-            left_input
-                .fitness_score
-                .cmp(&right_input.fitness_score)
-                .then_with(|| {
-                    left_input
-                        .score_match_pct
-                        .total_cmp(&right_input.score_match_pct)
-                })
-                .then_with(|| {
-                    right_group
-                        .batch_candidate_index
-                        .cmp(&left_group.batch_candidate_index)
-                })
-                .then_with(|| right_input.message_index.cmp(&left_input.message_index))
-                .then_with(|| right_input.x.cmp(&left_input.x))
-        })
-    {
+        .map(|input| input.batch_candidate_index)
+        .collect::<HashSet<_>>()
+        .len();
+    println!(
+        "Avalanche fitness pass: retained {} cached scored inputs spanning {} r-candidate groups after global ranking",
+        ranked_inputs.len(),
+        retained_group_count
+    );
+    if let Some(best_input) = ranked_inputs.first() {
+        let best_fitness_pct =
+            normalize_avalanche_fitness_score(best_input.fitness_score, fitness_bit_width) * 100.0;
         println!(
-            "Avalanche fitness maxima: best cached c^x candidate batch-index {} message-index {} x {} fitness {} match {}%",
-            best_cx_group.batch_candidate_index,
-            best_cx_input.message_index,
-            best_cx_input.x,
-            best_cx_input.fitness_score,
-            format_beam_float(best_cx_input.score_match_pct, BEAM_PCT_DECIMALS),
+            "Avalanche fitness maxima: best cached candidate batch-index {} message-index {} x {} fitness {} ({}%) match {}%",
+            best_input.batch_candidate_index,
+            best_input.message_index,
+            best_input.x,
+            best_input.fitness_score,
+            format_beam_float(best_fitness_pct, BEAM_PCT_DECIMALS),
+            format_beam_float(best_input.score_match_pct, BEAM_PCT_DECIMALS),
         );
     }
-    if r_candidate_limit > 0 && ranked_groups.len() > r_candidate_limit {
-        ranked_groups.truncate(r_candidate_limit);
-    }
-
-    let retained_input_count = ranked_groups.iter().map(|group| group.inputs.len()).sum();
-    let mut retained_inputs = Vec::with_capacity(retained_input_count);
-    for group in ranked_groups {
-        retained_inputs.extend(group.inputs);
-    }
-    Ok(retained_inputs)
+    Ok(ranked_inputs)
 }
 
 /// Prunes cached scored-input summaries to a central Hamming-distance percentile band with
@@ -6304,9 +6276,7 @@ fn prune_cached_scored_inputs_by_hamming_distance_percentile_with_progress(
         .iter()
         .map(|summary| summary.id)
         .collect::<Vec<_>>();
-    let chunk_size = usize::try_from(AVALANCHE_CACHE_PAGE_ROWS)
-        .map_err(|_| "AVALANCHE_CACHE_PAGE_ROWS exceeds usize range")?
-        .max(1);
+    let chunk_size = cache.page_rows_usize().max(1);
     let total_chunks = ids.len().div_ceil(chunk_size);
     let progress_total = total_chunks.min(u64::MAX as usize) as u64;
     let progress_started_at = Instant::now();
@@ -7295,7 +7265,7 @@ fn load_cached_recursive_sample_summaries(
             batch_number,
             tier_index,
             offset_rows,
-            AVALANCHE_CACHE_PAGE_ROWS,
+            cache.page_rows_i64(),
         )?;
         if rows.is_empty() {
             break;
@@ -7488,7 +7458,7 @@ fn build_cached_avalanche_tier_statistics(
             batch_number,
             tier_index,
             offset_rows,
-            AVALANCHE_CACHE_PAGE_ROWS,
+            cache.page_rows_i64(),
         )?;
         if rows.is_empty() {
             break;
@@ -7581,13 +7551,17 @@ fn run_sampled_avalanche_beam_search_cached(
             engine.avalanche_fitness_threshold,
         )?;
         println!(
-            "Avalanche fitness pass for batch {}: retained {} of {} cached scored inputs across up to {} r candidates and {} c^x inputs per r using {} LSB fitness bits (threshold-enabled {} threshold {})",
+            "Avalanche fitness pass for batch {}: retained {} of {} cached scored inputs in a globally ranked pool using {} LSB fitness bits with effective retained-input cap {} (r-limit {} cx-limit {}, threshold-enabled {} threshold {})",
             batch_number,
             preprocessed.len(),
             cached_input_total,
+            resolve_avalanche_fitness_bit_width(engine),
+            resolve_avalanche_fitness_retained_input_limit(
+                engine.avalanche_fitness_r_candidate_limit,
+                engine.avalanche_fitness_cx_candidate_limit,
+            ),
             engine.avalanche_fitness_r_candidate_limit,
             engine.avalanche_fitness_cx_candidate_limit,
-            resolve_avalanche_fitness_bit_width(engine),
             if engine.avalanche_fitness_use_threshold {
                 "on"
             } else {
@@ -7994,23 +7968,27 @@ fn run_sampled_avalanche_beam_search_cached(
         tier_index = next_tier_index;
     }
 
-    let final_tier_rows = load_cached_selected_sample_rows_page(
-        cache,
-        batch_number,
-        tier_index,
-        0,
-        i64::try_from(count_cached_selected_samples(
+    let final_tier_total = count_cached_selected_samples(cache, batch_number, tier_index)?;
+    let mut final_tier_offset_rows = 0i64;
+    let mut final_tier_samples = Vec::with_capacity(final_tier_total);
+    while final_tier_samples.len() < final_tier_total {
+        let rows = load_cached_selected_sample_rows_page(
             cache,
             batch_number,
             tier_index,
-        )?)
-        .map_err(|_| "final tier row count exceeds i64 range")?,
-    )?;
-    let mut final_tier_samples = Vec::with_capacity(final_tier_rows.len());
-    for row in final_tier_rows {
-        let sample = deserialize_selected_avalanche_sample_row(row)?;
-        reduced.update_selected_sample_ref(&sample, prefer_beam_score_ordering);
-        final_tier_samples.push(sample);
+            final_tier_offset_rows,
+            cache.page_rows_i64(),
+        )?;
+        if rows.is_empty() {
+            break;
+        }
+        final_tier_offset_rows +=
+            i64::try_from(rows.len()).map_err(|_| "final tier page length exceeds i64 range")?;
+        for row in rows {
+            let sample = deserialize_selected_avalanche_sample_row(row)?;
+            reduced.update_selected_sample_ref(&sample, prefer_beam_score_ordering);
+            final_tier_samples.push(sample);
+        }
     }
     reduced.final_tier_samples = final_tier_samples;
     Ok(reduced)
@@ -8309,13 +8287,17 @@ fn run_sampled_avalanche_beam_search(
     let scored_inputs = if let Some(pass) = build_scored_avalanche_fitness_pass(engine) {
         let preprocessed = pass(scored_inputs.to_vec());
         println!(
-            "Avalanche fitness pass for batch {}: retained {} of {} scored inputs across up to {} r candidates and {} c^x inputs per r using {} LSB fitness bits (threshold-enabled {} threshold {})",
+            "Avalanche fitness pass for batch {}: retained {} of {} scored inputs in a globally ranked pool using {} LSB fitness bits with effective retained-input cap {} (r-limit {} cx-limit {}, threshold-enabled {} threshold {})",
             batch_number,
             preprocessed.len(),
             scored_inputs.len(),
+            resolve_avalanche_fitness_bit_width(engine),
+            resolve_avalanche_fitness_retained_input_limit(
+                engine.avalanche_fitness_r_candidate_limit,
+                engine.avalanche_fitness_cx_candidate_limit,
+            ),
             engine.avalanche_fitness_r_candidate_limit,
             engine.avalanche_fitness_cx_candidate_limit,
-            resolve_avalanche_fitness_bit_width(engine),
             if engine.avalanche_fitness_use_threshold {
                 "on"
             } else {
@@ -9550,6 +9532,25 @@ fn construct_from_factors_close_to_target_n(
 mod tests {
     use super::*;
     use crate::dsp::{find_ramp_signals, ramp_signal_strength};
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    /// Builds a unique temporary path for Avalanche cache tests.
+    ///
+    /// # Parameters
+    /// - `label`: Short suffix describing the test artifact.
+    ///
+    /// # Returns
+    /// - `PathBuf`: Unique filesystem path under the process temp directory.
+    ///
+    /// # Expected Output
+    /// - Returns a path value without touching the filesystem.
+    fn temp_path(label: &str) -> PathBuf {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock should be after unix epoch")
+            .as_nanos();
+        std::env::temp_dir().join(format!("rsademo_avalanche_{label}_{nanos}"))
+    }
 
     #[test]
     fn test_analysis_detect_ramp() {
@@ -9791,10 +9792,18 @@ mod tests {
     }
 
     #[test]
-    fn test_lsb_zero_fitness_counts_trailing_zero_window() {
-        let bits = PackedBits::from_bools(&[false, false, false, true, true, false]);
-        assert_eq!(lsb_zero_fitness(&bits, 5), 3);
-        assert_eq!(lsb_zero_fitness(&bits, 2), 2);
+    fn test_lsb_zero_count_fitness_counts_zero_bits_in_window() {
+        let bits = PackedBits::from_bools(&[false, true, false, false, true, false]);
+        assert_eq!(lsb_zero_count_fitness(&bits, 5), 3);
+        assert_eq!(lsb_zero_count_fitness(&bits, 2), 1);
+    }
+
+    #[test]
+    fn test_resolve_avalanche_fitness_retained_input_limit_combines_limits() {
+        assert_eq!(resolve_avalanche_fitness_retained_input_limit(0, 0), 0);
+        assert_eq!(resolve_avalanche_fitness_retained_input_limit(3, 0), 3);
+        assert_eq!(resolve_avalanche_fitness_retained_input_limit(0, 4), 4);
+        assert_eq!(resolve_avalanche_fitness_retained_input_limit(3, 4), 12);
     }
 
     #[test]
@@ -9869,6 +9878,89 @@ mod tests {
             .map(|input| (input.batch_candidate_index, input.message_index))
             .collect::<Vec<_>>();
         assert_eq!(retained_keys, vec![(0, 0), (1, 0)]);
+    }
+
+    #[test]
+    fn test_apply_scored_avalanche_fitness_pass_prefers_total_zero_count_over_trailing_run() {
+        let retained = apply_scored_avalanche_fitness_pass(
+            vec![
+                ScoredAvalancheInput {
+                    batch_candidate_index: 0,
+                    message_index: 0,
+                    r: BigUint::from(3u8),
+                    x: BigUint::from(1u8),
+                    score_match_pct: 80.0,
+                    message_bits: PackedBits::from_bools(&[false, true, false, false, true]),
+                    detail: None,
+                },
+                ScoredAvalancheInput {
+                    batch_candidate_index: 1,
+                    message_index: 0,
+                    r: BigUint::from(5u8),
+                    x: BigUint::from(1u8),
+                    score_match_pct: 70.0,
+                    message_bits: PackedBits::from_bools(&[false, false, true, true, true]),
+                    detail: None,
+                },
+            ],
+            4,
+            1,
+            1,
+            false,
+            0.580,
+        );
+
+        let retained_keys = retained
+            .iter()
+            .map(|input| (input.batch_candidate_index, input.message_index))
+            .collect::<Vec<_>>();
+        assert_eq!(retained_keys, vec![(0, 0)]);
+    }
+
+    #[test]
+    fn test_apply_scored_avalanche_fitness_pass_ranks_in_one_global_pool() {
+        let retained = apply_scored_avalanche_fitness_pass(
+            vec![
+                ScoredAvalancheInput {
+                    batch_candidate_index: 0,
+                    message_index: 0,
+                    r: BigUint::from(3u8),
+                    x: BigUint::from(1u8),
+                    score_match_pct: 92.0,
+                    message_bits: PackedBits::from_bools(&[false, false, false, false, true]),
+                    detail: None,
+                },
+                ScoredAvalancheInput {
+                    batch_candidate_index: 0,
+                    message_index: 1,
+                    r: BigUint::from(3u8),
+                    x: BigUint::from(3u8),
+                    score_match_pct: 88.0,
+                    message_bits: PackedBits::from_bools(&[false, false, false, true, true]),
+                    detail: None,
+                },
+                ScoredAvalancheInput {
+                    batch_candidate_index: 1,
+                    message_index: 0,
+                    r: BigUint::from(5u8),
+                    x: BigUint::from(1u8),
+                    score_match_pct: 40.0,
+                    message_bits: PackedBits::from_bools(&[false, true, true, true, true]),
+                    detail: None,
+                },
+            ],
+            4,
+            2,
+            1,
+            false,
+            0.580,
+        );
+
+        let retained_keys = retained
+            .iter()
+            .map(|input| (input.batch_candidate_index, input.message_index))
+            .collect::<Vec<_>>();
+        assert_eq!(retained_keys, vec![(0, 0), (0, 1)]);
     }
 
     #[test]
@@ -11081,13 +11173,34 @@ mod tests {
     #[test]
     fn test_resolve_avalanche_cache_db_path_uses_seed() {
         assert_eq!(
-            resolve_avalanche_cache_db_path(Some(42)),
+            resolve_avalanche_cache_db_path(Some(42), "/tmp"),
             PathBuf::from("/tmp/rsa_avalanche_42.db")
         );
         assert_eq!(
-            resolve_avalanche_cache_db_path(None),
+            resolve_avalanche_cache_db_path(None, "/tmp/"),
             PathBuf::from("/tmp/rsa_avalanche_0.db")
         );
+    }
+
+    #[test]
+    fn test_avalanche_cache_creates_intermediate_db_folders() {
+        let temp_root = temp_path("cache_db_folder");
+        let nested_folder = temp_root
+            .join("mnt")
+            .join("alternate_highspeed_device_mount")
+            .join("tmp");
+        let mut engine = EngineConfig::default();
+        engine.sqlite_db_folder = format!("{}/", nested_folder.to_string_lossy());
+
+        let cache =
+            AvalancheCacheGuard::new(Some(10_003), &engine).expect("cache should initialize");
+
+        assert!(nested_folder.is_dir());
+        assert!(cache.path.exists());
+        assert_eq!(cache.path, nested_folder.join("rsa_avalanche_10003.db"));
+
+        drop(cache);
+        let _ = fs::remove_dir_all(temp_root);
     }
 
     #[test]

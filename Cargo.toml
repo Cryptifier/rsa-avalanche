@@ -9,6 +9,7 @@ cty = "0.2.2"
 diesel = { version = "2.2.4", features = ["sqlite", "r2d2"] }
 hex = "0.4.3"
 num-bigint = { version = "0.4", default-features = false, features = ["std", "serde"] }
+num-rational = "0.4"
 num-integer = "0.1"
 num-traits = "0.2"
 libc = "0.2.175"
@@ -48,7 +49,7 @@ web-sys = { version = "0.3", features = ["Response", "Window"] }
 web-time = "0.2"
 
 [features]
-default = []
+default = ["ndarray"]
 plots = ["plotters"]
 pca = ["plots", "linfa", "linfa-reduction", "ndarray"]
 cluster = ["pca", "linfa-clustering"]

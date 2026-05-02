@@ -45,7 +45,7 @@
     "avalanche_random_chacha20_inputs": true,
     // Generate a single cheap raw seed candidate per batch and let retargeting
     // randomize the actual speculative r-candidate pool.
-    "reuse_retargeted_r_candidates": true,
+    "reuse_retargeted_r_candidates": false,
     "reuse_retargeted_r_candidates_path_prefix": "data/rgen_retargeted",
     // Build speculative r values from products of these small primes, then
     // retarget the product with the exponent window below.
@@ -54,10 +54,10 @@
     "r_candidate_small_prime_factors": 3,
     "r_candidate_bit_length": 510,
     "r_candidate_random_power_window": true,
-    "r_candidate_target_exponent_minimum": 0.750, // Lower bound for sampled retarget exponents.
-    "r_candidate_target_exponent": 0.850, // Upper bound for sampled retarget exponents.
+    "r_candidate_target_exponent_minimum": 1.40, // Lower bound for sampled retarget exponents.
+    "r_candidate_target_exponent": 1.50, // Upper bound for sampled retarget exponents.
     "r_candidate_retarget_partition_count": 2,
-    "r_candidate_retarget_minimum_exponent": 0.10,
+    "r_candidate_retarget_minimum_exponent": 0.15,
     // Beam search keeps a short candidate list and interprets per-bit
     // probabilities above the threshold as bit 1.
     "beam_bit_one_threshold": 0.5,
@@ -70,12 +70,15 @@
     // Small-batch feature: score a large pool once, then draw many avalanche
     // combinations from that scored batch to estimate per-bit agreement.
     "analysis_batch_enable": true,
-    "analysis_batch_messages": 100, // Number of ciphertext variants scored per batch before avalanche sampling.
-    "analysis_batch_candidates": 4000, // Number of r candidates scored in each batch before sampling combinations.
+    "analysis_batch_messages": 5000, // Number of ciphertext variants scored per batch before avalanche sampling.
+    "analysis_batch_candidates": 500, // Number of r candidates scored in each batch before sampling combinations.
     "analysis_batch_batches": 1, // Number of scored batches to run for the small-batch beam workflow.
     "sqlite_soft_heap": 10737418240,
     "sqlite_hard_heap": 10737418240,
     "sqlite_mmap_size": 10737418240,
+    "sqlite_worker_count": 64,
+    "sqlite_db_folder": "/tmp",
+    "sqlite_avalanche_page_size": 256,
     // Search parameters.
     "avalanche_beam_top_k": 6, // Number of top-scoring candidates to keep for beam search results.
     "avalanche_use_top_beam": true, // Carry forward the prior tier's top beam-search bits between recursive Avalanche tiers.
@@ -84,8 +87,8 @@
     "avalanche_fitness_scoring_pass": true,
     "avalanche_fitness_shift_bytes": 8,
     "avalanche_fitness_bit_width": 64,
-    "avalanche_fitness_r_candidate_limit": 200,
-    "avalanche_fitness_cx_candidate_limit": 2,
+    "avalanche_fitness_r_candidate_limit": 0, // Cap how many r candidates can be scored by the avalanche fitness function; set to 0 for no limit.
+    "avalanche_fitness_cx_candidate_limit": 200, // Cap how many c^x variants per r candidate can be scored by the avalanche fitness function; set to 0 for no limit.
     "avalanche_fitness_use_threshold": false,
     "avalanche_fitness_threshold": 0.510,
     // Cap how many distinct r values can appear in one sampled avalanche input;
@@ -95,7 +98,7 @@
     "avalanche_combination_size": 64, // Number of scored items taken in each sampled combination.
     "avalanche_combination_pool_size": 100000, // Legacy compatibility field; runtime sampling now always uses the full batch-sized pool.
     "avalanche_combination_recursion_depth": 1, // Run one recursive Avalanche tier on top of the sampled-input tier.
-    "avalanche_combination_recursive_group_size": 64, // Number of prior-tier sample outputs grouped into each recursive Avalanche call.
+    "avalanche_combination_recursive_group_size": 32, // Number of prior-tier sample outputs grouped into each recursive Avalanche call.
     "avalanche_combination_recursive_resample_count": 50000, // 0 preserves one-pass regrouping; set >0 to resample prior-tier outputs to a target count.
     // Hamming-distance pruning keeps a central percentile band of scored items
     // before sampling, then optionally adds some tail outliers back in.

@@ -85,6 +85,12 @@ Notes:
 | `engine.oracle_accuracy_threshold` | number | `51.0` | Oracle accuracy threshold for sufficiency checks. |
 | `engine.beam_bit_one_threshold` | number | `0.4` | Minimum stored beam value interpreted as bit `1`. |
 | `engine.avalanche_probability_spread_exponent` | number | `0.5` | Power exponent applied to confidence around `0.5`; values below `1.0` sharpen confidence while preserving the original side of `0.5`, and values above `1.0` soften it. |
+| `engine.sqlite_soft_heap` | u64 | `10737418240` | Advisory SQLite soft heap limit for the Avalanche cache database in bytes. |
+| `engine.sqlite_hard_heap` | u64 | `10737418240` | Hard SQLite heap limit for the Avalanche cache database in bytes. |
+| `engine.sqlite_mmap_size` | u64 | `10737418240` | SQLite mmap size for the Avalanche cache database in bytes. |
+| `engine.sqlite_worker_count` | u32 | `16` | SQLite connection-pool worker count for the Avalanche cache database. |
+| `engine.sqlite_db_folder` | string | `"/tmp"` | Filesystem folder used for the Avalanche cache database; intermediate directories are created automatically. |
+| `engine.sqlite_avalanche_page_size` | usize | `4096` | Number of rows per SQLite Avalanche cache page used for batched inserts and paged reads. |
 | `engine.r_candidate_mode` | string | `small_primes` | Candidate generation mode. |
 | `engine.r_candidate_small_primes` | array(u64) | `[3, 5, 7, 11, 13, 17]` | Small primes for candidate generation. |
 | `engine.r_candidate_small_prime_factors` | usize | `3` | Number of small prime factors. |
