@@ -19,6 +19,8 @@ cargo build --bin demo
 cargo build --bin kgen
 ```
 
+- Disk I/O and CPU performance should be maximized by choosing an appropriate AWS Instance Type. For example, a ```c8a.12xlarge``` instance with provisioned IOPS and bandwidth is ideal for running each batch. Without this, most of the time spent running the ```analysis``` code will be spent writing to the caching database.
+
 # Tool Usage
 ## Main test path
 Use `make demo` as the primary way to exercise the current proof of concept.
