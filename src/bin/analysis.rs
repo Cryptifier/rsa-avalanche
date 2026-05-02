@@ -321,6 +321,7 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     let analytics_for_handler = Arc::clone(&analytics);
     let avalanche_cache_seed = args.seed;
+    let avalanche_cache_db_folder = config.engine.sqlite_db_folder.clone();
     ctrlc::set_handler(move || {
         if let Ok(mut guard) = analytics_for_handler.lock() {
             guard.finish(Some("interrupted".to_string()));
@@ -329,7 +330,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                 eprintln!("Failed to write {}: {}", output_path, err);
             }
         }
-        cleanup_avalanche_cache_db(avalanche_cache_seed);
+        cleanup_avalanche_cache_db(avalanche_cache_seed, &avalanche_cache_db_folder);
         std::process::exit(130);
     })?;
 

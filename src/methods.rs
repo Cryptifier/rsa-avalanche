@@ -10,7 +10,7 @@ use std::{
     collections::{HashMap, HashSet},
     error::Error,
     fs,
-    path::PathBuf,
+    path::{Path, PathBuf},
     sync::{
         Arc, Mutex,
         atomic::{AtomicU64, Ordering},
@@ -86,7 +86,6 @@ pub struct DemoArgs {
 type AvalancheSqlitePool = Pool<ConnectionManager<SqliteConnection>>;
 
 const AVALANCHE_CACHE_FLUSH_BYTES: usize = 1 << 30;
-const AVALANCHE_CACHE_PAGE_ROWS: i64 = 4_096;
 
 diesel::table! {
     avalanche_cache_inputs (id) {
@@ -233,6 +232,44 @@ struct AvalancheSqliteSettings {
     mmap_size_bytes: i64,
 }
 
+#[derive(Debug, Default, Clone, Copy)]
+struct CachedPageLoadTiming {
+    connection_wait: Duration,
+    sql_query: Duration,
+    row_decode: Duration,
+}
+
+impl CachedPageLoadTiming {
+    /// Returns the total elapsed time captured by the timing breakdown.
+    ///
+    /// # Parameters
+    /// - None.
+    ///
+    /// # Returns
+    /// - `Duration`: Sum of connection wait, SQL execution, and row decoding.
+    ///
+    /// # Expected Output
+    /// - Returns the aggregated timing without side effects.
+    fn total(self) -> Duration {
+        self.connection_wait + self.sql_query + self.row_decode
+    }
+}
+
+impl std::ops::AddAssign for CachedPageLoadTiming {
+    fn add_assign(&mut self, rhs: Self) {
+        self.connection_wait += rhs.connection_wait;
+        self.sql_query += rhs.sql_query;
+        self.row_decode += rhs.row_decode;
+    }
+}
+
+#[derive(Debug)]
+struct CachedKeysetPage<T> {
+    items: Vec<T>,
+    last_row_id: Option<i64>,
+    timing: CachedPageLoadTiming,
+}
+
 #[derive(Debug, Clone, Copy)]
 struct AvalancheSqliteConnectionCustomizer {
     settings: AvalancheSqliteSettings,
@@ -300,32 +337,71 @@ impl CustomizeConnection<SqliteConnection, R2D2Error> for AvalancheSqliteConnect
     }
 }
 
+/// Normalizes the configured SQLite cache folder for temporary Avalanche databases.
+///
+/// # Parameters
+/// - `db_folder`: Configured filesystem folder for the SQLite cache database.
+///
+/// # Returns
+/// - `PathBuf`: Normalized cache folder path.
+///
+/// # Expected Output
+/// - Returns the configured folder or `/tmp` when the configured value is blank.
+fn normalize_avalanche_cache_db_folder(db_folder: &str) -> PathBuf {
+    let trimmed = db_folder.trim();
+    if trimmed.is_empty() {
+        PathBuf::from("/tmp")
+    } else {
+        PathBuf::from(trimmed)
+    }
+}
+
 /// Resolves the on-disk SQLite path used for the temporary Avalanche cache.
 ///
 /// # Parameters
 /// - `seed`: Optional deterministic analysis seed used to key the cache filename.
+/// - `db_folder`: Configured filesystem folder for the SQLite cache database.
 ///
 /// # Returns
-/// - `PathBuf`: Cache path in `/tmp` using the configured or fallback seed.
+/// - `PathBuf`: Cache path in the configured folder using the configured or fallback seed.
 ///
 /// # Expected Output
 /// - Returns a deterministic filesystem path; no stdout/stderr output.
-pub fn resolve_avalanche_cache_db_path(seed: Option<u64>) -> PathBuf {
-    PathBuf::from(format!("/tmp/rsa_avalanche_{}.db", seed.unwrap_or(0)))
+pub fn resolve_avalanche_cache_db_path(seed: Option<u64>, db_folder: &str) -> PathBuf {
+    normalize_avalanche_cache_db_folder(db_folder)
+        .join(format!("rsa_avalanche_{}.db", seed.unwrap_or(0)))
+}
+
+/// Creates the parent directory tree for the Avalanche cache database path.
+///
+/// # Parameters
+/// - `path`: Full SQLite database path whose parent directory must exist.
+///
+/// # Returns
+/// - `Result<(), Box<dyn Error>>`: `Ok(())` when the parent directory tree exists.
+///
+/// # Expected Output
+/// - Creates intermediate directories for the database parent path when needed.
+fn ensure_avalanche_cache_db_parent_dir(path: &Path) -> Result<(), Box<dyn Error>> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    Ok(())
 }
 
 /// Removes the temporary Avalanche cache file if it exists.
 ///
 /// # Parameters
 /// - `seed`: Optional deterministic analysis seed used to key the cache filename.
+/// - `db_folder`: Configured filesystem folder for the SQLite cache database.
 ///
 /// # Returns
 /// - `()`: This function returns nothing.
 ///
 /// # Expected Output
 /// - Deletes the cache file when present; no stdout/stderr output.
-pub fn cleanup_avalanche_cache_db(seed: Option<u64>) {
-    let path = resolve_avalanche_cache_db_path(seed);
+pub fn cleanup_avalanche_cache_db(seed: Option<u64>, db_folder: &str) {
+    let path = resolve_avalanche_cache_db_path(seed, db_folder);
     if path.exists() {
         let _ = fs::remove_file(path);
     }
@@ -344,6 +420,7 @@ pub fn cleanup_avalanche_cache_db(seed: Option<u64>) {
 struct AvalancheCacheGuard {
     path: PathBuf,
     pool: Option<AvalancheSqlitePool>,
+    page_rows: i64,
 }
 
 impl AvalancheCacheGuard {
@@ -357,17 +434,20 @@ impl AvalancheCacheGuard {
     /// - `Result<AvalancheCacheGuard, Box<dyn Error>>`: Ready-to-use cache wrapper.
     ///
     /// # Expected Output
-    /// - Creates the SQLite database under `/tmp` and initializes runtime tables.
+    /// - Creates the SQLite database under the configured folder, creating parent directories as needed.
     fn new(seed: Option<u64>, engine: &EngineConfig) -> Result<Self, Box<dyn Error>> {
-        let path = resolve_avalanche_cache_db_path(seed);
+        let path = resolve_avalanche_cache_db_path(seed, &engine.sqlite_db_folder);
+        ensure_avalanche_cache_db_parent_dir(&path)?;
         if path.exists() {
             let _ = fs::remove_file(&path);
         }
+        let page_rows = i64::try_from(engine.sqlite_avalanche_page_size.max(1))
+            .map_err(|_| "engine.sqlite_avalanche_page_size exceeds i64 range")?;
         let settings = resolve_avalanche_sqlite_settings(engine)?;
         let manager =
             ConnectionManager::<SqliteConnection>::new(path.to_string_lossy().to_string());
         let pool = Pool::builder()
-            .max_size(16)
+            .max_size(engine.sqlite_worker_count)
             .connection_customizer(Box::new(AvalancheSqliteConnectionCustomizer { settings }))
             .build(manager)?;
         let mut connection = pool.get()?;
@@ -391,6 +471,11 @@ impl AvalancheCacheGuard {
         sql_query(
             "CREATE INDEX IF NOT EXISTS avalanche_cache_inputs_batch_idx
                 ON avalanche_cache_inputs (batch_number, batch_candidate_index, message_index)",
+        )
+        .execute(&mut connection)?;
+        sql_query(
+            "CREATE INDEX IF NOT EXISTS avalanche_cache_inputs_batch_id_idx
+                ON avalanche_cache_inputs (batch_number, id)",
         )
         .execute(&mut connection)?;
         sql_query(
@@ -424,6 +509,7 @@ impl AvalancheCacheGuard {
         Ok(Self {
             path,
             pool: Some(pool),
+            page_rows,
         })
     }
 
@@ -441,6 +527,34 @@ impl AvalancheCacheGuard {
         self.pool
             .as_ref()
             .ok_or_else(|| "avalanche cache pool is unavailable".into())
+    }
+
+    /// Returns the configured SQLite Avalanche cache page size as a row count.
+    ///
+    /// # Parameters
+    /// - None.
+    ///
+    /// # Returns
+    /// - `usize`: Positive page size in rows.
+    ///
+    /// # Expected Output
+    /// - Returns the normalized cached page size; no stdout/stderr output.
+    fn page_rows_usize(&self) -> usize {
+        usize::try_from(self.page_rows).unwrap_or(1)
+    }
+
+    /// Returns the configured SQLite Avalanche cache page size as an `i64`.
+    ///
+    /// # Parameters
+    /// - None.
+    ///
+    /// # Returns
+    /// - `i64`: Positive page size in rows.
+    ///
+    /// # Expected Output
+    /// - Returns the normalized cached page size; no stdout/stderr output.
+    fn page_rows_i64(&self) -> i64 {
+        self.page_rows
     }
 
     /// Deletes cached inputs and samples for one analysis batch.
@@ -616,7 +730,7 @@ fn deserialize_scored_avalanche_input_row(
     })
 }
 
-/// Inserts scored Avalanche inputs into the SQLite cache in one batch.
+/// Inserts scored Avalanche inputs into the SQLite cache in page-sized batches.
 ///
 /// # Parameters
 /// - `cache`: Shared SQLite cache wrapper.
@@ -627,7 +741,7 @@ fn deserialize_scored_avalanche_input_row(
 /// - `Result<(), Box<dyn Error>>`: `Ok(())` on success.
 ///
 /// # Expected Output
-/// - Writes input rows to SQLite using one Diesel insert batch.
+/// - Writes input rows to SQLite using page-sized Diesel insert batches.
 fn insert_cached_scored_inputs(
     cache: &AvalancheCacheGuard,
     batch_number: usize,
@@ -641,41 +755,55 @@ fn insert_cached_scored_inputs(
         .map(|input| serialize_scored_avalanche_input_for_cache(batch_number, input))
         .collect::<Result<Vec<_>, _>>()?;
     let mut connection = cache.pool()?.get()?;
-    diesel::insert_into(avalanche_cache_inputs::table)
-        .values(&rows)
-        .execute(&mut connection)?;
+    for row_chunk in rows.chunks(cache.page_rows_usize().max(1)) {
+        diesel::insert_into(avalanche_cache_inputs::table)
+            .values(row_chunk)
+            .execute(&mut connection)?;
+    }
     Ok(())
 }
 
-/// Loads one page of cached scored-input rows for a batch.
+/// Loads one keyset page of cached scored-input rows for a batch.
 ///
 /// # Parameters
 /// - `cache`: Shared SQLite cache wrapper.
 /// - `batch_number`: One-based analysis batch number.
-/// - `offset_rows`: Number of rows to skip before reading.
+/// - `after_row_id`: Optional last-seen row id from the prior page.
 /// - `limit_rows`: Maximum rows to return.
 ///
 /// # Returns
-/// - `Result<Vec<CachedAvalancheInputRow>, Box<dyn Error>>`: One page of cached input rows.
+/// - `Result<(Vec<CachedAvalancheInputRow>, CachedPageLoadTiming), Box<dyn Error>>`: One page of
+///   cached input rows plus connection/sql timing.
 ///
 /// # Expected Output
-/// - Reads a bounded page of cached rows from SQLite.
-fn load_cached_scored_input_rows_page(
+/// - Reads a bounded page of cached rows from SQLite ordered by increasing row id.
+fn load_cached_scored_input_rows_after_id_page(
     cache: &AvalancheCacheGuard,
     batch_number: usize,
-    offset_rows: i64,
+    after_row_id: Option<i64>,
     limit_rows: i64,
-) -> Result<Vec<CachedAvalancheInputRow>, Box<dyn Error>> {
+) -> Result<(Vec<CachedAvalancheInputRow>, CachedPageLoadTiming), Box<dyn Error>> {
     let batch_number = i32::try_from(batch_number).map_err(|_| "batch number exceeds i32 range")?;
+    let connection_wait_start = Instant::now();
     let mut connection = cache.pool()?.get()?;
+    let connection_wait = connection_wait_start.elapsed();
+    let sql_query_start = Instant::now();
     let rows = avalanche_cache_inputs::table
         .filter(avalanche_cache_inputs::batch_number.eq(batch_number))
+        .filter(avalanche_cache_inputs::id.gt(after_row_id.unwrap_or(0)))
         .order(avalanche_cache_inputs::id.asc())
         .limit(limit_rows)
-        .offset(offset_rows)
         .select(CachedAvalancheInputRow::as_select())
         .load::<CachedAvalancheInputRow>(&mut connection)?;
-    Ok(rows)
+    let sql_query = sql_query_start.elapsed();
+    Ok((
+        rows,
+        CachedPageLoadTiming {
+            connection_wait,
+            sql_query,
+            row_decode: Duration::ZERO,
+        },
+    ))
 }
 
 /// Loads raw cached scored-input rows for a selected id set.
@@ -821,7 +949,7 @@ fn serialize_selected_sample_for_cache(
 /// - `Result<(), Box<dyn Error>>`: `Ok(())` on success.
 ///
 /// # Expected Output
-/// - Writes finalized sample rows to SQLite.
+/// - Writes finalized sample rows to SQLite using page-sized Diesel insert batches.
 fn insert_cached_selected_samples(
     cache: &AvalancheCacheGuard,
     batch_number: usize,
@@ -836,9 +964,11 @@ fn insert_cached_selected_samples(
         .map(|sample| serialize_selected_sample_for_cache(batch_number, sample, engine))
         .collect::<Result<Vec<_>, _>>()?;
     let mut connection = cache.pool()?.get()?;
-    diesel::insert_into(avalanche_cache_samples::table)
-        .values(&rows)
-        .execute(&mut connection)?;
+    for row_chunk in rows.chunks(cache.page_rows_usize().max(1)) {
+        diesel::insert_into(avalanche_cache_samples::table)
+            .values(row_chunk)
+            .execute(&mut connection)?;
+    }
     Ok(())
 }
 
@@ -1847,67 +1977,90 @@ fn parallel_progress_chunk_size(total_items: usize) -> usize {
     total_items.div_ceil(target_chunks).max(1)
 }
 
-/// Loads cached scored-input pages in parallel while preserving page order.
+/// Loads cached scored-input pages with keyset pagination and detailed timing logs.
 ///
 /// # Parameters
 /// - `total_rows`: Total cached row count expected from the scan.
 /// - `progress_label`: Human-readable label used for interval progress logging.
-/// - `load_page`: Callback that loads and decodes one page starting at the provided row offset.
+/// - `load_page`: Callback that loads and decodes one page after the provided row id cursor.
 ///
 /// # Returns
 /// - `Result<Vec<T>, String>`: Flattened decoded page items in page order.
 ///
 /// # Expected Output
-/// - Prints interval progress updates while loading cached pages and returns the decoded items.
-fn load_cached_scored_input_pages_in_parallel<T, F>(
+/// - Prints interval progress plus connection/sql/decode timing summaries while loading cached pages.
+fn load_cached_scored_input_pages_with_progress<T, F>(
     total_rows: usize,
+    page_rows: usize,
     progress_label: &str,
-    load_page: F,
+    mut load_page: F,
 ) -> Result<Vec<T>, String>
 where
-    T: Send,
-    F: Fn(i64) -> Result<Vec<T>, String> + Sync + Send,
+    F: FnMut(Option<i64>) -> Result<CachedKeysetPage<T>, String>,
 {
     if total_rows == 0 {
         return Ok(Vec::new());
     }
 
-    let page_rows = usize::try_from(AVALANCHE_CACHE_PAGE_ROWS)
-        .map_err(|_| "AVALANCHE_CACHE_PAGE_ROWS exceeds usize range".to_string())?
-        .max(1);
+    let page_rows = page_rows.max(1);
     let total_pages = total_rows.div_ceil(page_rows);
-    println!("{progress_label}: loading {total_pages} cached page(s)");
+    println!("{progress_label}: loading {total_pages} cached page(s) via keyset pagination");
 
-    let progress_total = total_pages.min(u64::MAX as usize) as u64;
     let progress_started_at = Instant::now();
-    let progress_done = AtomicU64::new(0);
-    let progress_next_log_at_ms =
-        AtomicU64::new(Duration::from_secs(5).as_millis().min(u128::from(u64::MAX)) as u64);
-    let mut page_items = (0..total_pages)
-        .into_par_iter()
-        .map(|page_index| {
-            let offset_rows = i64::try_from(page_index.saturating_mul(page_rows))
-                .map_err(|_| "cached scored-input page offset exceeds i64 range".to_string())?;
-            let decoded = load_page(offset_rows)?;
-            let done = progress_done.fetch_add(1, Ordering::Relaxed) + 1;
-            log_parallel_progress_every_interval(
-                done,
-                progress_total,
-                &progress_started_at,
-                &progress_next_log_at_ms,
-                progress_label,
-                Duration::from_secs(5),
-            );
-            Ok::<_, String>((page_index, decoded))
-        })
-        .collect::<Result<Vec<_>, _>>()?;
-    page_items.par_sort_unstable_by_key(|(page_index, _)| *page_index);
+    let log_interval = Duration::from_secs(5);
+    let mut next_log_at = log_interval;
+    let mut last_row_id = None;
+    let mut page_count = 0usize;
+    let mut flattened = Vec::with_capacity(total_rows);
+    let mut timing_totals = CachedPageLoadTiming::default();
 
-    let total_items = page_items.iter().map(|(_, items)| items.len()).sum();
-    let mut flattened = Vec::with_capacity(total_items);
-    for (_, mut items) in page_items {
-        flattened.append(&mut items);
+    while flattened.len() < total_rows {
+        let page = load_page(last_row_id)?;
+        let page_rows_loaded = page.items.len();
+        if page_rows_loaded == 0 {
+            break;
+        }
+        last_row_id = page.last_row_id;
+        page_count += 1;
+        timing_totals += page.timing;
+        flattened.extend(page.items);
+
+        let elapsed = progress_started_at.elapsed();
+        if elapsed >= next_log_at || flattened.len() >= total_rows || page_count == total_pages {
+            let pct = ((page_count as f64) * 100.0 / (total_pages as f64)).min(100.0);
+            println!(
+                "{progress_label}: loaded {:.5}% ({}/{}) cached page(s), rows {} of {}, connection-wait {:.3}s sql {:.3}s decode {:.3}s total {:.3}s",
+                pct,
+                page_count,
+                total_pages,
+                flattened.len().min(total_rows),
+                total_rows,
+                timing_totals.connection_wait.as_secs_f64(),
+                timing_totals.sql_query.as_secs_f64(),
+                timing_totals.row_decode.as_secs_f64(),
+                timing_totals.total().as_secs_f64(),
+            );
+            while elapsed >= next_log_at {
+                next_log_at += log_interval;
+            }
+        }
     }
+    if flattened.len() != total_rows {
+        return Err(format!(
+            "{progress_label}: loaded {} of {} cached rows before keyset pagination exhausted the batch",
+            flattened.len(),
+            total_rows
+        ));
+    }
+    println!(
+        "{progress_label}: completed {} cached page(s) with {} row(s) in {:.3}s (connection-wait {:.3}s sql {:.3}s decode {:.3}s)",
+        page_count,
+        flattened.len(),
+        progress_started_at.elapsed().as_secs_f64(),
+        timing_totals.connection_wait.as_secs_f64(),
+        timing_totals.sql_query.as_secs_f64(),
+        timing_totals.row_decode.as_secs_f64(),
+    );
     Ok(flattened)
 }
 
@@ -5884,33 +6037,47 @@ fn load_cached_scored_input_summaries(
 ) -> Result<Vec<CachedScoredInputSummary>, Box<dyn Error>> {
     let total_rows = count_cached_scored_inputs(cache, batch_number)?;
     let progress_label = format!("Accuracy batch {} cached summary loading", batch_number);
-    load_cached_scored_input_pages_in_parallel(total_rows, &progress_label, |offset_rows| {
-        let rows = load_cached_scored_input_rows_page(
-            cache,
-            batch_number,
-            offset_rows,
-            AVALANCHE_CACHE_PAGE_ROWS,
-        )
-        .map_err(|err| err.to_string())?;
-        rows.into_iter()
-            .map(|row| {
-                Ok::<_, String>(CachedScoredInputSummary {
-                    id: row.id,
-                    batch_candidate_index: usize::try_from(row.batch_candidate_index).map_err(
-                        |_| "cached batch candidate index exceeds usize range".to_string(),
-                    )?,
-                    message_index: usize::try_from(row.message_index)
-                        .map_err(|_| "cached message index exceeds usize range".to_string())?,
-                    score_match_pct: row.score_match_pct,
-                    x: row
-                        .x_text
-                        .parse::<BigUint>()
-                        .map_err(|err| err.to_string())?,
-                    fitness_score: 0,
+    load_cached_scored_input_pages_with_progress(
+        total_rows,
+        cache.page_rows_usize(),
+        &progress_label,
+        |after_row_id| {
+            let (rows, mut timing) = load_cached_scored_input_rows_after_id_page(
+                cache,
+                batch_number,
+                after_row_id,
+                cache.page_rows_i64(),
+            )
+            .map_err(|err| err.to_string())?;
+            let last_row_id = rows.last().map(|row| row.id);
+            let decode_start = Instant::now();
+            let items = rows
+                .into_iter()
+                .map(|row| {
+                    Ok::<_, String>(CachedScoredInputSummary {
+                        id: row.id,
+                        batch_candidate_index: usize::try_from(row.batch_candidate_index).map_err(
+                            |_| "cached batch candidate index exceeds usize range".to_string(),
+                        )?,
+                        message_index: usize::try_from(row.message_index)
+                            .map_err(|_| "cached message index exceeds usize range".to_string())?,
+                        score_match_pct: row.score_match_pct,
+                        x: row
+                            .x_text
+                            .parse::<BigUint>()
+                            .map_err(|err| err.to_string())?,
+                        fitness_score: 0,
+                    })
                 })
+                .collect::<Result<Vec<_>, _>>()?;
+            timing.row_decode += decode_start.elapsed();
+            Ok(CachedKeysetPage {
+                items,
+                last_row_id,
+                timing,
             })
-            .collect::<Result<Vec<_>, _>>()
-    })
+        },
+    )
     .map_err(|err| -> Box<dyn Error> { err.into() })
 }
 
@@ -5948,18 +6115,22 @@ fn apply_cached_scored_avalanche_fitness_pass(
         "Accuracy batch {} cached fitness page scoring",
         batch_number
     );
-    let scored_inputs = load_cached_scored_input_pages_in_parallel(
+    let scored_inputs = load_cached_scored_input_pages_with_progress(
         total_rows,
+        cache.page_rows_usize(),
         &page_progress_label,
-        |offset_rows| {
-            let rows = load_cached_scored_input_rows_page(
+        |after_row_id| {
+            let (rows, mut timing) = load_cached_scored_input_rows_after_id_page(
                 cache,
                 batch_number,
-                offset_rows,
-                AVALANCHE_CACHE_PAGE_ROWS,
+                after_row_id,
+                cache.page_rows_i64(),
             )
             .map_err(|err| err.to_string())?;
-            rows.into_iter()
+            let last_row_id = rows.last().map(|row| row.id);
+            let decode_start = Instant::now();
+            let items = rows
+                .into_iter()
                 .map(|row| {
                     let message_bit_len = usize::try_from(row.message_bit_len)
                         .map_err(|_| "cached message bit length exceeds usize range".to_string())?;
@@ -5983,7 +6154,13 @@ fn apply_cached_scored_avalanche_fitness_pass(
                         ),
                     })
                 })
-                .collect::<Result<Vec<_>, _>>()
+                .collect::<Result<Vec<_>, _>>()?;
+            timing.row_decode += decode_start.elapsed();
+            Ok(CachedKeysetPage {
+                items,
+                last_row_id,
+                timing,
+            })
         },
     )
     .map_err(|err| -> Box<dyn Error> { err.into() })?;
@@ -6099,9 +6276,7 @@ fn prune_cached_scored_inputs_by_hamming_distance_percentile_with_progress(
         .iter()
         .map(|summary| summary.id)
         .collect::<Vec<_>>();
-    let chunk_size = usize::try_from(AVALANCHE_CACHE_PAGE_ROWS)
-        .map_err(|_| "AVALANCHE_CACHE_PAGE_ROWS exceeds usize range")?
-        .max(1);
+    let chunk_size = cache.page_rows_usize().max(1);
     let total_chunks = ids.len().div_ceil(chunk_size);
     let progress_total = total_chunks.min(u64::MAX as usize) as u64;
     let progress_started_at = Instant::now();
@@ -7090,7 +7265,7 @@ fn load_cached_recursive_sample_summaries(
             batch_number,
             tier_index,
             offset_rows,
-            AVALANCHE_CACHE_PAGE_ROWS,
+            cache.page_rows_i64(),
         )?;
         if rows.is_empty() {
             break;
@@ -7283,7 +7458,7 @@ fn build_cached_avalanche_tier_statistics(
             batch_number,
             tier_index,
             offset_rows,
-            AVALANCHE_CACHE_PAGE_ROWS,
+            cache.page_rows_i64(),
         )?;
         if rows.is_empty() {
             break;
@@ -7793,23 +7968,27 @@ fn run_sampled_avalanche_beam_search_cached(
         tier_index = next_tier_index;
     }
 
-    let final_tier_rows = load_cached_selected_sample_rows_page(
-        cache,
-        batch_number,
-        tier_index,
-        0,
-        i64::try_from(count_cached_selected_samples(
+    let final_tier_total = count_cached_selected_samples(cache, batch_number, tier_index)?;
+    let mut final_tier_offset_rows = 0i64;
+    let mut final_tier_samples = Vec::with_capacity(final_tier_total);
+    while final_tier_samples.len() < final_tier_total {
+        let rows = load_cached_selected_sample_rows_page(
             cache,
             batch_number,
             tier_index,
-        )?)
-        .map_err(|_| "final tier row count exceeds i64 range")?,
-    )?;
-    let mut final_tier_samples = Vec::with_capacity(final_tier_rows.len());
-    for row in final_tier_rows {
-        let sample = deserialize_selected_avalanche_sample_row(row)?;
-        reduced.update_selected_sample_ref(&sample, prefer_beam_score_ordering);
-        final_tier_samples.push(sample);
+            final_tier_offset_rows,
+            cache.page_rows_i64(),
+        )?;
+        if rows.is_empty() {
+            break;
+        }
+        final_tier_offset_rows +=
+            i64::try_from(rows.len()).map_err(|_| "final tier page length exceeds i64 range")?;
+        for row in rows {
+            let sample = deserialize_selected_avalanche_sample_row(row)?;
+            reduced.update_selected_sample_ref(&sample, prefer_beam_score_ordering);
+            final_tier_samples.push(sample);
+        }
     }
     reduced.final_tier_samples = final_tier_samples;
     Ok(reduced)
@@ -9353,6 +9532,25 @@ fn construct_from_factors_close_to_target_n(
 mod tests {
     use super::*;
     use crate::dsp::{find_ramp_signals, ramp_signal_strength};
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    /// Builds a unique temporary path for Avalanche cache tests.
+    ///
+    /// # Parameters
+    /// - `label`: Short suffix describing the test artifact.
+    ///
+    /// # Returns
+    /// - `PathBuf`: Unique filesystem path under the process temp directory.
+    ///
+    /// # Expected Output
+    /// - Returns a path value without touching the filesystem.
+    fn temp_path(label: &str) -> PathBuf {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock should be after unix epoch")
+            .as_nanos();
+        std::env::temp_dir().join(format!("rsademo_avalanche_{label}_{nanos}"))
+    }
 
     #[test]
     fn test_analysis_detect_ramp() {
@@ -10975,13 +11173,34 @@ mod tests {
     #[test]
     fn test_resolve_avalanche_cache_db_path_uses_seed() {
         assert_eq!(
-            resolve_avalanche_cache_db_path(Some(42)),
+            resolve_avalanche_cache_db_path(Some(42), "/tmp"),
             PathBuf::from("/tmp/rsa_avalanche_42.db")
         );
         assert_eq!(
-            resolve_avalanche_cache_db_path(None),
+            resolve_avalanche_cache_db_path(None, "/tmp/"),
             PathBuf::from("/tmp/rsa_avalanche_0.db")
         );
+    }
+
+    #[test]
+    fn test_avalanche_cache_creates_intermediate_db_folders() {
+        let temp_root = temp_path("cache_db_folder");
+        let nested_folder = temp_root
+            .join("mnt")
+            .join("alternate_highspeed_device_mount")
+            .join("tmp");
+        let mut engine = EngineConfig::default();
+        engine.sqlite_db_folder = format!("{}/", nested_folder.to_string_lossy());
+
+        let cache =
+            AvalancheCacheGuard::new(Some(10_003), &engine).expect("cache should initialize");
+
+        assert!(nested_folder.is_dir());
+        assert!(cache.path.exists());
+        assert_eq!(cache.path, nested_folder.join("rsa_avalanche_10003.db"));
+
+        drop(cache);
+        let _ = fs::remove_dir_all(temp_root);
     }
 
     #[test]

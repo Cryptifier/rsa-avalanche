@@ -76,6 +76,9 @@
     "sqlite_soft_heap": 10737418240,
     "sqlite_hard_heap": 10737418240,
     "sqlite_mmap_size": 10737418240,
+    "sqlite_worker_count": 64,
+    "sqlite_db_folder": "/tmp",
+    "sqlite_avalanche_page_size": 256,
     // Search parameters.
     "avalanche_beam_top_k": 6, // Number of top-scoring candidates to keep for beam search results.
     "avalanche_use_top_beam": true, // Carry forward the prior tier's top beam-search bits between recursive Avalanche tiers.

@@ -83,6 +83,9 @@
     "sqlite_soft_heap": 10737418240,
     "sqlite_hard_heap": 10737418240,
     "sqlite_mmap_size": 10737418240,
+    "sqlite_worker_count": 64,
+    "sqlite_db_folder": "/tmp",
+    "sqlite_avalanche_page_size": 256,
     // Cap how many distinct r values can appear in one sampled avalanche input;
     // each selected r still contributes all of its sampled c^x variants.
     "avalanche_combination_mixed_r_candidates": 64,

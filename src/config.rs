@@ -245,6 +245,15 @@ pub struct EngineConfig {
     /// SQLite mmap size in bytes used by the Avalanche cache database.
     #[serde(default = "default_sqlite_mmap_size")]
     pub sqlite_mmap_size: u64,
+    /// SQLite worker count used by the Avalanche cache connection pool.
+    #[serde(default = "default_sqlite_worker_count")]
+    pub sqlite_worker_count: u32,
+    /// Filesystem folder used for the Avalanche cache SQLite database.
+    #[serde(default = "default_sqlite_db_folder")]
+    pub sqlite_db_folder: String,
+    /// Number of rows per SQLite Avalanche cache page used for batched inserts and reads.
+    #[serde(default = "default_sqlite_avalanche_page_size")]
+    pub sqlite_avalanche_page_size: usize,
     /// Whether to sort avalanche candidates by Hamming distance.
     #[serde(default = "default_use_hamming_distance")]
     pub use_hamming_distance: bool,
@@ -421,6 +430,9 @@ impl Default for EngineConfig {
             sqlite_soft_heap: default_sqlite_soft_heap(),
             sqlite_hard_heap: default_sqlite_hard_heap(),
             sqlite_mmap_size: default_sqlite_mmap_size(),
+            sqlite_worker_count: default_sqlite_worker_count(),
+            sqlite_db_folder: default_sqlite_db_folder(),
+            sqlite_avalanche_page_size: default_sqlite_avalanche_page_size(),
             use_hamming_distance: default_use_hamming_distance(),
             mirror_invert_candidates: default_mirror_invert_candidates(),
             override_best_r: None,
@@ -1642,6 +1654,48 @@ fn default_sqlite_mmap_size() -> u64 {
     10 * 1024 * 1024 * 1024
 }
 
+/// Default SQLite worker count for the Avalanche cache connection pool.
+///
+/// # Parameters
+/// - None.
+///
+/// # Returns
+/// - `u32`: Default SQLite worker count.
+///
+/// # Expected Output
+/// - Returns a constant default value; no side effects.
+fn default_sqlite_worker_count() -> u32 {
+    16
+}
+
+/// Default filesystem folder for the Avalanche cache SQLite database.
+///
+/// # Parameters
+/// - None.
+///
+/// # Returns
+/// - `String`: Default SQLite database folder.
+///
+/// # Expected Output
+/// - Returns a constant default value; no side effects.
+fn default_sqlite_db_folder() -> String {
+    "/tmp".to_string()
+}
+
+/// Default SQLite Avalanche cache page size used for batched inserts and reads.
+///
+/// # Parameters
+/// - None.
+///
+/// # Returns
+/// - `usize`: Default SQLite Avalanche cache page size in rows.
+///
+/// # Expected Output
+/// - Returns a constant default value; no side effects.
+fn default_sqlite_avalanche_page_size() -> usize {
+    4_096
+}
+
 /// Default toggle for Hamming-distance sorting in avalanche candidate ordering.
 ///
 /// # Parameters
@@ -1902,6 +1956,9 @@ mod tests {
         assert_eq!(engine.sqlite_soft_heap, 10 * 1024 * 1024 * 1024);
         assert_eq!(engine.sqlite_hard_heap, 10 * 1024 * 1024 * 1024);
         assert_eq!(engine.sqlite_mmap_size, 10 * 1024 * 1024 * 1024);
+        assert_eq!(engine.sqlite_worker_count, 16);
+        assert_eq!(engine.sqlite_db_folder, "/tmp");
+        assert_eq!(engine.sqlite_avalanche_page_size, 4_096);
     }
 
     #[test]
