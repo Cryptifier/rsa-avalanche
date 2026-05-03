@@ -61,6 +61,7 @@ def load_ndjson_session(lines: list[str]) -> dict[str, Any]:
 
     session: dict[str, Any] = {
         "cli": {},
+        "features": [],
         "r_candidate_accuracy_batches": [],
     }
     for line in lines:
@@ -76,9 +77,35 @@ def load_ndjson_session(lines: list[str]) -> dict[str, Any]:
             cli = payload.get("cli")
             if isinstance(cli, dict):
                 session["cli"] = cli
+        elif event_name == "feature" and isinstance(payload, dict):
+            session["features"].append(payload)
         elif event_name == "r_candidate_accuracy_batch" and isinstance(payload, dict):
             session["r_candidate_accuracy_batches"].append(payload)
     return session
+
+
+def extract_center_bias_entries_from_feature(session: dict[str, Any]) -> list[dict[str, Any]]:
+    """Extract the best-only center-bias entries from the run-level feature stats."""
+
+    features = session.get("features", [])
+    if not isinstance(features, list):
+        return []
+
+    for feature in features:
+        if not isinstance(feature, dict):
+            continue
+        if feature.get("name") != "r_candidate_accuracy":
+            continue
+        stats = feature.get("stats")
+        if not isinstance(stats, dict):
+            continue
+        report = stats.get("avalanche_best_center_bias_report")
+        if not isinstance(report, dict):
+            continue
+        center_biases = report.get("center_biases", [])
+        if isinstance(center_biases, list):
+            return [entry for entry in center_biases if isinstance(entry, dict)]
+    return []
 
 
 def extract_bit_position_counts(session: dict[str, Any]) -> Counter[int]:
@@ -107,6 +134,11 @@ def extract_bit_position_counts(session: dict[str, Any]) -> Counter[int]:
                 bit_index = entry.get("bit_index_lsb0")
                 if isinstance(bit_index, int):
                     counts[bit_index] += 1
+
+    for entry in extract_center_bias_entries_from_feature(session):
+        bit_index = entry.get("bit_index_lsb0")
+        if isinstance(bit_index, int):
+            counts[bit_index] += 1
     return counts
 
 

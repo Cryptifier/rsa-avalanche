@@ -33,10 +33,11 @@ const BLUE: RGBColor = (30, 144, 255);
 const BLACK: RGBColor = (0, 0, 0);
 
 use crate::analytics::{
-    AvalancheCenterBiasEntry, AvalancheCombinationBeamResult, AvalancheCombinationSample,
-    AvalancheCombinationSampleInput, AvalancheFinalTierBiasReport, AvalancheTierSampleStat,
-    AvalancheTierStatistics, RCandidateAccuracyBatch, RCandidateTraceBatch, RCandidateTraceEntry,
-    SessionAnalytics, generate_r_candidates_with_analytics,
+    AvalancheBestCenterBiasReport, AvalancheCenterBiasEntry, AvalancheCombinationBeamResult,
+    AvalancheCombinationSample, AvalancheCombinationSampleInput, AvalancheFinalTierBiasReport,
+    AvalancheTierSampleStat, AvalancheTierStatistics, RCandidateAccuracyBatch,
+    RCandidateTraceBatch, RCandidateTraceEntry, SessionAnalytics,
+    generate_r_candidates_with_analytics,
 };
 use crate::avalanche::{
     AvalancheBuilder, AvalancheInput, AvalancheNode, mirror_inverted_candidates,
@@ -3730,6 +3731,7 @@ struct BeamMaxCandidate {
     average_score_pct: f64,
     top_beam_score: f64,
     beam_results: Vec<AvalancheCombinationBeamResult>,
+    center_biases: Vec<AvalancheCenterBiasEntry>,
     best_bits: Vec<bool>,
     message_bits: Vec<bool>,
     batch_number: usize,
@@ -4546,6 +4548,25 @@ fn build_final_tier_bias_reports(
             center_biases: sample.center_biases.clone(),
         })
         .collect()
+}
+
+/// Builds the best-overall center-bias report for session logging.
+///
+/// # Parameters
+/// - `candidate`: Best overall Avalanche beam candidate selected across all batches.
+///
+/// # Returns
+/// - `AvalancheBestCenterBiasReport`: Session-ready best-only center-bias payload.
+///
+/// # Expected Output
+/// - Returns one report value without stdout/stderr output.
+fn build_best_center_bias_report(candidate: &BeamMaxCandidate) -> AvalancheBestCenterBiasReport {
+    AvalancheBestCenterBiasReport {
+        batch_number: candidate.batch_number,
+        tier_index: candidate.tier_index,
+        sample_index: candidate.sample_index,
+        center_biases: candidate.center_biases.clone(),
+    }
 }
 
 /// Validates the configured final-tier near-center bias-report threshold.
@@ -6743,6 +6764,7 @@ fn run_r_candidate_accuracy_batches(
                         average_score_pct: selected_sample.average_score_pct,
                         top_beam_score: selected_sample.top_beam_score,
                         beam_results: selected_sample.beam_results.clone(),
+                        center_biases: selected_sample.center_biases.clone(),
                         best_bits: beam_best_bits,
                         message_bits: message_bits.clone(),
                         batch_number,
@@ -6959,7 +6981,9 @@ fn run_r_candidate_accuracy_batches(
                     .evaluated_candidates,
                 avalanche_combination_sample_count: sampled_avalanche_result.sample_count,
                 avalanche_tier_statistics: sampled_avalanche_result.tier_statistics,
-                avalanche_final_tier_bias_reports: if engine.avalanche_report_biases {
+                avalanche_final_tier_bias_reports: if engine.avalanche_report_biases
+                    && !engine.avalanche_center_threshold_best
+                {
                     build_final_tier_bias_reports(&sampled_avalanche_result.final_tier_samples)
                 } else {
                     Vec::new()
@@ -7011,6 +7035,13 @@ fn run_r_candidate_accuracy_batches(
                 "avalanche_batch_top_match_percentages",
                 json!(batch_top_match_percentages),
             );
+            if engine.avalanche_report_biases && engine.avalanche_center_threshold_best {
+                a.set_feature_stat(
+                    "r_candidate_accuracy",
+                    "avalanche_best_center_bias_report",
+                    json!(build_best_center_bias_report(max)),
+                );
+            }
         });
     } else {
         with_analytics(analytics, |a| {

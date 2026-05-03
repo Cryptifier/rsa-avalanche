@@ -86,6 +86,7 @@
     // Whether to write the near-center probabilities for each candidate into the session log; these are used for debugging and analysis but not needed for the core beam search workflow.
     "avalanche_report_biases": true, // Write final-tier near-center beam probabilities into the session log.
     "avalanche_center_threshold": 0.025, // Keep only probabilities within +/- this distance from 50% after normalization and spreading.
+    "avalanche_center_threshold_best": true, // When reporting center biases, emit only the best overall avalanche candidate in the session log.
     // Fitness function parameters for scoring the avalanche effect of each candidate against the sampled batch of ciphertext variants.
     "avalanche_fitness_scoring_pass": true, // Enable the fitness pass for Avalanche scoring.
     "avalanche_fitness_shift_bytes": 8, // Number of bytes to right-shift the ciphertext difference before applying the avalanche fitness function; set to 0 for no shift.

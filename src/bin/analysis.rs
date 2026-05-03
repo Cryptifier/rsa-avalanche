@@ -300,6 +300,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             .avalanche_combination_majority_vote_print,
         avalanche_report_biases: config.engine.avalanche_report_biases,
         avalanche_center_threshold: config.engine.avalanche_center_threshold,
+        avalanche_center_threshold_best: config.engine.avalanche_center_threshold_best,
         avalanche_use_top_beam: config.engine.avalanche_use_top_beam,
         avalanche_combination_keep_all_samples_in_memory: config
             .engine

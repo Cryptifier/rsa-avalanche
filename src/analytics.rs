@@ -86,6 +86,8 @@ pub struct AnalyticsCliArgs {
     pub avalanche_report_biases: bool,
     /// Maximum absolute distance from `0.5` retained in final-tier sampled Avalanche bias reports.
     pub avalanche_center_threshold: f64,
+    /// Whether center-bias session reporting should keep only the best overall Avalanche candidate.
+    pub avalanche_center_threshold_best: bool,
     /// Whether recursive Avalanche tiers carry forward the top beam-search bits instead of majority-vote bits.
     pub avalanche_use_top_beam: bool,
     /// Whether all sampled-avalanche combinations were retained in memory during the run.
@@ -145,6 +147,7 @@ pub(crate) struct AnalyticsCliInfo {
     avalanche_combination_majority_vote_print: bool,
     avalanche_report_biases: bool,
     avalanche_center_threshold: f64,
+    avalanche_center_threshold_best: bool,
     avalanche_use_top_beam: bool,
     avalanche_combination_keep_all_samples_in_memory: bool,
     avalanche_statistics_collection: bool,
@@ -434,6 +437,19 @@ pub struct AvalancheFinalTierBiasReport {
     pub center_biases: Vec<AvalancheCenterBiasEntry>,
 }
 
+/// Filtered near-center bias report for the best overall Avalanche result in one run.
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+pub struct AvalancheBestCenterBiasReport {
+    /// One-based analysis batch number containing the best overall Avalanche result.
+    pub batch_number: usize,
+    /// One-based final Avalanche tier index.
+    pub tier_index: usize,
+    /// One-based sample index within the final tier.
+    pub sample_index: usize,
+    /// Near-center bit probabilities retained for the best overall sample.
+    pub center_biases: Vec<AvalancheCenterBiasEntry>,
+}
+
 /// Serialized avalanche combination sample including beam-search output.
 #[derive(Debug, Serialize, Clone)]
 pub struct AvalancheCombinationSample {
@@ -618,6 +634,7 @@ impl SessionAnalytics {
                 .avalanche_combination_majority_vote_print,
             avalanche_report_biases: args.avalanche_report_biases,
             avalanche_center_threshold: args.avalanche_center_threshold,
+            avalanche_center_threshold_best: args.avalanche_center_threshold_best,
             avalanche_use_top_beam: args.avalanche_use_top_beam,
             avalanche_combination_keep_all_samples_in_memory: args
                 .avalanche_combination_keep_all_samples_in_memory,

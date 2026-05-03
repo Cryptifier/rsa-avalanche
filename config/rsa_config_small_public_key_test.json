@@ -66,6 +66,7 @@
     "avalanche_probability_spread_exponent": 0.80,
     "avalanche_report_biases": false,
     "avalanche_center_threshold": 0.01,
+    "avalanche_center_threshold_best": true,
     "avalanche_fitness_scoring_pass": true,
     "avalanche_fitness_shift_bytes": 4,
     "avalanche_fitness_bit_width": 32,

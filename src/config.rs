@@ -194,6 +194,9 @@ pub struct EngineConfig {
     /// Maximum absolute distance from `0.5` retained in final-tier sampled Avalanche bias reports.
     #[serde(default = "default_avalanche_center_threshold")]
     pub avalanche_center_threshold: f64,
+    /// Whether final-tier sampled Avalanche bias reporting should keep only the best overall Avalanche candidate.
+    #[serde(default = "default_avalanche_center_threshold_best")]
+    pub avalanche_center_threshold_best: bool,
     /// Whether recursive Avalanche tiers carry forward the top beam-search bits instead of majority-vote bits.
     #[serde(default = "default_avalanche_use_top_beam")]
     pub avalanche_use_top_beam: bool,
@@ -417,6 +420,7 @@ impl Default for EngineConfig {
                 default_avalanche_combination_majority_vote_print(),
             avalanche_report_biases: default_avalanche_report_biases(),
             avalanche_center_threshold: default_avalanche_center_threshold(),
+            avalanche_center_threshold_best: default_avalanche_center_threshold_best(),
             avalanche_use_top_beam: default_avalanche_use_top_beam(),
             avalanche_combination_keep_all_samples_in_memory:
                 default_avalanche_combination_keep_all_samples_in_memory(),
@@ -1424,6 +1428,20 @@ fn default_avalanche_center_threshold() -> f64 {
     0.01
 }
 
+/// Default mode for final-tier Avalanche center-bias session reporting.
+///
+/// # Parameters
+/// - None.
+///
+/// # Returns
+/// - `bool`: `true` so center-bias reports default to the single best overall Avalanche result.
+///
+/// # Expected Output
+/// - Returns the default best-only reporting mode; no stdout/stderr output.
+fn default_avalanche_center_threshold_best() -> bool {
+    true
+}
+
 /// Default flag for carrying forward the top beam-search result between recursive avalanche tiers.
 ///
 /// # Parameters
@@ -1979,6 +1997,7 @@ mod tests {
         assert!(engine.avalanche_statistics_collection);
         assert!(!engine.avalanche_report_biases);
         assert_eq!(engine.avalanche_center_threshold, 0.01);
+        assert!(engine.avalanche_center_threshold_best);
         assert_eq!(engine.avalanche_combination_recursive_resample_count, 0);
         assert!(!engine.avalanche_combination_hamming_distance_prune);
         assert_eq!(

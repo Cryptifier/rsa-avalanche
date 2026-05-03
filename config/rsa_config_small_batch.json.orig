@@ -70,6 +70,7 @@
     "avalanche_probability_spread_exponent": 0.80, //0.45
     "avalanche_report_biases": false, // Write final-tier near-center beam probabilities into the session log.
     "avalanche_center_threshold": 0.01, // Keep only probabilities within +/- this distance from 50% after normalization and spreading.
+    "avalanche_center_threshold_best": true, // When reporting center biases, emit only the best overall avalanche candidate in the session log.
     "combiner_k_oracles": 100,
     "combiner_tie_breaker": true,
     "base_convert": false,
