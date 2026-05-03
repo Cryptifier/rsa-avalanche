@@ -15,6 +15,7 @@ RUN_TESTS=${RUN_TESTS:-0}
 RUN_PCA=${RUN_PCA:-0}
 PCA_OUTPUT=${PCA_OUTPUT:-"pca_clusters.png"}
 VERDICT_MATCH_THRESHOLD_PCT=${VERDICT_MATCH_THRESHOLD_PCT:-75}
+SESSION_JSON_PATH=${SESSION_JSON_PATH:-}
 
 read -r -a EXTRA_ARGS <<< "${ANALYSIS_EXTRA_ARGS}"
 
@@ -55,6 +56,11 @@ RESET=$'\033[0m'
 if [[ "${RESUME}" != "1" ]]; then
   : > "${ANALYSIS_LOG}"
   : > "${SCRIPT_LOG}"
+fi
+
+if [[ -n "${SESSION_JSON_PATH}" && "${RUNS}" != "1" ]]; then
+  echo "SESSION_JSON_PATH requires RUNS=1, got ${RUNS}." >&2
+  exit 1
 fi
 
 exec > >(tee -a "${SCRIPT_LOG}") 2>&1
@@ -121,7 +127,12 @@ for i in $(seq 1 "${RUNS}"); do
   seed=$((SEED_START + i - 1))
   run_output="$(mktemp)"
   start_ns=$(date +%s%N)
-  session_path="${LOG_DIR}/session_${run_stamp}_seed_${seed}.json"
+  if [[ -n "${SESSION_JSON_PATH}" ]]; then
+    mkdir -p "$(dirname "${SESSION_JSON_PATH}")"
+    session_path="${SESSION_JSON_PATH}"
+  else
+    session_path="${LOG_DIR}/session_${run_stamp}_seed_${seed}.json"
+  fi
 
   echo ""
   echo "===== RUN ${i} (seed ${seed}) ====="
