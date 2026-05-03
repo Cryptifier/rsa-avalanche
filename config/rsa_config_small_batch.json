@@ -70,7 +70,7 @@
     // Small-batch feature: score a large pool once, then draw many avalanche
     // combinations from that scored batch to estimate per-bit agreement.
     "analysis_batch_enable": true,
-    "analysis_batch_messages": 100000, // Number of ciphertext variants scored per batch before avalanche sampling.
+    "analysis_batch_messages": 125000, // Number of ciphertext variants scored per batch before avalanche sampling.
     "analysis_batch_candidates": 500, // Number of r candidates scored in each batch before sampling combinations.
     "analysis_batch_batches": 1, // Number of scored batches to run for the small-batch beam workflow.
     "sqlite_soft_heap": 10737418240,
@@ -88,18 +88,18 @@
     "avalanche_fitness_shift_bytes": 8, // Number of bytes to right-shift the ciphertext difference before applying the avalanche fitness function; set to 0 for no shift.
     "avalanche_fitness_bit_width": 64, // Number of bits to consider for the zero padding fitness function.
     "avalanche_fitness_r_candidate_limit": 0, // Cap how many r candidates can be scored by the avalanche fitness function; set to 0 for no limit.
-    "avalanche_fitness_cx_candidate_limit": 1000, // Cap how many c^x variants per r candidate can be scored by the avalanche fitness function; set to 0 for no limit.
+    "avalanche_fitness_cx_candidate_limit": 1250, // Cap how many c^x variants per r candidate can be scored by the avalanche fitness function; set to 0 for no limit.
     "avalanche_fitness_use_threshold": false, // Default to false.
     "avalanche_fitness_threshold": 0.510,
     // Cap how many distinct r values can appear in one sampled avalanche input;
     // each selected r still contributes all of its sampled c^x variants.
     "avalanche_combination_mixed_r_candidates": 64,
-    "avalanche_combination_samples": 100000, // N: number of sampled combinations evaluated by avalanche per batch.
+    "avalanche_combination_samples": 200000, // N: number of sampled combinations evaluated by avalanche per batch.
     "avalanche_combination_size": 100, // Number of scored items taken in each sampled combination.
     "avalanche_combination_pool_size": 100000, // Legacy compatibility field; runtime sampling now always uses the full batch-sized pool.
-    "avalanche_combination_recursion_depth": 2, // Run one recursive Avalanche tier on top of the sampled-input tier.
-    "avalanche_combination_recursive_group_size": 32, // Number of prior-tier sample outputs grouped into each recursive Avalanche call.
-    "avalanche_combination_recursive_resample_count": 100000, // 0 preserves one-pass regrouping; set >0 to resample prior-tier outputs to a target count.
+    "avalanche_combination_recursion_depth": 6, // Run one recursive Avalanche tier on top of the sampled-input tier.
+    "avalanche_combination_recursive_group_size": 64, // Number of prior-tier sample outputs grouped into each recursive Avalanche call.
+    "avalanche_combination_recursive_resample_count": 200000, // 0 preserves one-pass regrouping; set >0 to resample prior-tier outputs to a target count.
     // Hamming-distance pruning keeps a central percentile band of scored items
     // before sampling, then optionally adds some tail outliers back in.
     "avalanche_combination_hamming_distance_prune": true,
