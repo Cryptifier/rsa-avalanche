@@ -10,9 +10,10 @@ use std::{
 
 use clap::{Parser, ValueEnum};
 use num_bigint::BigUint;
-use num_traits::One;
+use num_traits::{One, ToPrimitive};
 use rsademo::config::{RsaKeyFileFormat, load_rsa_key_material_from_yaml_path};
 use rsademo::math::{choose_exponent, mod_inverse, random_prime_with_bits};
+use rsademo::pgp::{import_rsa_public_key_from_pgp_path, parse_openpgp_file_path};
 use rsademo::rng::{RngChoice, RngMode};
 use serde::Serialize;
 
@@ -25,7 +26,7 @@ const MODULUS_MODE_ATTEMPT_LIMIT: usize = 10_000;
 #[derive(Parser, Debug)]
 #[command(
     name = "kgen",
-    about = "Generate RSA private keys and emit matching public-key YAML",
+    about = "Generate RSA key YAML, convert existing YAML keys, and import OpenPGP files",
     author,
     version
 )]
@@ -57,6 +58,18 @@ struct Args {
     /// Existing rsa-private-key-v1 YAML file to convert into rsa-public-key-v1 output
     #[arg(long)]
     input_private_key: Option<String>,
+
+    /// Existing OpenPGP public-key file to convert into rsa-public-key-v1 output
+    #[arg(long)]
+    input_pgp_public_key: Option<String>,
+
+    /// Existing OpenPGP encrypted or packetized file to unpack into pgp-file-v1 YAML
+    #[arg(long)]
+    input_pgp_file: Option<String>,
+
+    /// Optional YAML output path for unpacked OpenPGP packet contents
+    #[arg(long)]
+    pgp_output: Option<String>,
 
     /// Overwrite the output path if it already exists
     #[arg(long)]
@@ -172,6 +185,62 @@ fn main() -> Result<(), Box<dyn Error>> {
 /// # Expected Output
 /// - Writes generated private/public YAML files or converts a private YAML into public-key YAML and prints a summary to stdout.
 fn run_kgen(args: Args) -> Result<(), Box<dyn Error>> {
+    let import_mode_count = usize::from(args.input_private_key.is_some())
+        + usize::from(args.input_pgp_public_key.is_some())
+        + usize::from(args.input_pgp_file.is_some());
+    if import_mode_count > 1 {
+        return Err(
+            "--input-private-key, --input-pgp-public-key, and --input-pgp-file are mutually exclusive"
+                .into(),
+        );
+    }
+
+    if let Some(input_pgp_file) = args.input_pgp_file.as_deref() {
+        if args.pgp_output.is_none() {
+            return Err("--input-pgp-file requires --pgp-output".into());
+        }
+        if args.public_output.is_some() || args.input_private_key.is_some() {
+            return Err("--input-pgp-file does not support RSA key conversion outputs".into());
+        }
+
+        let document = parse_openpgp_file_path(Path::new(input_pgp_file))?;
+        let pgp_output = args.pgp_output.as_deref().unwrap_or_default();
+        write_yaml_file(pgp_output, &document, args.force)?;
+        println!(
+            "Unpacked OpenPGP file: packets {} source {} output {}",
+            document.packet_count, input_pgp_file, pgp_output
+        );
+        return Ok(());
+    }
+
+    if let Some(input_pgp_public_key) = args.input_pgp_public_key.as_deref() {
+        let public_output = args
+            .public_output
+            .as_deref()
+            .ok_or("--input-pgp-public-key requires --public-output")?;
+        let imported = import_rsa_public_key_from_pgp_path(Path::new(input_pgp_public_key))?;
+        let public_document = build_public_key_document_from_components(
+            &imported.modulus,
+            &imported.public_exponent,
+        )?;
+        write_yaml_file(public_output, &public_document, args.force)?;
+        if let Some(pgp_output) = args.pgp_output.as_deref() {
+            write_yaml_file(pgp_output, &imported.parsed_file, args.force)?;
+            println!("Wrote unpacked OpenPGP YAML output {}", pgp_output);
+        }
+        println!(
+            "Imported OpenPGP RSA public key: modulus-bits {} e {} output {}",
+            imported.modulus.bits(),
+            imported.public_exponent,
+            public_output
+        );
+        return Ok(());
+    }
+
+    if args.pgp_output.is_some() {
+        return Err("--pgp-output requires --input-pgp-public-key or --input-pgp-file".into());
+    }
+
     let rng_mode = if args.crypto_rng {
         KeyRngMode::Crypto
     } else {
@@ -449,15 +518,37 @@ fn build_private_key_document(
 /// # Expected Output
 /// - Returns the structured public-key YAML payload; no stdout/stderr output.
 fn build_public_key_document(key: &GeneratedPrivateKey) -> RsaPublicKeyFile {
-    RsaPublicKeyFile {
+    build_public_key_document_from_components(&key.n, &key.e)
+        .expect("generated RSA key should always have a supported public exponent")
+}
+
+/// Builds the serialized YAML document for an RSA public key from explicit components.
+///
+/// # Parameters
+/// - `modulus`: RSA modulus `n`.
+/// - `public_exponent`: RSA public exponent `e`.
+///
+/// # Returns
+/// - `Result<RsaPublicKeyFile, Box<dyn Error>>`: Serializable public-key YAML document.
+///
+/// # Expected Output
+/// - Returns the structured public-key payload; no stdout/stderr output.
+fn build_public_key_document_from_components(
+    modulus: &BigUint,
+    public_exponent: &BigUint,
+) -> Result<RsaPublicKeyFile, Box<dyn Error>> {
+    let exponent_u64 = public_exponent.to_u64().ok_or(
+        "RSA public exponent does not fit into the existing rsa-public-key-v1 compatibility range",
+    )?;
+    Ok(RsaPublicKeyFile {
         format: "rsa-public-key-v1".to_string(),
         algorithm: "RSA".to_string(),
-        public_exponent: key.e.to_string(),
-        modulus: key.n.to_string(),
+        public_exponent: exponent_u64.to_string(),
+        modulus: modulus.to_string(),
         bit_lengths: RsaPublicKeyBitLengths {
-            modulus_bits: key.n.bits(),
+            modulus_bits: modulus.bits(),
         },
-    }
+    })
 }
 
 /// Writes a YAML document to disk.
@@ -557,6 +648,9 @@ mod tests {
             output: DEFAULT_OUTPUT_PATH.to_string(),
             public_output: None,
             input_private_key: None,
+            input_pgp_public_key: None,
+            input_pgp_file: None,
+            pgp_output: None,
             force: false,
             seed: None,
             crypto_rng: false,
@@ -573,6 +667,9 @@ mod tests {
         assert_eq!(args.output, DEFAULT_OUTPUT_PATH);
         assert!(args.public_output.is_none());
         assert!(args.input_private_key.is_none());
+        assert!(args.input_pgp_public_key.is_none());
+        assert!(args.input_pgp_file.is_none());
+        assert!(args.pgp_output.is_none());
         assert_eq!(args.public_exponent, DEFAULT_PUBLIC_EXPONENT);
     }
 
@@ -678,5 +775,54 @@ mod tests {
         assert!(err.to_string().contains("--force"));
 
         let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn test_run_kgen_imports_openpgp_public_key_to_rsa_yaml() {
+        let public_key_path = temp_path("pgp_public_key_input").with_extension("asc");
+        let public_output_path = temp_path("pgp_public_key_output");
+        let pgp_public_key = "-----BEGIN PGP PUBLIC KEY BLOCK-----\nVersion: Test Suite\n\nxg0EEjRWeAEADAyhAAUR\n=wIfx\n-----END PGP PUBLIC KEY BLOCK-----\n";
+        fs::write(&public_key_path, pgp_public_key).expect("write pgp public key");
+
+        let mut args = base_args();
+        args.input_pgp_public_key = Some(public_key_path.to_string_lossy().to_string());
+        args.public_output = Some(public_output_path.to_string_lossy().to_string());
+        args.force = true;
+
+        run_kgen(args).expect("import pgp public key");
+        let yaml = fs::read_to_string(&public_output_path).expect("read rsa public output");
+        let material = load_rsa_key_material_from_yaml_path(&public_output_path)
+            .expect("parse rsa public yaml");
+
+        assert!(yaml.contains("format: rsa-public-key-v1"));
+        assert_eq!(material.public_exponent, 17);
+        assert_eq!(material.modulus.to_string(), "3233");
+
+        let _ = fs::remove_file(public_key_path);
+        let _ = fs::remove_file(public_output_path);
+    }
+
+    #[test]
+    fn test_run_kgen_unpacks_openpgp_file_to_yaml() {
+        let message_path = temp_path("pgp_message_input").with_extension("asc");
+        let yaml_output_path = temp_path("pgp_message_output");
+        let pgp_message = "-----BEGIN PGP MESSAGE-----\nVersion: Test Suite\n\nwQ8DAQIDBAUGBwgBABUSNFbSCQHerb7vyv66vg==\n=qExN\n-----END PGP MESSAGE-----\n";
+        fs::write(&message_path, pgp_message).expect("write pgp message");
+
+        let mut args = base_args();
+        args.input_pgp_file = Some(message_path.to_string_lossy().to_string());
+        args.pgp_output = Some(yaml_output_path.to_string_lossy().to_string());
+        args.force = true;
+
+        run_kgen(args).expect("unpack pgp file");
+        let yaml = fs::read_to_string(&yaml_output_path).expect("read pgp yaml output");
+
+        assert!(yaml.contains("format: pgp-file-v1"));
+        assert!(yaml.contains("block_type: PGP MESSAGE"));
+        assert!(yaml.contains("packet_tag: 1"));
+        assert!(yaml.contains("packet_tag: 18"));
+
+        let _ = fs::remove_file(message_path);
+        let _ = fs::remove_file(yaml_output_path);
     }
 }

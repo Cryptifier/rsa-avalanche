@@ -10,7 +10,10 @@ This file collects the configuration material that used to live in `README.md`.
 # Key YAML
 - `kgen` writes RSA private keys as YAML under `config/keys`.
 - `kgen --public-output ...` writes matching RSA public keys as `rsa-public-key-v1` YAML.
+- `kgen --input-pgp-public-key ... --public-output ...` imports RSA public keys from OpenPGP files into the same `rsa-public-key-v1` YAML format.
+- `kgen --input-pgp-file ... --pgp-output ...` writes unpacked OpenPGP packet contents as `pgp-file-v1` YAML.
 - Non-secret example schemas live at `config/keys/private_key.example.yaml` and `config/keys/public_key.example.yaml`.
+- A non-secret `pgp-file-v1` schema example lives at `config/keys/pgp_file.example.yaml`.
 - The tracked repository ignores the default generated key path `config/keys/private_key.yaml`.
 - Tracked examples include both private and public YAMLs for the small-batch keys under `config/keys/`.
 

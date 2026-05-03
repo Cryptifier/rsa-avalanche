@@ -96,6 +96,8 @@ cargo run --bin demo -- --decrypt --ciphertext 0x1234
 cargo run --bin kgen
 cargo run --bin kgen -- --size-mode modulus --modulus-bits 144 --output config/keys/private_key.yaml --public-output config/keys/public_key.yaml
 cargo run --bin kgen -- --input-private-key config/keys/private_key.yaml --public-output config/keys/public_key.yaml --force
+cargo run --bin kgen -- --input-pgp-public-key public.asc --public-output config/keys/public_key.yaml --force
+cargo run --bin kgen -- --input-pgp-file message.asc --pgp-output config/keys/pgp_message.yaml --force
 ```
 
 - `--size-mode <prime|modulus>`: Choose whether generation is driven by prime size or modulus size. Default `prime`.
@@ -105,6 +107,9 @@ cargo run --bin kgen -- --input-private-key config/keys/private_key.yaml --publi
 - `-o, --output <PATH>`: Private-key YAML output path for generated keys. Default `config/keys/private_key.yaml`.
 - `--public-output <PATH>`: Optional public-key YAML output path for the generated or imported private key.
 - `--input-private-key <PATH>`: Existing `rsa-private-key-v1` YAML file to convert into `rsa-public-key-v1`, similar to extracting a public key from a private PEM with `openssl`.
+- `--input-pgp-public-key <PATH>`: Existing OpenPGP public-key file to convert into `rsa-public-key-v1`. Optionally combine with `--pgp-output` to also save the unpacked packet structure.
+- `--input-pgp-file <PATH>`: Existing OpenPGP encrypted or packetized file to unpack into `pgp-file-v1` YAML.
+- `--pgp-output <PATH>`: YAML output path for the unpacked `pgp-file-v1` OpenPGP packet representation.
 - `--force`: Overwrite an existing output file.
 - `--seed <u64>`: Optional deterministic RNG seed for reproducible key generation.
 - `--crypto-rng`: Use cryptographic RNGs instead of the standard seeded generator.
