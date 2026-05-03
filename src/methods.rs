@@ -33,10 +33,10 @@ const BLUE: RGBColor = (30, 144, 255);
 const BLACK: RGBColor = (0, 0, 0);
 
 use crate::analytics::{
-    AvalancheCombinationBeamResult, AvalancheCombinationSample, AvalancheCombinationSampleInput,
-    AvalancheTierSampleStat, AvalancheTierStatistics, RCandidateAccuracyBatch,
-    RCandidateTraceBatch, RCandidateTraceEntry, SessionAnalytics,
-    generate_r_candidates_with_analytics,
+    AvalancheCenterBiasEntry, AvalancheCombinationBeamResult, AvalancheCombinationSample,
+    AvalancheCombinationSampleInput, AvalancheFinalTierBiasReport, AvalancheTierSampleStat,
+    AvalancheTierStatistics, RCandidateAccuracyBatch, RCandidateTraceBatch, RCandidateTraceEntry,
+    SessionAnalytics, generate_r_candidates_with_analytics,
 };
 use crate::avalanche::{
     AvalancheBuilder, AvalancheInput, AvalancheNode, mirror_inverted_candidates,
@@ -3836,6 +3836,7 @@ pub(crate) struct SelectedAvalancheSample {
     pub(crate) top_beam_score: f64,
     pub(crate) top_beam_match_pct: Option<f64>,
     pub(crate) best_match_pct: f64,
+    pub(crate) center_biases: Vec<AvalancheCenterBiasEntry>,
     pub(crate) node: AvalancheNode,
 }
 
@@ -4420,6 +4421,11 @@ fn finalize_avalanche_sample(
         .unwrap_or(0.0)
         .max(majority_vote_match_pct);
     let sample_index = sample_index + 1;
+    let center_biases = if engine.avalanche_report_biases {
+        build_center_bias_entries(&beam_probabilities, engine.avalanche_center_threshold)
+    } else {
+        Vec::new()
+    };
     let stored_node = compact_stored_avalanche_node(&avalanche_search.node);
 
     Ok(ComputedAvalancheSample {
@@ -4436,6 +4442,7 @@ fn finalize_avalanche_sample(
             top_beam_score,
             top_beam_match_pct,
             best_match_pct,
+            center_biases,
             node: stored_node,
         },
         majority_vote_ones_count: majority_distribution.ones_count,
@@ -4483,6 +4490,79 @@ fn build_avalanche_tier_statistics(
                 best_match_pct: sample.best_match_pct,
             })
             .collect(),
+    }
+}
+
+/// Builds the filtered near-center bias report for one finalized sampled-Avalanche output.
+///
+/// # Parameters
+/// - `probabilities`: Final beam probabilities after normalization and spreading.
+/// - `center_threshold`: Inclusive maximum absolute distance from `0.5`.
+///
+/// # Returns
+/// - `Vec<AvalancheCenterBiasEntry>`: Filtered bit positions that remain near the decision boundary.
+///
+/// # Expected Output
+/// - Returns filtered report entries without stdout/stderr output.
+fn build_center_bias_entries(
+    probabilities: &[f64],
+    center_threshold: f64,
+) -> Vec<AvalancheCenterBiasEntry> {
+    probabilities
+        .iter()
+        .copied()
+        .enumerate()
+        .filter_map(|(bit_index_lsb0, probability_one)| {
+            let signed_distance_from_half = probability_one - 0.5;
+            (signed_distance_from_half.abs() <= center_threshold).then_some(
+                AvalancheCenterBiasEntry {
+                    bit_index_lsb0,
+                    probability_one,
+                    signed_distance_from_half,
+                },
+            )
+        })
+        .collect()
+}
+
+/// Builds final-tier near-center bias reports for sampled-Avalanche outputs.
+///
+/// # Parameters
+/// - `samples`: Final-tier samples produced for one analysis batch.
+///
+/// # Returns
+/// - `Vec<AvalancheFinalTierBiasReport>`: Filtered per-sample reports ready for session logging.
+///
+/// # Expected Output
+/// - Returns report entries without stdout/stderr output.
+fn build_final_tier_bias_reports(
+    samples: &[SelectedAvalancheSample],
+) -> Vec<AvalancheFinalTierBiasReport> {
+    samples
+        .iter()
+        .map(|sample| AvalancheFinalTierBiasReport {
+            tier_index: sample.tier_index,
+            sample_index: sample.sample_index,
+            center_biases: sample.center_biases.clone(),
+        })
+        .collect()
+}
+
+/// Validates the configured final-tier near-center bias-report threshold.
+///
+/// # Parameters
+/// - `engine`: Engine configuration providing the report threshold.
+///
+/// # Returns
+/// - `Result<(), Box<dyn Error>>`: `Ok(())` when the threshold lies in `[0.0, 0.5]`.
+///
+/// # Expected Output
+/// - Returns validation status without stdout/stderr output.
+fn validate_avalanche_center_threshold(engine: &EngineConfig) -> Result<(), Box<dyn Error>> {
+    if (0.0..=0.5).contains(&engine.avalanche_center_threshold) {
+        Ok(())
+    } else {
+        Err("avalanche_center_threshold must be in [0, 0.5]".into())
     }
 }
 
@@ -4618,6 +4698,7 @@ fn execute_sampled_avalanche_sample(
         top_beam_score: computed.sample.top_beam_score,
         top_beam_match_pct: computed.sample.top_beam_match_pct,
         best_match_pct: computed.sample.best_match_pct,
+        center_biases: computed.sample.center_biases.clone(),
         node: computed.sample.node.clone(),
     };
     let retained_sample = if keep_all_samples {
@@ -4786,6 +4867,7 @@ fn execute_sampled_avalanche_sample_from_cache(
         top_beam_score: computed.sample.top_beam_score,
         top_beam_match_pct: computed.sample.top_beam_match_pct,
         best_match_pct: computed.sample.best_match_pct,
+        center_biases: computed.sample.center_biases.clone(),
         node: computed.sample.node.clone(),
     };
     let retained_sample = if keep_all_samples {
@@ -5048,6 +5130,7 @@ fn run_sampled_avalanche_beam_search_cached(
         );
     }
     validate_avalanche_fitness_threshold(engine)?;
+    validate_avalanche_center_threshold(engine)?;
 
     let cached_input_total = count_cached_scored_inputs(cache, batch_number)?;
     if cached_input_total == 0 {
@@ -5794,6 +5877,7 @@ fn run_sampled_avalanche_beam_search(
         );
     }
     validate_avalanche_fitness_threshold(engine)?;
+    validate_avalanche_center_threshold(engine)?;
     if scored_inputs.is_empty() {
         return Ok(SampledAvalancheBatchResult::default());
     }
@@ -6875,6 +6959,11 @@ fn run_r_candidate_accuracy_batches(
                     .evaluated_candidates,
                 avalanche_combination_sample_count: sampled_avalanche_result.sample_count,
                 avalanche_tier_statistics: sampled_avalanche_result.tier_statistics,
+                avalanche_final_tier_bias_reports: if engine.avalanche_report_biases {
+                    build_final_tier_bias_reports(&sampled_avalanche_result.final_tier_samples)
+                } else {
+                    Vec::new()
+                },
                 avalanche_combination_samples: sampled_avalanche_result.retained_samples,
             });
         });
@@ -8228,6 +8317,7 @@ mod tests {
             top_beam_score: 0.0,
             top_beam_match_pct: None,
             best_match_pct: 75.0,
+            center_biases: Vec::new(),
             node: AvalancheNode::new(vec![false, false, false], vec![2.5, -1.0, 4.0]),
         };
 
@@ -8254,6 +8344,7 @@ mod tests {
             top_beam_score: 0.0,
             top_beam_match_pct: None,
             best_match_pct: 75.0,
+            center_biases: Vec::new(),
             node: AvalancheNode::new(vec![true, true, true], vec![2.5, -1.0, 4.0]),
         };
 
@@ -8278,6 +8369,7 @@ mod tests {
             top_beam_score: 0.0,
             top_beam_match_pct: None,
             best_match_pct: 81.0,
+            center_biases: Vec::new(),
             node: AvalancheNode::new(vec![true, true, true], vec![2.5, -1.0, 4.0]),
         };
 
@@ -8302,6 +8394,48 @@ mod tests {
     }
 
     #[test]
+    fn test_build_center_bias_entries_filters_probabilities_near_half() {
+        let entries = build_center_bias_entries(&[0.48, 0.505, 0.63, 0.495], 0.02);
+
+        assert_eq!(entries.len(), 3);
+        assert_eq!(entries[0].bit_index_lsb0, 0);
+        assert_eq!(entries[0].probability_one, 0.48);
+        assert_eq!(entries[0].signed_distance_from_half, -0.02);
+        assert_eq!(entries[1].bit_index_lsb0, 1);
+        assert_eq!(entries[2].bit_index_lsb0, 3);
+    }
+
+    #[test]
+    fn test_build_final_tier_bias_reports_preserves_sample_metadata() {
+        let reports = build_final_tier_bias_reports(&[SelectedAvalancheSample {
+            sample_index: 2,
+            tier_index: 4,
+            input_count: 3,
+            average_score_pct: 72.0,
+            beam_results: Vec::new(),
+            majority_vote_bits: vec![true],
+            majority_vote_match_pct: 72.0,
+            majority_vote_ones_match_pct: 72.0,
+            best_bits: vec![true],
+            top_beam_score: 0.0,
+            top_beam_match_pct: Some(72.0),
+            best_match_pct: 72.0,
+            center_biases: vec![AvalancheCenterBiasEntry {
+                bit_index_lsb0: 5,
+                probability_one: 0.501,
+                signed_distance_from_half: 0.001,
+            }],
+            node: AvalancheNode::new(vec![true], vec![0.0]),
+        }]);
+
+        assert_eq!(reports.len(), 1);
+        assert_eq!(reports[0].tier_index, 4);
+        assert_eq!(reports[0].sample_index, 2);
+        assert_eq!(reports[0].center_biases.len(), 1);
+        assert_eq!(reports[0].center_biases[0].bit_index_lsb0, 5);
+    }
+
+    #[test]
     fn test_should_replace_selected_sample_prefers_match_pct_by_default() {
         let current = SelectedAvalancheSample {
             sample_index: 1,
@@ -8316,6 +8450,7 @@ mod tests {
             top_beam_score: 0.80,
             top_beam_match_pct: Some(60.0),
             best_match_pct: 60.0,
+            center_biases: Vec::new(),
             node: AvalancheNode::new(vec![true], vec![0.0]),
         };
         let candidate = SelectedAvalancheSample {
@@ -8331,6 +8466,7 @@ mod tests {
             top_beam_score: 0.20,
             top_beam_match_pct: Some(75.0),
             best_match_pct: 75.0,
+            center_biases: Vec::new(),
             node: AvalancheNode::new(vec![false], vec![0.0]),
         };
 
@@ -8361,6 +8497,7 @@ mod tests {
             top_beam_score: 0.30,
             top_beam_match_pct: Some(90.0),
             best_match_pct: 90.0,
+            center_biases: Vec::new(),
             node: AvalancheNode::new(vec![true], vec![0.0]),
         };
         let candidate = SelectedAvalancheSample {
@@ -8376,6 +8513,7 @@ mod tests {
             top_beam_score: 0.90,
             top_beam_match_pct: Some(55.0),
             best_match_pct: 55.0,
+            center_biases: Vec::new(),
             node: AvalancheNode::new(vec![false], vec![0.0]),
         };
 
@@ -8456,6 +8594,7 @@ mod tests {
                 top_beam_score: 0.0,
                 top_beam_match_pct: None,
                 best_match_pct: 50.0 + index as f64,
+                center_biases: Vec::new(),
                 node: AvalancheNode::new(vec![index % 2 == 0], vec![0.0]),
             })
             .collect::<Vec<_>>();
@@ -8486,6 +8625,7 @@ mod tests {
                 top_beam_score: 0.0,
                 top_beam_match_pct: None,
                 best_match_pct: 50.0 + index as f64,
+                center_biases: Vec::new(),
                 node: AvalancheNode::new(vec![index % 2 == 0], vec![0.0]),
             })
             .collect::<Vec<_>>();
@@ -8523,6 +8663,7 @@ mod tests {
                 top_beam_score: 0.0,
                 top_beam_match_pct: None,
                 best_match_pct: 100.0,
+                center_biases: Vec::new(),
                 node: AvalancheNode::new(vec![false, false, false], vec![0.0, 0.0, 0.0]),
             },
             SelectedAvalancheSample {
@@ -8538,6 +8679,7 @@ mod tests {
                 top_beam_score: 0.0,
                 top_beam_match_pct: None,
                 best_match_pct: 100.0,
+                center_biases: Vec::new(),
                 node: AvalancheNode::new(vec![false, false, false], vec![0.0, 0.0, 0.0]),
             },
         ];
@@ -8579,6 +8721,7 @@ mod tests {
                 top_beam_score: 0.0,
                 top_beam_match_pct: None,
                 best_match_pct: 100.0,
+                center_biases: Vec::new(),
                 node: AvalancheNode::new(vec![false, false, false], vec![0.0, 0.0, 0.0]),
             },
             SelectedAvalancheSample {
@@ -8594,6 +8737,7 @@ mod tests {
                 top_beam_score: 0.0,
                 top_beam_match_pct: None,
                 best_match_pct: 100.0,
+                center_biases: Vec::new(),
                 node: AvalancheNode::new(vec![false, false, false], vec![0.0, 0.0, 0.0]),
             },
         ];

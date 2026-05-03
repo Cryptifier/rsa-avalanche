@@ -82,6 +82,10 @@ pub struct AnalyticsCliArgs {
     pub avalanche_combination_sample_smoothing: bool,
     /// Whether sampled avalanche prints a separate majority-vote summary for the selected sample.
     pub avalanche_combination_majority_vote_print: bool,
+    /// Whether final-tier sampled Avalanche reports near-center beam probabilities in the session log.
+    pub avalanche_report_biases: bool,
+    /// Maximum absolute distance from `0.5` retained in final-tier sampled Avalanche bias reports.
+    pub avalanche_center_threshold: f64,
     /// Whether recursive Avalanche tiers carry forward the top beam-search bits instead of majority-vote bits.
     pub avalanche_use_top_beam: bool,
     /// Whether all sampled-avalanche combinations were retained in memory during the run.
@@ -139,6 +143,8 @@ pub(crate) struct AnalyticsCliInfo {
     avalanche_combination_majority_vote: bool,
     avalanche_combination_sample_smoothing: bool,
     avalanche_combination_majority_vote_print: bool,
+    avalanche_report_biases: bool,
+    avalanche_center_threshold: f64,
     avalanche_use_top_beam: bool,
     avalanche_combination_keep_all_samples_in_memory: bool,
     avalanche_statistics_collection: bool,
@@ -326,6 +332,9 @@ pub struct RCandidateAccuracyBatch {
     /// Per-tier sample-accuracy statistics for recursive Avalanche execution.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub avalanche_tier_statistics: Vec<AvalancheTierStatistics>,
+    /// Filtered final-tier near-center bias reports retained for session-log output.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub avalanche_final_tier_bias_reports: Vec<AvalancheFinalTierBiasReport>,
     /// Detailed avalanche combination sample results for the batch.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub avalanche_combination_samples: Vec<AvalancheCombinationSample>,
@@ -401,6 +410,28 @@ pub struct AvalancheCombinationBeamResult {
     pub hex: String,
     /// Bit width of the candidate.
     pub bit_width: usize,
+}
+
+/// One final-tier beam probability retained because it sits near the `0.5` decision boundary.
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+pub struct AvalancheCenterBiasEntry {
+    /// Zero-based bit position in lsb0 order.
+    pub bit_index_lsb0: usize,
+    /// Final beam probability for predicting bit `1` after normalization and spreading.
+    pub probability_one: f64,
+    /// Signed offset from the `0.5` decision boundary.
+    pub signed_distance_from_half: f64,
+}
+
+/// Filtered near-center bias report for one final-tier sampled Avalanche output.
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+pub struct AvalancheFinalTierBiasReport {
+    /// One-based final Avalanche tier index.
+    pub tier_index: usize,
+    /// One-based sample index within the final tier.
+    pub sample_index: usize,
+    /// Near-center bit probabilities retained for the sample.
+    pub center_biases: Vec<AvalancheCenterBiasEntry>,
 }
 
 /// Serialized avalanche combination sample including beam-search output.
@@ -585,6 +616,8 @@ impl SessionAnalytics {
             avalanche_combination_sample_smoothing: args.avalanche_combination_sample_smoothing,
             avalanche_combination_majority_vote_print: args
                 .avalanche_combination_majority_vote_print,
+            avalanche_report_biases: args.avalanche_report_biases,
+            avalanche_center_threshold: args.avalanche_center_threshold,
             avalanche_use_top_beam: args.avalanche_use_top_beam,
             avalanche_combination_keep_all_samples_in_memory: args
                 .avalanche_combination_keep_all_samples_in_memory,

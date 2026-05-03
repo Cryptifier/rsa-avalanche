@@ -6,6 +6,7 @@ use diesel::dsl::count_star;
 use diesel::prelude::*;
 use diesel::r2d2::{ConnectionManager, CustomizeConnection, Error as R2D2Error, Pool};
 use diesel::sql_query;
+use diesel::sql_types::Text;
 use num_bigint::BigUint;
 use std::{
     collections::HashMap,
@@ -16,7 +17,8 @@ use std::{
 };
 
 use crate::analytics::{
-    AvalancheCombinationBeamResult, AvalancheTierSampleStat, AvalancheTierStatistics,
+    AvalancheCenterBiasEntry, AvalancheCombinationBeamResult, AvalancheTierSampleStat,
+    AvalancheTierStatistics,
 };
 use crate::avalanche::AvalancheNode;
 use crate::config::EngineConfig;
@@ -64,6 +66,7 @@ diesel::table! {
         recursive_bits -> Binary,
         recursive_bits_bit_len -> Integer,
         beam_results_json -> Text,
+        center_biases_json -> Text,
     }
 }
 
@@ -121,6 +124,7 @@ struct NewCachedAvalancheSample {
     recursive_bits: Vec<u8>,
     recursive_bits_bit_len: i32,
     beam_results_json: String,
+    center_biases_json: String,
 }
 
 #[derive(Debug, Queryable, Selectable)]
@@ -143,6 +147,7 @@ pub(crate) struct CachedAvalancheSampleRow {
     pub(crate) recursive_bits: Vec<u8>,
     pub(crate) recursive_bits_bit_len: i32,
     pub(crate) beam_results_json: String,
+    pub(crate) center_biases_json: String,
 }
 
 #[derive(Debug, Clone)]
@@ -155,6 +160,12 @@ struct AvalancheSqliteSettings {
     soft_heap_limit_bytes: i64,
     hard_heap_limit_bytes: i64,
     mmap_size_bytes: i64,
+}
+
+#[derive(Debug, QueryableByName)]
+struct SqliteTableInfoRow {
+    #[diesel(sql_type = Text)]
+    name: String,
 }
 
 #[derive(Debug, Default, Clone, Copy)]
@@ -348,6 +359,36 @@ pub(crate) struct AvalancheCacheGuard {
     page_rows: i64,
 }
 
+/// Adds one column to a SQLite table when the schema is missing it.
+///
+/// # Parameters
+/// - `connection`: SQLite connection to mutate.
+/// - `table_name`: Table whose schema should be checked.
+/// - `column_name`: Column that must exist.
+/// - `column_definition`: Full SQLite column definition used for `ALTER TABLE`.
+///
+/// # Returns
+/// - `Result<(), Box<dyn Error>>`: `Ok(())` when the column exists or is added successfully.
+///
+/// # Expected Output
+/// - Reads SQLite table metadata and may mutate the table schema; no stdout/stderr output.
+fn ensure_sqlite_column(
+    connection: &mut SqliteConnection,
+    table_name: &str,
+    column_name: &str,
+    column_definition: &str,
+) -> Result<(), Box<dyn Error>> {
+    let pragma = format!("PRAGMA table_info({table_name})");
+    let rows = sql_query(pragma).load::<SqliteTableInfoRow>(connection)?;
+    if rows.iter().any(|row| row.name == column_name) {
+        return Ok(());
+    }
+
+    let alter = format!("ALTER TABLE {table_name} ADD COLUMN {column_definition}");
+    sql_query(alter).execute(connection)?;
+    Ok(())
+}
+
 impl AvalancheCacheGuard {
     /// Creates a new temporary Avalanche cache database and initializes its schema.
     ///
@@ -422,10 +463,17 @@ impl AvalancheCacheGuard {
                 majority_vote_bits_bit_len INTEGER NOT NULL,
                 recursive_bits BLOB NOT NULL,
                 recursive_bits_bit_len INTEGER NOT NULL,
-                beam_results_json TEXT NOT NULL
+                beam_results_json TEXT NOT NULL,
+                center_biases_json TEXT NOT NULL DEFAULT '[]'
             )",
         )
         .execute(&mut connection)?;
+        ensure_sqlite_column(
+            &mut connection,
+            "avalanche_cache_samples",
+            "center_biases_json",
+            "center_biases_json TEXT NOT NULL DEFAULT '[]'",
+        )?;
         sql_query(
             "CREATE INDEX IF NOT EXISTS avalanche_cache_samples_batch_tier_idx
                 ON avalanche_cache_samples (batch_number, tier_index, sample_index)",
@@ -839,6 +887,7 @@ fn serialize_selected_sample_for_cache(
         recursive_bits_bit_len: i32::try_from(recursive_bits.len())
             .map_err(|_| "recursive bit length exceeds i32 range")?,
         beam_results_json: serde_json::to_string(&sample.beam_results)?,
+        center_biases_json: serde_json::to_string(&sample.center_biases)?,
     })
 }
 
@@ -981,6 +1030,8 @@ pub(crate) fn deserialize_selected_avalanche_sample_row(
 ) -> Result<SelectedAvalancheSample, Box<dyn Error>> {
     let beam_results =
         serde_json::from_str::<Vec<AvalancheCombinationBeamResult>>(&row.beam_results_json)?;
+    let center_biases =
+        serde_json::from_str::<Vec<AvalancheCenterBiasEntry>>(&row.center_biases_json)?;
     Ok(SelectedAvalancheSample {
         sample_index: usize::try_from(row.sample_index)
             .map_err(|_| "cached sample index exceeds usize range")?,
@@ -1007,6 +1058,7 @@ pub(crate) fn deserialize_selected_avalanche_sample_row(
         top_beam_score: row.top_beam_score,
         top_beam_match_pct: row.top_beam_match_pct,
         best_match_pct: row.best_match_pct,
+        center_biases,
         node: AvalancheNode::from_packed_bits(
             PackedBits::from_bytes_le(
                 &row.recursive_bits,

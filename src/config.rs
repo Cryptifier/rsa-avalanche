@@ -188,6 +188,12 @@ pub struct EngineConfig {
     /// Whether sampled avalanche prints a separate majority-vote summary for the selected sample.
     #[serde(default = "default_avalanche_combination_majority_vote_print")]
     pub avalanche_combination_majority_vote_print: bool,
+    /// Whether final-tier sampled Avalanche reports near-center beam probabilities in the session log.
+    #[serde(default = "default_avalanche_report_biases")]
+    pub avalanche_report_biases: bool,
+    /// Maximum absolute distance from `0.5` retained in final-tier sampled Avalanche bias reports.
+    #[serde(default = "default_avalanche_center_threshold")]
+    pub avalanche_center_threshold: f64,
     /// Whether recursive Avalanche tiers carry forward the top beam-search bits instead of majority-vote bits.
     #[serde(default = "default_avalanche_use_top_beam")]
     pub avalanche_use_top_beam: bool,
@@ -409,6 +415,8 @@ impl Default for EngineConfig {
             ),
             avalanche_combination_majority_vote_print:
                 default_avalanche_combination_majority_vote_print(),
+            avalanche_report_biases: default_avalanche_report_biases(),
+            avalanche_center_threshold: default_avalanche_center_threshold(),
             avalanche_use_top_beam: default_avalanche_use_top_beam(),
             avalanche_combination_keep_all_samples_in_memory:
                 default_avalanche_combination_keep_all_samples_in_memory(),
@@ -1388,6 +1396,34 @@ fn default_avalanche_combination_majority_vote_print() -> bool {
     true
 }
 
+/// Default flag for writing filtered final-tier Avalanche bias reports into the session log.
+///
+/// # Parameters
+/// - None.
+///
+/// # Returns
+/// - `bool`: `false` so runs avoid extra bias-report payloads unless explicitly enabled.
+///
+/// # Expected Output
+/// - Returns the default reporting flag; no stdout/stderr output.
+fn default_avalanche_report_biases() -> bool {
+    false
+}
+
+/// Default half-width around `0.5` retained in final-tier Avalanche bias reports.
+///
+/// # Parameters
+/// - None.
+///
+/// # Returns
+/// - `f64`: `0.01`, meaning reported probabilities must lie in `[0.49, 0.51]`.
+///
+/// # Expected Output
+/// - Returns the default center threshold; no stdout/stderr output.
+fn default_avalanche_center_threshold() -> f64 {
+    0.01
+}
+
 /// Default flag for carrying forward the top beam-search result between recursive avalanche tiers.
 ///
 /// # Parameters
@@ -1941,6 +1977,8 @@ mod tests {
 
         assert!(engine.avalanche_use_top_beam);
         assert!(engine.avalanche_statistics_collection);
+        assert!(!engine.avalanche_report_biases);
+        assert_eq!(engine.avalanche_center_threshold, 0.01);
         assert_eq!(engine.avalanche_combination_recursive_resample_count, 0);
         assert!(!engine.avalanche_combination_hamming_distance_prune);
         assert_eq!(
