@@ -5,6 +5,11 @@ Proof of concept by Nicholas LaRoche <nlaroche@cryptifier.dev>.
 
 ![Example output from `analysis`](95pct.png)
 
+# Resource Requirements
+- Use a ```c8a.12xlarge``` AWS instance with 48 AMD EPYC cores, 80,000 provisioned IOPS and 1,000 MB/s bandwidth for optimal performance.
+- Choose a disk size of at least 100 GB to accommodate the caching database and session artifacts.
+- Keep statistics logging disabled unless you want to track per-run scoring details in the database, which can significantly increase runtime and disk usage.
+
 # Theory
 - Use regular RSA encryption using a large modulus `N = pq` where `p` and `q` are large private primes.
 - Use homomorphic base switching to go from mod `N` to mod `N^0.850` where `N^0.850` is an easily factored modulus with at least three factors.
