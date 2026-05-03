@@ -5,6 +5,7 @@ use num_bigint::BigUint;
 use num_traits::Zero;
 use rayon::prelude::*;
 use std::{
+    cmp::Ordering as CmpOrdering,
     collections::{HashMap, HashSet},
     error::Error,
     sync::{
@@ -222,6 +223,36 @@ pub(crate) fn resolve_avalanche_fitness_retained_input_limit(
     }
 }
 
+/// Retains and sorts the highest-ranked prefix of a candidate pool.
+///
+/// # Parameters
+/// - `inputs`: Candidate pool to rank in place.
+/// - `retained_input_limit`: Maximum number of top-ranked items to keep, or `0` for no cap.
+/// - `compare`: Comparator that orders better candidates before worse candidates.
+///
+/// # Returns
+/// - `()`: This function returns nothing.
+///
+/// # Expected Output
+/// - Reorders `inputs` in place, keeping only the best-ranked prefix when a cap is configured.
+fn retain_best_ranked_inputs<T, F>(inputs: &mut Vec<T>, retained_input_limit: usize, compare: F)
+where
+    T: Send,
+    F: Fn(&T, &T) -> CmpOrdering + Sync + Send,
+{
+    if inputs.is_empty() {
+        return;
+    }
+
+    if retained_input_limit > 0 && inputs.len() > retained_input_limit {
+        let last_retained_index = retained_input_limit.saturating_sub(1);
+        inputs.select_nth_unstable_by(last_retained_index, |left, right| compare(left, right));
+        inputs.truncate(retained_input_limit);
+    }
+
+    inputs.par_sort_unstable_by(|left, right| compare(left, right));
+}
+
 /// Validates the configured normalized Avalanche fitness threshold when thresholding is enabled.
 ///
 /// # Parameters
@@ -429,7 +460,7 @@ pub(crate) fn apply_scored_avalanche_fitness_pass(
             format_beam_float(fitness_threshold, 3)
         );
     }
-    ranked_inputs.sort_by(|left, right| {
+    retain_best_ranked_inputs(&mut ranked_inputs, retained_input_limit, |left, right| {
         right
             .fitness_score
             .cmp(&left.fitness_score)
@@ -447,9 +478,6 @@ pub(crate) fn apply_scored_avalanche_fitness_pass(
             .then_with(|| left.input.message_index.cmp(&right.input.message_index))
             .then_with(|| left.input.x.cmp(&right.input.x))
     });
-    if retained_input_limit > 0 && ranked_inputs.len() > retained_input_limit {
-        ranked_inputs.truncate(retained_input_limit);
-    }
     let retained_group_count = ranked_inputs
         .iter()
         .map(|input| input.input.batch_candidate_index)
@@ -987,7 +1015,7 @@ pub(crate) fn apply_cached_scored_avalanche_fitness_pass(
             format_beam_float(fitness_threshold, 3)
         );
     }
-    ranked_inputs.sort_by(|left, right| {
+    retain_best_ranked_inputs(&mut ranked_inputs, retained_input_limit, |left, right| {
         right
             .fitness_score
             .cmp(&left.fitness_score)
@@ -996,9 +1024,6 @@ pub(crate) fn apply_cached_scored_avalanche_fitness_pass(
             .then_with(|| left.message_index.cmp(&right.message_index))
             .then_with(|| left.x.cmp(&right.x))
     });
-    if retained_input_limit > 0 && ranked_inputs.len() > retained_input_limit {
-        ranked_inputs.truncate(retained_input_limit);
-    }
     let retained_group_count = ranked_inputs
         .iter()
         .map(|input| input.batch_candidate_index)
