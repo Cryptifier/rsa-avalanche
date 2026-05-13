@@ -4150,19 +4150,20 @@ fn select_random_scored_inputs(
         .collect()
 }
 
-/// Builds non-overlapping sample plans from a flat item list.
+/// Builds distinct sample plans from a flat item list.
 ///
 /// # Parameters
-/// - `items`: Flat source list whose entries may appear at most once across all returned plans.
+/// - `items`: Flat source list whose entries may be reused across returned plans.
 /// - `group_size`: Maximum number of entries assigned to each plan.
 /// - `target_group_count`: Maximum number of plans to produce.
-/// - `rng`: Random number generator used to shuffle the source order once per tier.
+/// - `rng`: Random number generator used to sample candidate plans.
 ///
 /// # Returns
-/// - `Vec<Vec<T>>`: Non-overlapping plans drawn from the shuffled source list.
+/// - `Vec<Vec<T>>`: Distinct plans whose per-plan item sets are unique.
 ///
 /// # Expected Output
-/// - Returns partitioned plans without reusing items across plans; no stdout/stderr output.
+/// - Returns plans that never repeat an item within one plan and never duplicate the same item set
+///   across plans; source items may still appear in multiple different plans.
 fn build_unique_flat_sample_plans<T: Clone>(
     items: &[T],
     group_size: usize,
@@ -4173,33 +4174,56 @@ fn build_unique_flat_sample_plans<T: Clone>(
         return Vec::new();
     }
 
-    sample_unique_indices(items.len(), items.len(), rng)
-        .chunks(group_size)
-        .take(target_group_count)
-        .map(|chunk| {
-            chunk
-                .iter()
-                .filter_map(|&index| items.get(index).cloned())
-                .collect::<Vec<_>>()
-        })
-        .filter(|chunk| !chunk.is_empty())
-        .collect()
+    let sample_size = group_size.min(items.len());
+    let mut sample_plans = Vec::with_capacity(target_group_count);
+    let mut seen_signatures = HashSet::with_capacity(target_group_count);
+    let max_attempts = target_group_count
+        .saturating_mul(items.len().max(1))
+        .saturating_mul(8)
+        .max(64);
+    let mut attempts = 0usize;
+
+    while sample_plans.len() < target_group_count && attempts < max_attempts {
+        attempts += 1;
+        let sampled_indices = sample_unique_indices(items.len(), sample_size, rng);
+        if sampled_indices.is_empty() {
+            break;
+        }
+
+        let mut signature = sampled_indices.clone();
+        signature.sort_unstable();
+        if !seen_signatures.insert(signature) {
+            continue;
+        }
+
+        let plan = sampled_indices
+            .into_iter()
+            .filter_map(|index| items.get(index).cloned())
+            .collect::<Vec<_>>();
+        if !plan.is_empty() {
+            sample_plans.push(plan);
+        }
+    }
+
+    sample_plans
 }
 
-/// Builds non-overlapping sample plans while capping the number of distinct source groups per plan.
+/// Builds distinct sample plans while capping the number of distinct source groups per plan.
 ///
 /// # Parameters
 /// - `grouped_items`: Source items already grouped by originating `r` candidate.
 /// - `mixed_group_count`: Maximum number of distinct source groups allowed in any one plan.
 /// - `combination_size`: Maximum number of items assigned to each plan.
 /// - `target_group_count`: Maximum number of plans to produce.
-/// - `rng`: Random number generator used to shuffle group order and per-group item order.
+/// - `rng`: Random number generator used to sample candidate plans.
 ///
 /// # Returns
-/// - `Vec<Vec<T>>`: Non-overlapping plans that never reuse an item across plans.
+/// - `Vec<Vec<T>>`: Distinct plans that respect the per-plan source-group cap.
 ///
 /// # Expected Output
-/// - Returns partitioned plans without reusing items and without exceeding the per-plan group cap.
+/// - Returns plans that never reuse an item within one plan, never duplicate the same item set
+///   across plans, and never exceed the per-plan group cap; source items may still appear in
+///   multiple different plans.
 fn build_unique_grouped_sample_plans<T: Clone>(
     grouped_items: &[Vec<T>],
     mixed_group_count: usize,
@@ -4216,80 +4240,106 @@ fn build_unique_grouped_sample_plans<T: Clone>(
     }
 
     let distinct_group_limit = mixed_group_count.min(combination_size);
-    let mut remaining_groups = grouped_items
-        .iter()
-        .map(|group| {
-            sample_unique_indices(group.len(), group.len(), rng)
-                .into_iter()
-                .filter_map(|index| group.get(index).cloned())
-                .collect::<Vec<_>>()
-        })
-        .filter(|group| !group.is_empty())
-        .collect::<Vec<_>>();
     let mut sample_plans = Vec::new();
+    let mut seen_signatures = HashSet::with_capacity(target_group_count);
+    let max_attempts = target_group_count
+        .saturating_mul(grouped_items.len().max(1))
+        .saturating_mul(combination_size.max(1))
+        .saturating_mul(8)
+        .max(64);
+    let mut attempts = 0usize;
 
-    while sample_plans.len() < target_group_count {
-        let active_group_indices = remaining_groups
-            .iter()
-            .enumerate()
-            .filter_map(|(group_index, group)| (!group.is_empty()).then_some(group_index))
+    while sample_plans.len() < target_group_count && attempts < max_attempts {
+        attempts += 1;
+        let sampled_group_indices =
+            sample_unique_indices(grouped_items.len(), distinct_group_limit, rng);
+        if sampled_group_indices.is_empty() {
+            break;
+        }
+
+        let sampled_groups = sampled_group_indices
+            .into_iter()
+            .filter_map(|group_idx| {
+                grouped_items
+                    .get(group_idx)
+                    .filter(|group| !group.is_empty())
+                    .map(|group| (group_idx, group))
+            })
             .collect::<Vec<_>>();
-        if active_group_indices.is_empty() {
-            break;
+        if sampled_groups.is_empty() {
+            continue;
         }
 
-        let selected_group_indices =
-            sample_unique_indices(active_group_indices.len(), distinct_group_limit, rng)
-                .into_iter()
-                .filter_map(|position| active_group_indices.get(position).copied())
-                .collect::<Vec<_>>();
-        if selected_group_indices.is_empty() {
-            break;
+        let available_input_count = sampled_groups
+            .iter()
+            .map(|(_, group)| group.len())
+            .sum::<usize>();
+        if available_input_count == 0 {
+            continue;
         }
 
-        let mut sample_plan = Vec::with_capacity(combination_size);
-        for &group_index in &selected_group_indices {
-            if let Some(item) = remaining_groups[group_index].pop() {
-                sample_plan.push(item);
-                if sample_plan.len() == combination_size {
-                    break;
-                }
+        let mut selected_item_indices =
+            Vec::with_capacity(available_input_count.min(combination_size));
+        if available_input_count <= combination_size {
+            for (group_idx, group) in &sampled_groups {
+                selected_item_indices
+                    .extend((0..group.len()).map(|item_idx| (*group_idx, item_idx)));
             }
-        }
+        } else {
+            let required_group_slots = sampled_groups.len().min(combination_size);
+            let mut leftover_item_indices =
+                Vec::with_capacity(available_input_count - required_group_slots);
 
-        while sample_plan.len() < combination_size {
-            let refill_group_indices = selected_group_indices
-                .iter()
-                .copied()
-                .filter(|&group_index| !remaining_groups[group_index].is_empty())
-                .collect::<Vec<_>>();
-            if refill_group_indices.is_empty() {
-                break;
-            }
-
-            let refill_order =
-                sample_unique_indices(refill_group_indices.len(), refill_group_indices.len(), rng);
-            let mut consumed_in_pass = false;
-            for position in refill_order {
-                let group_index = refill_group_indices[position];
-                if let Some(item) = remaining_groups[group_index].pop() {
-                    sample_plan.push(item);
-                    consumed_in_pass = true;
-                    if sample_plan.len() == combination_size {
-                        break;
+            for (group_order, (group_idx, group)) in sampled_groups.iter().enumerate() {
+                let pick_indices = sample_unique_indices(group.len(), 1, rng);
+                if group_order < required_group_slots {
+                    if let Some(&picked_index) = pick_indices.first() {
+                        selected_item_indices.push((*group_idx, picked_index));
+                        for item_idx in 0..group.len() {
+                            if item_idx != picked_index {
+                                leftover_item_indices.push((*group_idx, item_idx));
+                            }
+                        }
+                        continue;
                     }
                 }
+
+                leftover_item_indices
+                    .extend((0..group.len()).map(|item_idx| (*group_idx, item_idx)));
             }
 
-            if !consumed_in_pass {
-                break;
+            let remaining_slots = combination_size.saturating_sub(selected_item_indices.len());
+            let leftover_indices =
+                sample_unique_indices(leftover_item_indices.len(), remaining_slots, rng);
+            for leftover_idx in leftover_indices {
+                if let Some(&(group_idx, item_idx)) = leftover_item_indices.get(leftover_idx) {
+                    selected_item_indices.push((group_idx, item_idx));
+                }
             }
         }
 
-        if sample_plan.is_empty() {
-            break;
+        if selected_item_indices.is_empty() {
+            continue;
         }
-        sample_plans.push(sample_plan);
+
+        let mut signature = selected_item_indices.clone();
+        signature.sort_unstable();
+        if !seen_signatures.insert(signature) {
+            continue;
+        }
+
+        let sample_plan = selected_item_indices
+            .into_iter()
+            .filter_map(|(group_idx, item_idx)| {
+                grouped_items
+                    .get(group_idx)
+                    .and_then(|group| group.get(item_idx))
+                    .cloned()
+            })
+            .collect::<Vec<_>>();
+        if !sample_plan.is_empty() {
+            sample_plans.push(sample_plan);
+        }
     }
 
     sample_plans
@@ -5613,7 +5663,7 @@ fn run_sampled_avalanche_beam_search_cached(
     }
     if effective_sample_count < sample_count {
         println!(
-            "Avalanche combination batch {} capped unique sampled combinations from {} to {} because tier-one inputs may only appear once across the tier",
+            "Avalanche combination batch {} capped unique sampled combinations from {} to {} because only that many distinct tier-one input sets were produced",
             batch_number, sample_count, effective_sample_count
         );
     }
@@ -5743,7 +5793,7 @@ fn run_sampled_avalanche_beam_search_cached(
         );
         if group_count < target_group_count {
             println!(
-                "Avalanche recursive tier {} for batch {} capped unique groups from {} to {} because prior-tier outputs may only appear once across the tier",
+                "Avalanche recursive tier {} for batch {} capped unique groups from {} to {} because only that many distinct prior-tier input sets were produced",
                 next_tier_index, batch_number, target_group_count, group_count
             );
         }
@@ -6310,7 +6360,7 @@ fn run_sampled_avalanche_beam_search(
     }
     if effective_sample_count < sample_count {
         println!(
-            "Avalanche combination batch {} capped unique sampled combinations from {} to {} because tier-one inputs may only appear once across the tier",
+            "Avalanche combination batch {} capped unique sampled combinations from {} to {} because only that many distinct tier-one input sets were produced",
             batch_number, sample_count, effective_sample_count
         );
     }
@@ -6439,7 +6489,7 @@ fn run_sampled_avalanche_beam_search(
         );
         if group_count < target_group_count {
             println!(
-                "Avalanche recursive tier {} for batch {} capped unique groups from {} to {} because prior-tier outputs may only appear once across the tier",
+                "Avalanche recursive tier {} for batch {} capped unique groups from {} to {} because only that many distinct prior-tier input sets were produced",
                 next_tier_index, batch_number, target_group_count, group_count
             );
         }
@@ -8841,42 +8891,68 @@ mod tests {
     }
 
     #[test]
-    fn test_build_unique_flat_sample_plans_caps_group_count_and_prevents_reuse() {
+    fn test_build_unique_flat_sample_plans_return_distinct_sets_with_cross_plan_reuse() {
         let inputs = (0..5usize).collect::<Vec<_>>();
 
         let mut rng = RngChoice::from_seed(RngMode::Crypto, 23);
         let sample_plans = build_unique_flat_sample_plans(&inputs, 2, 4, &mut rng);
+        let signatures = sample_plans
+            .iter()
+            .map(|plan| {
+                let mut signature = plan.clone();
+                signature.sort_unstable();
+                signature
+            })
+            .collect::<Vec<_>>();
+        let unique_signatures = signatures.iter().cloned().collect::<HashSet<_>>();
         let flattened = sample_plans
             .iter()
             .flat_map(|plan| plan.iter().copied())
             .collect::<Vec<_>>();
-        let unique = flattened.iter().copied().collect::<HashSet<_>>();
+        let unique_inputs = flattened.iter().copied().collect::<HashSet<_>>();
 
-        assert_eq!(sample_plans.len(), 3);
-        assert_eq!(sample_plans[0].len(), 2);
-        assert_eq!(sample_plans[1].len(), 2);
-        assert_eq!(sample_plans[2].len(), 1);
-        assert_eq!(flattened.len(), unique.len());
-        assert_eq!(unique.len(), inputs.len());
+        assert_eq!(sample_plans.len(), 4);
+        assert!(sample_plans.iter().all(|plan| plan.len() == 2));
+        assert!(
+            sample_plans
+                .iter()
+                .all(|plan| { plan.iter().copied().collect::<HashSet<_>>().len() == plan.len() })
+        );
+        assert_eq!(unique_signatures.len(), sample_plans.len());
+        assert!(flattened.len() > unique_inputs.len());
     }
 
     #[test]
-    fn test_build_unique_grouped_sample_plans_prevents_cross_sample_reuse() {
+    fn test_build_unique_grouped_sample_plans_return_distinct_sets_with_cross_plan_reuse() {
         let grouped_inputs = vec![
-            vec![(0usize, 0usize), (0usize, 1usize)],
-            vec![(1usize, 0usize), (1usize, 1usize)],
+            vec![(0usize, 0usize), (0usize, 1usize), (0usize, 2usize)],
+            vec![(1usize, 0usize), (1usize, 1usize), (1usize, 2usize)],
         ];
 
         let mut rng = RngChoice::from_seed(RngMode::Crypto, 29);
-        let sample_plans = build_unique_grouped_sample_plans(&grouped_inputs, 1, 2, 3, &mut rng);
+        let sample_plans = build_unique_grouped_sample_plans(&grouped_inputs, 1, 2, 4, &mut rng);
+        let signatures = sample_plans
+            .iter()
+            .map(|plan| {
+                let mut signature = plan.clone();
+                signature.sort_unstable();
+                signature
+            })
+            .collect::<Vec<_>>();
+        let unique_signatures = signatures.iter().cloned().collect::<HashSet<_>>();
         let flattened = sample_plans
             .iter()
             .flat_map(|plan| plan.iter().copied())
             .collect::<Vec<_>>();
-        let unique = flattened.iter().copied().collect::<HashSet<_>>();
+        let unique_inputs = flattened.iter().copied().collect::<HashSet<_>>();
 
-        assert_eq!(sample_plans.len(), 2);
+        assert_eq!(sample_plans.len(), 4);
         assert!(sample_plans.iter().all(|plan| plan.len() == 2));
+        assert!(
+            sample_plans
+                .iter()
+                .all(|plan| { plan.iter().copied().collect::<HashSet<_>>().len() == plan.len() })
+        );
         assert!(sample_plans.iter().all(|plan| {
             plan.iter()
                 .map(|(batch_candidate_index, _)| *batch_candidate_index)
@@ -8884,8 +8960,8 @@ mod tests {
                 .len()
                 == 1
         }));
-        assert_eq!(flattened.len(), unique.len());
-        assert_eq!(unique.len(), 4);
+        assert_eq!(unique_signatures.len(), sample_plans.len());
+        assert!(flattened.len() > unique_inputs.len());
     }
 
     #[test]
@@ -9022,7 +9098,7 @@ mod tests {
     }
 
     #[test]
-    fn test_run_sampled_avalanche_beam_search_caps_recursive_tier_to_unique_group_count() {
+    fn test_run_sampled_avalanche_beam_search_reuses_prior_tier_outputs_across_unique_groups() {
         let mut config = Config::default();
         config.engine.avalanche_random_chacha20_inputs = true;
         config.engine.avalanche_combination_samples = 4;
@@ -9080,11 +9156,11 @@ mod tests {
             false,
             &mut rng,
         )
-        .expect("recursive sampled avalanche unique grouping should succeed");
+        .expect("recursive sampled avalanche unique input-set grouping should succeed");
 
         assert_eq!(result.tier_statistics.len(), 2);
-        assert_eq!(result.tier_statistics[1].sample_count, 2);
-        assert_eq!(result.final_tier_samples.len(), 2);
+        assert_eq!(result.tier_statistics[1].sample_count, 5);
+        assert_eq!(result.final_tier_samples.len(), 5);
         assert_eq!(
             result.tier_statistics[1].source_kind,
             "recursive-resampled-samples"
