@@ -95,6 +95,7 @@
     "avalanche_fitness_cx_candidate_limit": 1000, // Cap how many c^x variants per r candidate can be scored by the avalanche fitness function; set to 0 for no limit.
     "avalanche_fitness_use_threshold": false, // Default to false.
     "avalanche_fitness_threshold": 0.510,
+    "avalanche_fitness_log_top_pct": 0.30,
     // Cap how many distinct r values can appear in one sampled avalanche input;
     // each selected r still contributes all of its sampled c^x variants.
     "avalanche_combination_mixed_r_candidates": 64,

@@ -57,15 +57,18 @@ use crate::database::{
     load_cached_selected_sample_rows_by_ids, load_cached_selected_sample_rows_page,
 };
 use crate::fitness::{
-    HammingDistancePrunedPool, apply_cached_scored_avalanche_fitness_pass,
-    build_candidate_message_transform, build_scored_avalanche_fitness_pass,
-    extract_payload_bits_for_accuracy, group_cached_scored_inputs_by_r_candidate_with_progress,
+    CachedScoredInputSummary, HammingDistancePrunedPool,
+    apply_cached_scored_avalanche_fitness_pass, build_candidate_message_transform,
+    build_scored_avalanche_fitness_pass, extract_payload_bits_for_accuracy,
+    group_cached_scored_inputs_by_r_candidate_with_progress,
     group_scored_inputs_by_r_candidate_with_progress, load_cached_scored_input_summaries,
-    payload_message_bits, prune_cached_scored_inputs_by_hamming_distance_percentile_with_progress,
+    lsb_zero_count_fitness, normalize_avalanche_fitness_score, payload_message_bits,
+    prune_cached_scored_inputs_by_hamming_distance_percentile_with_progress,
     prune_scored_inputs_by_hamming_distance_percentile_with_progress, resolve_avalanche_bit_width,
     resolve_avalanche_fitness_bit_width, resolve_avalanche_fitness_retained_input_limit,
     resolve_plaintext_message_bit_width, transform_message_for_candidate_scoring,
-    validate_avalanche_fitness_threshold, validate_message_width_under_modulus,
+    validate_avalanche_fitness_log_top_pct, validate_avalanche_fitness_threshold,
+    validate_message_width_under_modulus,
 };
 use crate::helpers::{
     PackedBits, format_beam_float, matching_bit_counts_bytes_le, normalize_avalanche_biases,
@@ -88,9 +91,9 @@ use serde_json::json;
 #[cfg(test)]
 use crate::database::resolve_avalanche_cache_db_path;
 #[cfg(test)]
-use crate::fitness::select_scored_inputs_for_mixed_r_candidates;
+use crate::fitness::apply_scored_avalanche_fitness_pass;
 #[cfg(test)]
-use crate::fitness::{apply_scored_avalanche_fitness_pass, lsb_zero_count_fitness};
+use crate::fitness::select_scored_inputs_for_mixed_r_candidates;
 #[cfg(test)]
 use diesel::QueryableByName;
 #[cfg(test)]
@@ -4766,6 +4769,135 @@ fn compact_retained_avalanche_sample_inputs(samples: &mut [AvalancheCombinationS
     }
 }
 
+/// Resolves how many fitness-ranked entries belong to the configured top cohort.
+///
+/// # Parameters
+/// - `retained_count`: Number of candidates retained after thresholding and ranking.
+/// - `top_pct`: Fraction of retained candidates to include in the logged cohort.
+///
+/// # Returns
+/// - `usize`: Count of retained candidates included in the logged top cohort.
+///
+/// # Expected Output
+/// - Returns `0` for an empty retained pool or at least `1` for any non-empty retained pool; no stdout/stderr output.
+fn resolve_fitness_top_cohort_count(retained_count: usize, top_pct: f64) -> usize {
+    if retained_count == 0 {
+        return 0;
+    }
+
+    let top_count = (retained_count as f64 * top_pct).ceil();
+    if !top_count.is_finite() || top_count <= 0.0 {
+        return 1;
+    }
+
+    (top_count as usize).clamp(1, retained_count)
+}
+
+/// Prints the configured top percentage of retained in-memory fitness-ranked candidates for one batch.
+///
+/// # Parameters
+/// - `batch_number`: One-based analysis batch number.
+/// - `retained_inputs`: Fitness-ranked scored inputs retained for sampled Avalanche.
+/// - `fitness_bit_width`: Number of least-significant bits used to compute the normalized fitness score.
+/// - `top_pct`: Fraction of retained candidates to include in the logged cohort.
+///
+/// # Returns
+/// - `()`: This function returns nothing.
+///
+/// # Expected Output
+/// - Prints one header plus one line per logged candidate showing the normalized fitness percentage and match percentage.
+fn log_top_scored_avalanche_fitness_entries(
+    batch_number: usize,
+    retained_inputs: &[ScoredAvalancheInput],
+    fitness_bit_width: usize,
+    top_pct: f64,
+) {
+    let top_count = resolve_fitness_top_cohort_count(retained_inputs.len(), top_pct);
+    if top_count == 0 {
+        println!(
+            "Avalanche fitness top cohort for batch {}: no scored inputs remained after thresholding and ranking",
+            batch_number
+        );
+        return;
+    }
+
+    println!(
+        "Avalanche fitness top cohort for batch {}: logging top {} of {} retained scored inputs ({}%)",
+        batch_number,
+        top_count,
+        retained_inputs.len(),
+        format_beam_float(top_pct * 100.0, BEAM_PCT_DECIMALS)
+    );
+    for (rank, input) in retained_inputs.iter().take(top_count).enumerate() {
+        let fitness_score = lsb_zero_count_fitness(&input.message_bits, fitness_bit_width);
+        let normalized_fitness_pct =
+            normalize_avalanche_fitness_score(fitness_score, fitness_bit_width) * 100.0;
+        println!(
+            "Avalanche fitness top cohort for batch {} [{}]: batch-index {} message-index {} x {} fitness {} ({}%) match {}%",
+            batch_number,
+            rank + 1,
+            input.batch_candidate_index,
+            input.message_index,
+            input.x,
+            fitness_score,
+            format_beam_float(normalized_fitness_pct, BEAM_PCT_DECIMALS),
+            format_beam_float(input.score_match_pct, BEAM_PCT_DECIMALS),
+        );
+    }
+}
+
+/// Prints the configured top percentage of retained cached fitness-ranked candidates for one batch.
+///
+/// # Parameters
+/// - `batch_number`: One-based analysis batch number.
+/// - `retained_inputs`: Fitness-ranked cached scored-input summaries retained for sampled Avalanche.
+/// - `fitness_bit_width`: Number of least-significant bits used to compute the normalized fitness score.
+/// - `top_pct`: Fraction of retained candidates to include in the logged cohort.
+///
+/// # Returns
+/// - `()`: This function returns nothing.
+///
+/// # Expected Output
+/// - Prints one header plus one line per logged cached candidate showing the normalized fitness percentage and match percentage.
+fn log_top_cached_avalanche_fitness_entries(
+    batch_number: usize,
+    retained_inputs: &[CachedScoredInputSummary],
+    fitness_bit_width: usize,
+    top_pct: f64,
+) {
+    let top_count = resolve_fitness_top_cohort_count(retained_inputs.len(), top_pct);
+    if top_count == 0 {
+        println!(
+            "Avalanche fitness top cohort for batch {}: no cached scored inputs remained after thresholding and ranking",
+            batch_number
+        );
+        return;
+    }
+
+    println!(
+        "Avalanche fitness top cohort for batch {}: logging top {} of {} retained cached scored inputs ({}%)",
+        batch_number,
+        top_count,
+        retained_inputs.len(),
+        format_beam_float(top_pct * 100.0, BEAM_PCT_DECIMALS)
+    );
+    for (rank, input) in retained_inputs.iter().take(top_count).enumerate() {
+        let normalized_fitness_pct =
+            normalize_avalanche_fitness_score(input.fitness_score, fitness_bit_width) * 100.0;
+        println!(
+            "Avalanche fitness top cohort for batch {} [{}]: batch-index {} message-index {} x {} fitness {} ({}%) match {}%",
+            batch_number,
+            rank + 1,
+            input.batch_candidate_index,
+            input.message_index,
+            input.x,
+            input.fitness_score,
+            format_beam_float(normalized_fitness_pct, BEAM_PCT_DECIMALS),
+            format_beam_float(input.score_match_pct, BEAM_PCT_DECIMALS),
+        );
+    }
+}
+
 /// Executes one sampled Avalanche combination from a preselected input set.
 ///
 /// # Parameters
@@ -5264,6 +5396,7 @@ fn run_sampled_avalanche_beam_search_cached(
         );
     }
     validate_avalanche_fitness_threshold(engine)?;
+    validate_avalanche_fitness_log_top_pct(engine)?;
     validate_avalanche_center_threshold(engine)?;
 
     let cached_input_total = count_cached_scored_inputs(cache, batch_number)?;
@@ -5271,11 +5404,12 @@ fn run_sampled_avalanche_beam_search_cached(
         return Ok(SampledAvalancheBatchResult::default());
     }
 
+    let fitness_bit_width = resolve_avalanche_fitness_bit_width(engine);
     let scored_inputs = if engine.avalanche_fitness_scoring_pass {
         let preprocessed = apply_cached_scored_avalanche_fitness_pass(
             cache,
             batch_number,
-            resolve_avalanche_fitness_bit_width(engine),
+            fitness_bit_width,
             engine.avalanche_fitness_r_candidate_limit,
             engine.avalanche_fitness_cx_candidate_limit,
             engine.avalanche_fitness_use_threshold,
@@ -5286,7 +5420,7 @@ fn run_sampled_avalanche_beam_search_cached(
             batch_number,
             preprocessed.len(),
             cached_input_total,
-            resolve_avalanche_fitness_bit_width(engine),
+            fitness_bit_width,
             resolve_avalanche_fitness_retained_input_limit(
                 engine.avalanche_fitness_r_candidate_limit,
                 engine.avalanche_fitness_cx_candidate_limit,
@@ -5299,6 +5433,12 @@ fn run_sampled_avalanche_beam_search_cached(
                 "off"
             },
             format_beam_float(engine.avalanche_fitness_threshold, 3)
+        );
+        log_top_cached_avalanche_fitness_entries(
+            batch_number,
+            &preprocessed,
+            fitness_bit_width,
+            engine.avalanche_fitness_log_top_pct,
         );
         preprocessed
     } else {
@@ -5973,11 +6113,13 @@ fn run_sampled_avalanche_beam_search(
         );
     }
     validate_avalanche_fitness_threshold(engine)?;
+    validate_avalanche_fitness_log_top_pct(engine)?;
     validate_avalanche_center_threshold(engine)?;
     if scored_inputs.is_empty() {
         return Ok(SampledAvalancheBatchResult::default());
     }
 
+    let fitness_bit_width = resolve_avalanche_fitness_bit_width(engine);
     let scored_inputs = if let Some(pass) = build_scored_avalanche_fitness_pass(engine) {
         let preprocessed = pass(scored_inputs.to_vec());
         println!(
@@ -5985,7 +6127,7 @@ fn run_sampled_avalanche_beam_search(
             batch_number,
             preprocessed.len(),
             scored_inputs.len(),
-            resolve_avalanche_fitness_bit_width(engine),
+            fitness_bit_width,
             resolve_avalanche_fitness_retained_input_limit(
                 engine.avalanche_fitness_r_candidate_limit,
                 engine.avalanche_fitness_cx_candidate_limit,
@@ -5998,6 +6140,12 @@ fn run_sampled_avalanche_beam_search(
                 "off"
             },
             format_beam_float(engine.avalanche_fitness_threshold, 3)
+        );
+        log_top_scored_avalanche_fitness_entries(
+            batch_number,
+            &preprocessed,
+            fitness_bit_width,
+            engine.avalanche_fitness_log_top_pct,
         );
         preprocessed
     } else {
@@ -8039,6 +8187,15 @@ mod tests {
     }
 
     #[test]
+    fn test_resolve_fitness_top_cohort_count_uses_configured_percentage() {
+        assert_eq!(resolve_fitness_top_cohort_count(0, 0.30), 0);
+        assert_eq!(resolve_fitness_top_cohort_count(1, 0.30), 1);
+        assert_eq!(resolve_fitness_top_cohort_count(10, 0.30), 3);
+        assert_eq!(resolve_fitness_top_cohort_count(10, 0.35), 4);
+        assert_eq!(resolve_fitness_top_cohort_count(10, 1.0), 10);
+    }
+
+    #[test]
     fn test_run_sampled_avalanche_beam_search_errors_when_fitness_threshold_removes_all_candidates()
     {
         let mut config = Config::default();
@@ -8085,6 +8242,40 @@ mod tests {
         .expect_err("fitness threshold should reject an empty retained pool");
 
         assert!(error.to_string().contains("avalanche_fitness_threshold"));
+    }
+
+    #[test]
+    fn test_run_sampled_avalanche_beam_search_rejects_invalid_fitness_log_top_pct() {
+        let mut config = Config::default();
+        config.engine.avalanche_random_chacha20_inputs = true;
+        config.engine.avalanche_combination_samples = 1;
+        config.engine.avalanche_combination_size = 1;
+        config.engine.avalanche_combination_mixed_r_candidates = 0;
+        config.engine.avalanche_fitness_use_threshold = false;
+        config.engine.avalanche_fitness_log_top_pct = 0.0;
+
+        let scored_inputs = vec![ScoredAvalancheInput {
+            batch_candidate_index: 0,
+            message_index: 0,
+            r: BigUint::from(3u8),
+            x: BigUint::from(1u8),
+            score_match_pct: 70.0,
+            message_bits: PackedBits::from_bools(&[false, true, true, true]),
+            detail: None,
+        }];
+
+        let mut rng = RngChoice::from_seed(RngMode::Standard, 19);
+        let error = run_sampled_avalanche_beam_search(
+            &config.engine,
+            &BigUint::from(1u8),
+            &scored_inputs,
+            1,
+            false,
+            &mut rng,
+        )
+        .expect_err("zero top cohort percentage should be rejected");
+
+        assert!(error.to_string().contains("avalanche_fitness_log_top_pct"));
     }
 
     #[test]

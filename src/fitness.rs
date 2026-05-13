@@ -279,6 +279,29 @@ pub(crate) fn validate_avalanche_fitness_threshold(
     Ok(())
 }
 
+/// Validates the configured percentage of retained Avalanche fitness entries logged per batch.
+///
+/// # Parameters
+/// - `engine`: Engine configuration that controls batch-level fitness logging.
+///
+/// # Returns
+/// - `Result<(), Box<dyn Error>>`: `Ok(())` when the configured logging percentage is valid.
+///
+/// # Expected Output
+/// - Returns a configuration error when the logging percentage is non-finite or outside `(0, 1]`.
+pub(crate) fn validate_avalanche_fitness_log_top_pct(
+    engine: &EngineConfig,
+) -> Result<(), Box<dyn Error>> {
+    if !engine.avalanche_fitness_log_top_pct.is_finite()
+        || !(0.0..=1.0).contains(&engine.avalanche_fitness_log_top_pct)
+        || engine.avalanche_fitness_log_top_pct == 0.0
+    {
+        return Err("avalanche_fitness_log_top_pct must be finite and in (0, 1]".into());
+    }
+
+    Ok(())
+}
+
 /// Extracts the original plaintext payload bits from a widened Avalanche bit vector.
 ///
 /// # Parameters

@@ -236,6 +236,9 @@ pub struct EngineConfig {
     /// Minimum normalized zero-count fitness retained by the fitness pass when thresholding is enabled.
     #[serde(default = "default_avalanche_fitness_threshold")]
     pub avalanche_fitness_threshold: f64,
+    /// Percentage of thresholded fitness-ranked candidates logged for each Avalanche batch.
+    #[serde(default = "default_avalanche_fitness_log_top_pct")]
+    pub avalanche_fitness_log_top_pct: f64,
     #[serde(default = "default_same_r_batch")]
     pub same_r_batch: bool,
     #[serde(default = "default_ciphertext_modify")]
@@ -439,6 +442,7 @@ impl Default for EngineConfig {
             avalanche_fitness_cx_candidate_limit: default_avalanche_fitness_cx_candidate_limit(),
             avalanche_fitness_use_threshold: default_avalanche_fitness_use_threshold(),
             avalanche_fitness_threshold: default_avalanche_fitness_threshold(),
+            avalanche_fitness_log_top_pct: default_avalanche_fitness_log_top_pct(),
             same_r_batch: default_same_r_batch(),
             ciphertext_modify: default_ciphertext_modify(),
             oracle_accuracy_threshold: default_oracle_accuracy_threshold(),
@@ -1627,6 +1631,20 @@ fn default_avalanche_fitness_threshold() -> f64 {
     0.580
 }
 
+/// Default top-percentage of thresholded Avalanche fitness entries printed to the batch log.
+///
+/// # Parameters
+/// - None.
+///
+/// # Returns
+/// - `f64`: Default fraction of retained fitness-ranked candidates included in batch logging.
+///
+/// # Expected Output
+/// - Returns a constant default value; no side effects.
+fn default_avalanche_fitness_log_top_pct() -> f64 {
+    0.30
+}
+
 /// Default flag for using the same r candidate across a batch.
 ///
 /// # Parameters
@@ -2059,6 +2077,7 @@ mod tests {
         );
         assert!(engine.avalanche_fitness_use_threshold);
         assert!((engine.avalanche_fitness_threshold - 0.580).abs() < f64::EPSILON);
+        assert!((engine.avalanche_fitness_log_top_pct - 0.30).abs() < f64::EPSILON);
         assert_eq!(engine.sqlite_soft_heap, 10 * 1024 * 1024 * 1024);
         assert_eq!(engine.sqlite_hard_heap, 10 * 1024 * 1024 * 1024);
         assert_eq!(engine.sqlite_mmap_size, 10 * 1024 * 1024 * 1024);
@@ -2255,6 +2274,30 @@ mod tests {
             config.engine.avalanche_combination_recursive_resample_count,
             vec![2048, 0]
         );
+
+        let _ = fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn test_load_config_accepts_fitness_log_top_percentage() {
+        let temp_dir = temp_path("fitness_log_top_percentage");
+        fs::create_dir_all(&temp_dir).expect("create temp config dir");
+        fs::write(
+            temp_dir.join("config.json"),
+            concat!(
+                "{\n",
+                "  \"engine\": {\n",
+                "    \"avalanche_fitness_log_top_pct\": 0.45\n",
+                "  }\n",
+                "}\n",
+            ),
+        )
+        .expect("write config");
+
+        let config = load_config(temp_dir.join("config.json").to_str().expect("utf8 path"))
+            .expect("load config");
+
+        assert!((config.engine.avalanche_fitness_log_top_pct - 0.45).abs() < f64::EPSILON);
 
         let _ = fs::remove_dir_all(&temp_dir);
     }

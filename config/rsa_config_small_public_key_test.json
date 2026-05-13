@@ -74,6 +74,7 @@
     "avalanche_fitness_cx_candidate_limit": 4,
     "avalanche_fitness_use_threshold": true,
     "avalanche_fitness_threshold": 0.580,
+    "avalanche_fitness_log_top_pct": 0.30,
     "avalanche_combination_mixed_r_candidates": 8,
     "avalanche_combination_samples": 64,
     "avalanche_combination_size": 8,
