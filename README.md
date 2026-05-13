@@ -66,7 +66,8 @@ cargo run --bin analysis -- --config config/rsa_config_small_batch.json
 - `--avalanche-combination-size <u64>`: Number of scored items taken in each sampled combination. Default `50`.
 - `--avalanche-combination-pool-size <u64>`: Legacy compatibility override recorded in session metadata; runtime sampling now uses the full batch-sized pool.
 - `--avalanche-combination-recursion-depth <u64>`: Number of Avalanche tiers to execute, including the initial sampled-input tier. Default `1`.
-- `--avalanche-combination-recursive-group-size <u64>`: Number of prior-tier sample outputs grouped into each recursive Avalanche call. Default `8`.
+- `--avalanche-combination-recursive-group-size <u64>`: Override the per-tier recursive group-size array with one value applied to every recursive tier. Config default `[8]`.
+- `--avalanche-combination-recursive-resample-count <u64>`: Override the per-tier recursive resample-count array with one value applied to every recursive tier. Config default `[0]`.
 - `--avalanche-combination-majority-vote <bool>`: Use per-bit majority-vote probabilities from each sampled combination. Default `true`.
 - `--avalanche-combination-sample-smoothing <bool>`: Apply Jeffreys smoothing to sampled majority-vote probabilities before beam search. Default `false`.
 - `--avalanche-combination-majority-vote-print <bool>`: Print a separate sampled-combination majority-vote summary for the selected sample. Default `true`.

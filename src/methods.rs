@@ -4198,6 +4198,58 @@ fn select_recursive_tier_sample_group_indices(
     sample_unique_indices(source_sample_count, group_size, rng)
 }
 
+#[derive(Debug, Clone, Copy)]
+struct RecursiveAvalancheTierConfig {
+    group_size: usize,
+    resample_count: usize,
+}
+
+/// Resolves the effective config for one recursive Avalanche tier.
+///
+/// # Parameters
+/// - `engine`: Engine configuration containing the per-tier recursive Avalanche arrays.
+/// - `recursive_level`: One-based recursive level where `1` is the first tier after the sampled-input tier.
+///
+/// # Returns
+/// - `RecursiveAvalancheTierConfig`: Effective group-size and resample-count values for that recursive level.
+///
+/// # Expected Output
+/// - Returns the resolved tier config, reusing the last configured array entry when recursion exceeds the configured depth.
+fn resolve_recursive_avalanche_tier_config(
+    engine: &EngineConfig,
+    recursive_level: usize,
+) -> RecursiveAvalancheTierConfig {
+    let tier_index = recursive_level.saturating_sub(1);
+    let group_size = engine
+        .avalanche_combination_recursive_group_size
+        .get(tier_index)
+        .copied()
+        .or_else(|| {
+            engine
+                .avalanche_combination_recursive_group_size
+                .last()
+                .copied()
+        })
+        .unwrap_or(8)
+        .max(1);
+    let resample_count = engine
+        .avalanche_combination_recursive_resample_count
+        .get(tier_index)
+        .copied()
+        .or_else(|| {
+            engine
+                .avalanche_combination_recursive_resample_count
+                .last()
+                .copied()
+        })
+        .unwrap_or(0);
+
+    RecursiveAvalancheTierConfig {
+        group_size,
+        resample_count,
+    }
+}
+
 #[derive(Debug)]
 struct ComputedAvalancheSample {
     sample: SelectedAvalancheSample,
@@ -4516,7 +4568,7 @@ fn build_center_bias_entries(
         .enumerate()
         .filter_map(|(bit_index_lsb0, probability_one)| {
             let signed_distance_from_half = probability_one - 0.5;
-            (signed_distance_from_half.abs() <= center_threshold).then_some(
+            (signed_distance_from_half.abs() <= center_threshold + f64::EPSILON).then_some(
                 AvalancheCenterBiasEntry {
                     bit_index_lsb0,
                     probability_one,
@@ -5251,8 +5303,6 @@ fn run_sampled_avalanche_beam_search_cached(
 
     let sample_count = engine.avalanche_combination_samples as usize;
     let recursion_depth = engine.avalanche_combination_recursion_depth.max(1);
-    let recursive_group_size = engine.avalanche_combination_recursive_group_size.max(1);
-    let recursive_resample_count = engine.avalanche_combination_recursive_resample_count;
     let majority_vote_enabled = engine.avalanche_combination_majority_vote;
     let sample_smoothing_enabled = engine.avalanche_combination_sample_smoothing;
     let majority_vote_print_enabled = engine.avalanche_combination_majority_vote_print;
@@ -5271,7 +5321,7 @@ fn run_sampled_avalanche_beam_search_cached(
     };
 
     println!(
-        "Avalanche combination setup for batch {}: scored inputs {} r-candidate-pool {} selection-mode {} configured-mixed-r-candidates {} effective-mixed-r-candidates {} samples {} recursion-depth {} recursive-group-size {} recursive-resample-count {} majority-vote {} sample-smoothing {} majority-print {} recursive-input {} statistics-collection {} keep-all-samples {} hamming-prune {} kept-percentile {} outlier-preference-pct {}",
+        "Avalanche combination setup for batch {}: scored inputs {} r-candidate-pool {} selection-mode {} configured-mixed-r-candidates {} effective-mixed-r-candidates {} samples {} recursion-depth {} recursive-group-sizes {:?} recursive-resample-counts {:?} majority-vote {} sample-smoothing {} majority-print {} recursive-input {} statistics-collection {} keep-all-samples {} hamming-prune {} kept-percentile {} outlier-preference-pct {}",
         batch_number,
         pool_size,
         r_candidate_pool_size,
@@ -5280,8 +5330,8 @@ fn run_sampled_avalanche_beam_search_cached(
         mixed_r_candidate_count,
         sample_count,
         recursion_depth,
-        recursive_group_size,
-        recursive_resample_count,
+        &engine.avalanche_combination_recursive_group_size,
+        &engine.avalanche_combination_recursive_resample_count,
         if majority_vote_enabled { "on" } else { "off" },
         if sample_smoothing_enabled {
             "on"
@@ -5423,6 +5473,9 @@ fn run_sampled_avalanche_beam_search_cached(
     drop(current_tier_samples);
     while tier_index < recursion_depth && current_tier_summaries.len() > 1 {
         let next_tier_index = tier_index + 1;
+        let recursive_tier_config = resolve_recursive_avalanche_tier_config(engine, tier_index);
+        let recursive_group_size = recursive_tier_config.group_size;
+        let recursive_resample_count = recursive_tier_config.resample_count;
         let recursive_seed = rng.next_u64();
         let mut recursive_rng = RngChoice::from_seed(rng_mode, recursive_seed);
         let source_sample_count = current_tier_summaries.len();
@@ -5982,8 +6035,6 @@ fn run_sampled_avalanche_beam_search(
 
     let sample_count = engine.avalanche_combination_samples as usize;
     let recursion_depth = engine.avalanche_combination_recursion_depth.max(1);
-    let recursive_group_size = engine.avalanche_combination_recursive_group_size.max(1);
-    let recursive_resample_count = engine.avalanche_combination_recursive_resample_count;
     let majority_vote_enabled = engine.avalanche_combination_majority_vote;
     let sample_smoothing_enabled = engine.avalanche_combination_sample_smoothing;
     let majority_vote_print_enabled = engine.avalanche_combination_majority_vote_print;
@@ -6002,7 +6053,7 @@ fn run_sampled_avalanche_beam_search(
     };
 
     println!(
-        "Avalanche combination setup for batch {}: scored inputs {} r-candidate-pool {} selection-mode {} configured-mixed-r-candidates {} effective-mixed-r-candidates {} samples {} recursion-depth {} recursive-group-size {} recursive-resample-count {} majority-vote {} sample-smoothing {} majority-print {} recursive-input {} statistics-collection {} keep-all-samples {} hamming-prune {} kept-percentile {} outlier-preference-pct {}",
+        "Avalanche combination setup for batch {}: scored inputs {} r-candidate-pool {} selection-mode {} configured-mixed-r-candidates {} effective-mixed-r-candidates {} samples {} recursion-depth {} recursive-group-sizes {:?} recursive-resample-counts {:?} majority-vote {} sample-smoothing {} majority-print {} recursive-input {} statistics-collection {} keep-all-samples {} hamming-prune {} kept-percentile {} outlier-preference-pct {}",
         batch_number,
         pool_size,
         r_candidate_pool_size,
@@ -6011,8 +6062,8 @@ fn run_sampled_avalanche_beam_search(
         mixed_r_candidate_count,
         sample_count,
         recursion_depth,
-        recursive_group_size,
-        recursive_resample_count,
+        &engine.avalanche_combination_recursive_group_size,
+        &engine.avalanche_combination_recursive_resample_count,
         if majority_vote_enabled { "on" } else { "off" },
         if sample_smoothing_enabled {
             "on"
@@ -6148,6 +6199,9 @@ fn run_sampled_avalanche_beam_search(
     let mut tier_index = 1usize;
     while tier_index < recursion_depth && current_tier_samples.len() > 1 {
         let next_tier_index = tier_index + 1;
+        let recursive_tier_config = resolve_recursive_avalanche_tier_config(engine, tier_index);
+        let recursive_group_size = recursive_tier_config.group_size;
+        let recursive_resample_count = recursive_tier_config.resample_count;
         let recursive_seed = rng.next_u64();
         let mut recursive_rng = RngChoice::from_seed(rng_mode, recursive_seed);
         let source_samples = compact_recursive_avalanche_source_samples(
@@ -8149,7 +8203,7 @@ mod tests {
         config.engine.avalanche_combination_size = 1;
         config.engine.avalanche_combination_mixed_r_candidates = 0;
         config.engine.avalanche_combination_recursion_depth = 2;
-        config.engine.avalanche_combination_recursive_group_size = 2;
+        config.engine.avalanche_combination_recursive_group_size = vec![2];
 
         let scored_inputs = vec![
             ScoredAvalancheInput {
@@ -8223,7 +8277,7 @@ mod tests {
         config.engine.avalanche_combination_size = 1;
         config.engine.avalanche_combination_mixed_r_candidates = 0;
         config.engine.avalanche_combination_recursion_depth = 2;
-        config.engine.avalanche_combination_recursive_group_size = 2;
+        config.engine.avalanche_combination_recursive_group_size = vec![2];
 
         let scored_inputs = vec![
             ScoredAvalancheInput {
@@ -8293,7 +8347,7 @@ mod tests {
         config.engine.avalanche_combination_size = 1;
         config.engine.avalanche_combination_mixed_r_candidates = 0;
         config.engine.avalanche_combination_recursion_depth = 2;
-        config.engine.avalanche_combination_recursive_group_size = 2;
+        config.engine.avalanche_combination_recursive_group_size = vec![2];
 
         let scored_inputs = (0..4usize)
             .map(|index| ScoredAvalancheInput {
@@ -8431,7 +8485,7 @@ mod tests {
         assert_eq!(entries.len(), 3);
         assert_eq!(entries[0].bit_index_lsb0, 0);
         assert_eq!(entries[0].probability_one, 0.48);
-        assert_eq!(entries[0].signed_distance_from_half, -0.02);
+        assert!((entries[0].signed_distance_from_half + 0.02).abs() < f64::EPSILON);
         assert_eq!(entries[1].bit_index_lsb0, 1);
         assert_eq!(entries[2].bit_index_lsb0, 3);
     }
@@ -8675,6 +8729,24 @@ mod tests {
     }
 
     #[test]
+    fn test_resolve_recursive_avalanche_tier_config_reuses_last_array_entry() {
+        let mut config = Config::default();
+        config.engine.avalanche_combination_recursive_group_size = vec![5, 3];
+        config.engine.avalanche_combination_recursive_resample_count = vec![11];
+
+        let first_recursive_tier = resolve_recursive_avalanche_tier_config(&config.engine, 1);
+        let second_recursive_tier = resolve_recursive_avalanche_tier_config(&config.engine, 2);
+        let third_recursive_tier = resolve_recursive_avalanche_tier_config(&config.engine, 3);
+
+        assert_eq!(first_recursive_tier.group_size, 5);
+        assert_eq!(first_recursive_tier.resample_count, 11);
+        assert_eq!(second_recursive_tier.group_size, 3);
+        assert_eq!(second_recursive_tier.resample_count, 11);
+        assert_eq!(third_recursive_tier.group_size, 3);
+        assert_eq!(third_recursive_tier.resample_count, 11);
+    }
+
+    #[test]
     fn test_recursive_avalanche_sample_from_indices_uses_prior_tier_best_bits_when_enabled() {
         let mut config = Config::default();
         config.engine.avalanche_combination_majority_vote = true;
@@ -8797,8 +8869,8 @@ mod tests {
         config.engine.avalanche_combination_size = 1;
         config.engine.avalanche_combination_mixed_r_candidates = 0;
         config.engine.avalanche_combination_recursion_depth = 2;
-        config.engine.avalanche_combination_recursive_group_size = 2;
-        config.engine.avalanche_combination_recursive_resample_count = 5;
+        config.engine.avalanche_combination_recursive_group_size = vec![2];
+        config.engine.avalanche_combination_recursive_resample_count = vec![5];
 
         let scored_inputs = vec![
             ScoredAvalancheInput {

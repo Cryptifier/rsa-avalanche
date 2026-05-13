@@ -13,7 +13,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Sequence
 
-JsonValue = bool | int | float | str | None
+JsonValue = bool | int | float | str | None | list["JsonValue"] | dict[str, "JsonValue"]
 
 
 @dataclass(frozen=True)
@@ -46,7 +46,7 @@ def replace(path: str, values: Sequence[JsonValue], *, name: str | None = None) 
 GRID_SCHEDULE: tuple[ReplacementSpec, ...] = (
     replace(
         ".engine.avalanche_combination_recursive_resample_count",
-        [10_000, 100_000, 10_000_000],
+        [[10_000], [100_000], [10_000_000]],
         name="recursive_resample_count",
     ),
     # Example:

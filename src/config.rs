@@ -10,7 +10,7 @@ use std::{
 
 use bigdecimal::BigDecimal;
 use num_bigint::BigUint;
-use serde::Deserialize;
+use serde::{Deserialize, Deserializer};
 
 use crate::r_candidates::RCandidateMode;
 
@@ -164,12 +164,18 @@ pub struct EngineConfig {
     /// Number of Avalanche tiers to execute, including the initial sampled-input tier.
     #[serde(default = "default_avalanche_combination_recursion_depth")]
     pub avalanche_combination_recursion_depth: usize,
-    /// Number of sample outputs grouped into each subsequent recursive Avalanche call.
-    #[serde(default = "default_avalanche_combination_recursive_group_size")]
-    pub avalanche_combination_recursive_group_size: usize,
-    /// Number of recursive samples to produce per subsequent Avalanche tier; `0` preserves one-pass grouping.
-    #[serde(default = "default_avalanche_combination_recursive_resample_count")]
-    pub avalanche_combination_recursive_resample_count: usize,
+    /// Per-recursive-tier group sizes, reusing the last entry when recursion exceeds the configured array.
+    #[serde(
+        default = "default_avalanche_combination_recursive_group_size",
+        deserialize_with = "deserialize_nonempty_usize_array_or_scalar"
+    )]
+    pub avalanche_combination_recursive_group_size: Vec<usize>,
+    /// Per-recursive-tier resample counts, reusing the last entry when recursion exceeds the configured array.
+    #[serde(
+        default = "default_avalanche_combination_recursive_resample_count",
+        deserialize_with = "deserialize_nonempty_usize_array_or_scalar"
+    )]
+    pub avalanche_combination_recursive_resample_count: Vec<usize>,
     /// Whether sampled avalanche prunes scored inputs to a central Hamming-distance percentile band before sampling.
     #[serde(default = "default_avalanche_combination_hamming_distance_prune")]
     pub avalanche_combination_hamming_distance_prune: bool,
@@ -826,6 +832,45 @@ where
     raw.parse::<BigDecimal>().map_err(DeError::custom)
 }
 
+/// Deserializes a non-empty `usize` array from either a scalar or an array.
+///
+/// # Parameters
+/// - `deserializer`: Serde deserializer provided by the caller.
+///
+/// # Returns
+/// - `Result<Vec<usize>, D::Error>`: Parsed array, wrapping scalars into one-item vectors.
+///
+/// # Expected Output
+/// - Returns a parse error if the input is not a `usize` or `usize` array.
+fn deserialize_nonempty_usize_array_or_scalar<'de, D>(
+    deserializer: D,
+) -> Result<Vec<usize>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    use serde::de::Error as DeError;
+
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum UsizeArrayOrScalar {
+        Scalar(usize),
+        Array(Vec<usize>),
+    }
+
+    let values = match UsizeArrayOrScalar::deserialize(deserializer)? {
+        UsizeArrayOrScalar::Scalar(value) => vec![value],
+        UsizeArrayOrScalar::Array(values) => values,
+    };
+
+    if values.is_empty() {
+        return Err(DeError::custom(
+            "expected at least one recursive tier value, got an empty array",
+        ));
+    }
+
+    Ok(values)
+}
+
 /// Default flag for RSA key generation.
 ///
 /// # Parameters
@@ -1280,12 +1325,12 @@ fn default_avalanche_combination_recursion_depth() -> usize {
 /// - None.
 ///
 /// # Returns
-/// - `usize`: Number of prior-tier samples grouped into each subsequent recursive call.
+/// - `Vec<usize>`: Default per-tier group sizes, starting with one entry for the first recursive tier.
 ///
 /// # Expected Output
 /// - Returns a constant default value; no side effects.
-fn default_avalanche_combination_recursive_group_size() -> usize {
-    8
+fn default_avalanche_combination_recursive_group_size() -> Vec<usize> {
+    vec![8]
 }
 
 /// Default recursive resample count for sampled Avalanche tiers.
@@ -1294,12 +1339,12 @@ fn default_avalanche_combination_recursive_group_size() -> usize {
 /// - None.
 ///
 /// # Returns
-/// - `usize`: `0` so recursive tiers preserve legacy one-pass regrouping unless explicitly enabled.
+/// - `Vec<usize>`: Default per-tier resample counts, starting with one entry for the first recursive tier.
 ///
 /// # Expected Output
 /// - Returns a constant default value; no side effects.
-fn default_avalanche_combination_recursive_resample_count() -> usize {
-    0
+fn default_avalanche_combination_recursive_resample_count() -> Vec<usize> {
+    vec![0]
 }
 
 /// Default flag for pruning sampled-avalanche inputs by Hamming-distance percentiles.
@@ -1998,7 +2043,11 @@ mod tests {
         assert!(!engine.avalanche_report_biases);
         assert_eq!(engine.avalanche_center_threshold, 0.01);
         assert!(engine.avalanche_center_threshold_best);
-        assert_eq!(engine.avalanche_combination_recursive_resample_count, 0);
+        assert_eq!(engine.avalanche_combination_recursive_group_size, vec![8]);
+        assert_eq!(
+            engine.avalanche_combination_recursive_resample_count,
+            vec![0]
+        );
         assert!(!engine.avalanche_combination_hamming_distance_prune);
         assert_eq!(
             engine.avalanche_combination_hamming_distance_keep_percentile,
@@ -2142,6 +2191,70 @@ mod tests {
         assert_eq!(config.rsa_keypair.p, None);
         assert_eq!(config.rsa_keypair.q, None);
         assert_eq!(config.rsa_keypair.private_keyfile, "keys/private.yaml");
+
+        let _ = fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn test_load_config_accepts_scalar_recursive_tier_values() {
+        let temp_dir = temp_path("recursive_scalar_values");
+        fs::create_dir_all(&temp_dir).expect("create temp config dir");
+        fs::write(
+            temp_dir.join("config.json"),
+            concat!(
+                "{\n",
+                "  \"engine\": {\n",
+                "    \"avalanche_combination_recursive_group_size\": 16,\n",
+                "    \"avalanche_combination_recursive_resample_count\": 2048\n",
+                "  }\n",
+                "}\n",
+            ),
+        )
+        .expect("write config");
+
+        let config = load_config(temp_dir.join("config.json").to_str().expect("utf8 path"))
+            .expect("load config");
+
+        assert_eq!(
+            config.engine.avalanche_combination_recursive_group_size,
+            vec![16]
+        );
+        assert_eq!(
+            config.engine.avalanche_combination_recursive_resample_count,
+            vec![2048]
+        );
+
+        let _ = fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn test_load_config_accepts_recursive_tier_arrays() {
+        let temp_dir = temp_path("recursive_array_values");
+        fs::create_dir_all(&temp_dir).expect("create temp config dir");
+        fs::write(
+            temp_dir.join("config.json"),
+            concat!(
+                "{\n",
+                "  \"engine\": {\n",
+                "    \"avalanche_combination_recursive_group_size\": [16, 8],\n",
+                "    \"avalanche_combination_recursive_resample_count\": [2048, 0]\n",
+                "  }\n",
+                "}\n",
+            ),
+        )
+        .expect("write config");
+
+        let config = load_config(temp_dir.join("config.json").to_str().expect("utf8 path"))
+            .expect("load config");
+
+        assert_eq!(
+            config.engine.avalanche_combination_recursive_group_size,
+            vec![16, 8]
+        );
+        assert_eq!(
+            config.engine.avalanche_combination_recursive_resample_count,
+            vec![2048, 0]
+        );
 
         let _ = fs::remove_dir_all(&temp_dir);
     }

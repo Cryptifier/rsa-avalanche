@@ -40,34 +40,40 @@ GRID_PLAN_JSON=$(cat <<'JSON'
 [
   {
     "index": 1,
-    "summary": "recursive_resample_count=10000",
+    "summary": "recursive_resample_count=[10000]",
     "changes": [
       {
         "name": "recursive_resample_count",
         "path": ".engine.avalanche_combination_recursive_resample_count",
-        "value": 10000
+        "value": [
+          10000
+        ]
       }
     ]
   },
   {
     "index": 2,
-    "summary": "recursive_resample_count=100000",
+    "summary": "recursive_resample_count=[100000]",
     "changes": [
       {
         "name": "recursive_resample_count",
         "path": ".engine.avalanche_combination_recursive_resample_count",
-        "value": 100000
+        "value": [
+          100000
+        ]
       }
     ]
   },
   {
     "index": 3,
-    "summary": "recursive_resample_count=10000000",
+    "summary": "recursive_resample_count=[10000000]",
     "changes": [
       {
         "name": "recursive_resample_count",
         "path": ".engine.avalanche_combination_recursive_resample_count",
-        "value": 10000000
+        "value": [
+          10000000
+        ]
       }
     ]
   }
