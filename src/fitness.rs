@@ -763,6 +763,7 @@ pub(crate) fn group_scored_inputs_by_r_candidate_with_progress(
 /// # Expected Output
 /// - Returns up to `combination_size` sampled `c^x` inputs while preserving selected r-group
 ///   coverage when possible; no stdout/stderr output.
+#[allow(dead_code)]
 pub(crate) fn select_scored_inputs_for_mixed_r_candidates(
     grouped_inputs: &[ScoredAvalancheInputGroup],
     mixed_r_candidate_count: usize,
@@ -1311,6 +1312,7 @@ pub(crate) fn group_cached_scored_inputs_by_r_candidate_with_progress(
 ///
 /// # Expected Output
 /// - Returns up to `sample_size` unique cached row ids; no stdout/stderr output.
+#[allow(dead_code)]
 pub(crate) fn select_random_cached_scored_input_ids(
     summaries: &[CachedScoredInputSummary],
     sample_size: usize,
@@ -1339,6 +1341,7 @@ pub(crate) fn select_random_cached_scored_input_ids(
 ///
 /// # Expected Output
 /// - Returns up to `combination_size` cached row ids while preserving selected r-group coverage when possible.
+#[allow(dead_code)]
 pub(crate) fn select_cached_scored_input_ids_for_mixed_r_candidates(
     grouped_inputs: &[CachedScoredInputGroup],
     mixed_r_candidate_count: usize,
