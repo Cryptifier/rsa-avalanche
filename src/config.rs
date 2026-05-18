@@ -149,6 +149,12 @@ pub struct EngineConfig {
     pub analysis_batch_candidates: u64,
     #[serde(default = "default_analysis_batch_batches")]
     pub analysis_batch_batches: u64,
+    /// Whether the final-tier Avalanche solver should compare batch-pair sample products for whole-message recovery.
+    #[serde(default = "default_avalanche_solver_enable")]
+    pub avalanche_solver_enable: bool,
+    /// Maximum number of differing sample bits the Avalanche solver may brute-force per batch-pair sample comparison.
+    #[serde(default = "default_avalanche_solver_max_bits")]
+    pub avalanche_solver_max_bits: usize,
     /// Number of avalanche combination samples to evaluate per batch.
     #[serde(default = "default_avalanche_combination_samples")]
     pub avalanche_combination_samples: u64,
@@ -422,6 +428,8 @@ impl Default for EngineConfig {
             analysis_batch_messages: default_analysis_batch_messages(),
             analysis_batch_candidates: default_analysis_batch_candidates(),
             analysis_batch_batches: default_analysis_batch_batches(),
+            avalanche_solver_enable: default_avalanche_solver_enable(),
+            avalanche_solver_max_bits: default_avalanche_solver_max_bits(),
             avalanche_combination_samples: default_avalanche_combination_samples(),
             avalanche_combination_size: default_avalanche_combination_size(),
             avalanche_combination_mixed_r_candidates:
@@ -1274,6 +1282,34 @@ fn default_analysis_batch_candidates() -> u64 {
 /// - Returns a constant default value; no side effects.
 fn default_analysis_batch_batches() -> u64 {
     1
+}
+
+/// Default enable flag for the cross-batch Avalanche solver.
+///
+/// # Parameters
+/// - None.
+///
+/// # Returns
+/// - `bool`: `false` so the solver only runs when explicitly enabled in JSON config.
+///
+/// # Expected Output
+/// - Returns a constant default value; no side effects.
+fn default_avalanche_solver_enable() -> bool {
+    false
+}
+
+/// Default maximum flip count for each Avalanche solver brute-force search.
+///
+/// # Parameters
+/// - None.
+///
+/// # Returns
+/// - `usize`: Default maximum number of differing bit positions the solver may brute-force.
+///
+/// # Expected Output
+/// - Returns a constant default value; no side effects.
+fn default_avalanche_solver_max_bits() -> usize {
+    8
 }
 
 /// Default number of avalanche combination samples to evaluate per batch.
@@ -2168,6 +2204,8 @@ mod tests {
             engine.avalanche_combination_hamming_distance_outlier_preference_pct,
             0.0
         );
+        assert!(!engine.avalanche_solver_enable);
+        assert_eq!(engine.avalanche_solver_max_bits, 8);
         assert!(engine.avalanche_fitness_use_threshold);
         assert!((engine.avalanche_fitness_threshold - 0.580).abs() < f64::EPSILON);
         assert!((engine.avalanche_fitness_log_top_pct - 0.30).abs() < f64::EPSILON);
@@ -2435,6 +2473,32 @@ mod tests {
                 .avalanche_include_max_fitness_candidates_in_order
         );
         assert!(config.engine.sqlite_in_memory);
+
+        let _ = fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn test_load_config_accepts_avalanche_solver_settings() {
+        let temp_dir = temp_path("avalanche_solver_settings");
+        fs::create_dir_all(&temp_dir).expect("create temp config dir");
+        fs::write(
+            temp_dir.join("config.json"),
+            concat!(
+                "{\n",
+                "  \"engine\": {\n",
+                "    \"avalanche_solver_enable\": true,\n",
+                "    \"avalanche_solver_max_bits\": 5\n",
+                "  }\n",
+                "}\n",
+            ),
+        )
+        .expect("write config");
+
+        let config = load_config(temp_dir.join("config.json").to_str().expect("utf8 path"))
+            .expect("load config");
+
+        assert!(config.engine.avalanche_solver_enable);
+        assert_eq!(config.engine.avalanche_solver_max_bits, 5);
 
         let _ = fs::remove_dir_all(&temp_dir);
     }

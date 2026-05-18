@@ -58,6 +58,10 @@ pub struct AnalyticsCliArgs {
     pub avalanche_probability_spread_exponent: f64,
     /// Number of avalanche combination samples evaluated per batch.
     pub avalanche_combination_samples: u64,
+    /// Whether the cross-batch Avalanche solver is enabled.
+    pub avalanche_solver_enable: bool,
+    /// Maximum number of differing bit positions the cross-batch Avalanche solver may brute-force.
+    pub avalanche_solver_max_bits: usize,
     /// Legacy sampled-width setting retained for compatibility with older configs.
     pub avalanche_combination_size: usize,
     /// Number of distinct r candidates mixed into each avalanche combination sample.
@@ -143,6 +147,8 @@ pub(crate) struct AnalyticsCliInfo {
     avalanche_beam_top_k: usize,
     avalanche_probability_spread_exponent: f64,
     avalanche_combination_samples: u64,
+    avalanche_solver_enable: bool,
+    avalanche_solver_max_bits: usize,
     avalanche_combination_size: usize,
     avalanche_combination_mixed_r_candidates: usize,
     avalanche_combination_pool_size: usize,
@@ -631,6 +637,8 @@ impl SessionAnalytics {
             avalanche_beam_top_k: args.avalanche_beam_top_k,
             avalanche_probability_spread_exponent: args.avalanche_probability_spread_exponent,
             avalanche_combination_samples: args.avalanche_combination_samples,
+            avalanche_solver_enable: args.avalanche_solver_enable,
+            avalanche_solver_max_bits: args.avalanche_solver_max_bits,
             avalanche_combination_size: args.avalanche_combination_size,
             avalanche_combination_mixed_r_candidates: args.avalanche_combination_mixed_r_candidates,
             avalanche_combination_pool_size: args.avalanche_combination_pool_size,

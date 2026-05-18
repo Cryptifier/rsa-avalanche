@@ -84,6 +84,7 @@ use crate::math::{
 use crate::r_candidates::{RCandidate, RCandidateSettings, resolve_retargeted_r_candidates_path};
 use crate::rng::{RngChoice, RngMode};
 use crate::search::{beam_search_top_k, beam_search_top_k_with_progress, viterbi_decode};
+use crate::solver::{AvalancheSolverBatch, AvalancheSolverSample, run_avalanche_solver};
 use num_bigint::BigUint;
 use num_integer::Integer;
 use num_traits::{One, Zero};
@@ -4107,6 +4108,43 @@ pub(crate) fn recursive_tier_bits<'a>(
     }
 }
 
+/// Converts one batch of final-tier Avalanche samples into the payload-only solver input format.
+///
+/// # Parameters
+/// - `engine`: Engine configuration controlling how final-tier sample bits are selected.
+/// - `batch_number`: One-based analysis batch number used for solver logs.
+/// - `message`: Original plaintext message for the batch.
+/// - `samples`: Final-tier Avalanche samples retained for this batch.
+///
+/// # Returns
+/// - `AvalancheSolverBatch`: Solver-ready payload bits for the batch and every final-tier sample.
+///
+/// # Expected Output
+/// - Returns a converted batch payload without printing or mutating analytics state.
+fn build_avalanche_solver_batch(
+    engine: &EngineConfig,
+    batch_number: usize,
+    message: &BigUint,
+    samples: &[SelectedAvalancheSample],
+) -> AvalancheSolverBatch {
+    AvalancheSolverBatch {
+        batch_number,
+        message_bits: payload_message_bits(engine, message),
+        samples: samples
+            .iter()
+            .map(|sample| AvalancheSolverSample {
+                batch_number,
+                tier_index: sample.tier_index,
+                sample_index: sample.sample_index,
+                bits: extract_payload_bits_for_accuracy(
+                    engine,
+                    recursive_tier_bits(sample, engine),
+                ),
+            })
+            .collect(),
+    }
+}
+
 /// Compacts prior-tier selected samples into the minimal recursive source payload.
 ///
 /// # Parameters
@@ -7224,6 +7262,15 @@ fn run_r_candidate_accuracy_batches(
     if batch_count_raw == 0 {
         return Err("analysis_batch_batches must be >= 1".into());
     }
+    if engine.avalanche_solver_enable && batch_count_raw < 2 {
+        return Err("avalanche_solver_enable requires analysis_batch_batches >= 2".into());
+    }
+    if engine.avalanche_solver_enable && engine.message.is_random {
+        return Err(
+            "avalanche_solver_enable requires engine.message.is_random = false so every batch targets the same message"
+                .into(),
+        );
+    }
 
     let message_count = message_count_raw as usize;
     let candidates_per_batch = if engine.same_r_batch {
@@ -7335,6 +7382,9 @@ fn run_r_candidate_accuracy_batches(
     let mut cx_run_max: Option<CxMatchCandidate> = None;
     let mut total_cx_evaluated_candidates = 0usize;
     let mut batch_top_match_percentages = Vec::new();
+    let mut avalanche_solver_batches = engine
+        .avalanche_solver_enable
+        .then(|| Vec::with_capacity(batch_count));
     let mut next_batch_pct = 10u64;
     for batch_idx in 0..batch_count {
         let batch_number = batch_idx + 1;
@@ -7790,6 +7840,14 @@ fn run_r_candidate_accuracy_batches(
                 batch_number
             );
         }
+        let solver_batch = engine.avalanche_solver_enable.then(|| {
+            build_avalanche_solver_batch(
+                engine,
+                batch_number,
+                &message,
+                &sampled_avalanche_result.final_tier_samples,
+            )
+        });
         log_progress_every_ten_percent(
             batch_number as u64,
             batch_count as u64,
@@ -7958,6 +8016,88 @@ fn run_r_candidate_accuracy_batches(
                 },
                 avalanche_combination_samples: sampled_avalanche_result.retained_samples,
             });
+        });
+        if let (Some(solver_batches), Some(solver_batch)) =
+            (avalanche_solver_batches.as_mut(), solver_batch)
+        {
+            solver_batches.push(solver_batch);
+        }
+    }
+
+    let solver_result = if let Some(ref solver_batches) = avalanche_solver_batches {
+        Some(run_avalanche_solver(engine, solver_batches)?)
+    } else {
+        None
+    };
+    if let Some(ref solver_result) = solver_result {
+        with_analytics(analytics, |a| {
+            a.set_feature_stat(
+                "r_candidate_accuracy",
+                "avalanche_solver_enabled",
+                json!(solver_result.enabled),
+            );
+            a.set_feature_stat(
+                "r_candidate_accuracy",
+                "avalanche_solver_max_bits",
+                json!(solver_result.max_bits),
+            );
+            a.set_feature_stat(
+                "r_candidate_accuracy",
+                "avalanche_solver_batch_pair_count",
+                json!(solver_result.batch_pair_count),
+            );
+            a.set_feature_stat(
+                "r_candidate_accuracy",
+                "avalanche_solver_sample_pair_count",
+                json!(solver_result.sample_pair_count),
+            );
+            a.set_feature_stat(
+                "r_candidate_accuracy",
+                "avalanche_solver_attempted_candidates",
+                json!(solver_result.attempted_candidates),
+            );
+            a.set_feature_stat(
+                "r_candidate_accuracy",
+                "avalanche_solver_found",
+                json!(solver_result.found.is_some()),
+            );
+            if let Some(found) = solver_result.found.as_ref() {
+                a.set_feature_stat(
+                    "r_candidate_accuracy",
+                    "avalanche_solver_found_first_batch_number",
+                    json!(found.first_batch_number),
+                );
+                a.set_feature_stat(
+                    "r_candidate_accuracy",
+                    "avalanche_solver_found_first_tier_index",
+                    json!(found.first_tier_index),
+                );
+                a.set_feature_stat(
+                    "r_candidate_accuracy",
+                    "avalanche_solver_found_first_sample_index",
+                    json!(found.first_sample_index),
+                );
+                a.set_feature_stat(
+                    "r_candidate_accuracy",
+                    "avalanche_solver_found_second_batch_number",
+                    json!(found.second_batch_number),
+                );
+                a.set_feature_stat(
+                    "r_candidate_accuracy",
+                    "avalanche_solver_found_second_tier_index",
+                    json!(found.second_tier_index),
+                );
+                a.set_feature_stat(
+                    "r_candidate_accuracy",
+                    "avalanche_solver_found_second_sample_index",
+                    json!(found.second_sample_index),
+                );
+                a.set_feature_stat(
+                    "r_candidate_accuracy",
+                    "avalanche_solver_found_flipped_bit_positions",
+                    json!(found.flipped_bit_positions),
+                );
+            }
         });
     }
 

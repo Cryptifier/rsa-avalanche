@@ -272,6 +272,8 @@ fn main() -> Result<(), Box<dyn Error>> {
         avalanche_beam_top_k: config.engine.avalanche_beam_top_k,
         avalanche_probability_spread_exponent: config.engine.avalanche_probability_spread_exponent,
         avalanche_combination_samples: config.engine.avalanche_combination_samples,
+        avalanche_solver_enable: config.engine.avalanche_solver_enable,
+        avalanche_solver_max_bits: config.engine.avalanche_solver_max_bits,
         avalanche_combination_size: config.engine.avalanche_combination_size,
         avalanche_combination_mixed_r_candidates: config
             .engine
