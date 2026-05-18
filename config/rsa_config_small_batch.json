@@ -79,6 +79,10 @@
     "sqlite_worker_count": 64,
     "sqlite_db_folder": "/tmp",
     "sqlite_avalanche_page_size": 256,
+    // SQLite cache storage mode:
+    // - false: use the on-disk SQLite database in sqlite_db_folder.
+    // - true: keep the cache in shared memory and avoid syncing it to disk.
+    "sqlite_in_memory": false,
     // Search parameters.
     "avalanche_beam_top_k": 6, // Number of top-scoring candidates to keep for beam search results.
     "avalanche_use_top_beam": true, // Carry forward the prior tier's top beam-search bits between recursive Avalanche tiers.
@@ -89,22 +93,30 @@
     "avalanche_center_threshold_best": true, // When reporting center biases, emit only the best overall avalanche candidate in the session log.
     // Fitness function parameters for scoring the avalanche effect of each candidate against the sampled batch of ciphertext variants.
     "avalanche_fitness_scoring_pass": true, // Enable the fitness pass for Avalanche scoring.
-    "avalanche_fitness_shift_bytes": 8, // Number of bytes to right-shift the ciphertext difference before applying the avalanche fitness function; set to 0 for no shift.
-    "avalanche_fitness_bit_width": 64, // Number of bits to consider for the zero padding fitness function.
+    "avalanche_fitness_shift_bytes": 9, // Number of bytes to right-shift the ciphertext difference before applying the avalanche fitness function; set to 0 for no shift.
+    "avalanche_fitness_bit_width": 72, // Number of bits to consider for the zero padding fitness function.
     "avalanche_fitness_r_candidate_limit": 0, // Cap how many r candidates can be scored by the avalanche fitness function; set to 0 for no limit.
-    "avalanche_fitness_cx_candidate_limit": 1000, // Cap how many c^x variants per r candidate can be scored by the avalanche fitness function; set to 0 for no limit.
+    "avalanche_fitness_cx_candidate_limit": 1500, // Cap how many c^x variants per r candidate can be scored by the avalanche fitness function; set to 0 for no limit.
     "avalanche_fitness_use_threshold": false, // Default to false.
     "avalanche_fitness_threshold": 0.510,
     "avalanche_fitness_log_top_pct": 0.30,
+    // Streaming fitness pruning:
+    // - true: keep only the current best retained r/c^x pool as fitness scores are computed.
+    // - false: keep all scored inputs until the later batch-level fitness pass runs.
+    "avalanche_fitness_streaming_prune": true,
+    // Global Avalanche input uniqueness:
+    // - true: retain only a globally unique set with no repeated r or x candidates.
+    // - false: allow multiple scored inputs to reuse the same r or x values.
+    "avalanche_unique_r_cx_inputs": true,
     // Cap how many distinct r values can appear in one sampled avalanche input;
     // each selected r still contributes all of its sampled c^x variants.
     "avalanche_combination_mixed_r_candidates": 64,
     "avalanche_combination_samples": 300000, // N: number of sampled combinations evaluated by avalanche per batch.
     "avalanche_combination_size": 100, // Number of scored items taken in each sampled combination.
     "avalanche_combination_pool_size": 100000, // Legacy compatibility field; runtime sampling now always uses the full batch-sized pool.
-    "avalanche_combination_recursion_depth": 2, // Run one recursive Avalanche tier on top of the sampled-input tier.
-    "avalanche_combination_recursive_group_size": [16], // Per-recursive-tier group sizes; later recursive tiers reuse the last entry.
-    "avalanche_combination_recursive_resample_count": [300000], // Per-recursive-tier resample counts; 0 preserves one-pass regrouping and later recursive tiers reuse the last entry.
+    "avalanche_combination_recursion_depth": 3, // Run one recursive Avalanche tier on top of the sampled-input tier.
+    "avalanche_combination_recursive_group_size": [16, 4, 2], // Per-recursive-tier group sizes; later recursive tiers reuse the last entry.
+    "avalanche_combination_recursive_resample_count": [300000, 300000, 300000], // Per-recursive-tier resample counts; 0 preserves one-pass regrouping and later recursive tiers reuse the last entry.
     // Hamming-distance pruning keeps a central percentile band of scored items
     // before sampling, then optionally adds some tail outliers back in.
     "avalanche_combination_hamming_distance_prune": true,

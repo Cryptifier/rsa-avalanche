@@ -308,6 +308,33 @@ pub fn resolve_avalanche_cache_db_path(seed: Option<u64>, db_folder: &str) -> Pa
         .join(format!("rsa_avalanche_{}.db", seed.unwrap_or(0)))
 }
 
+/// Resolves the SQLite connection target used for the temporary Avalanche cache.
+///
+/// # Parameters
+/// - `seed`: Optional deterministic analysis seed used to key the cache identifier.
+/// - `engine`: Engine configuration describing the cache storage mode.
+///
+/// # Returns
+/// - `(String, PathBuf, Option<PathBuf>)`: `(connection_target, display_path, cleanup_path)`.
+///
+/// # Expected Output
+/// - Returns either a shared in-memory SQLite URI or an on-disk path plus the optional cleanup
+///   path; no stdout/stderr output.
+fn resolve_avalanche_cache_connection_target(
+    seed: Option<u64>,
+    engine: &EngineConfig,
+) -> (String, PathBuf, Option<PathBuf>) {
+    if engine.sqlite_in_memory {
+        let name = format!("file:rsa_avalanche_{}?mode=memory&cache=shared", seed.unwrap_or(0));
+        let display_path = PathBuf::from(&name);
+        (name, display_path, None)
+    } else {
+        let path = resolve_avalanche_cache_db_path(seed, &engine.sqlite_db_folder);
+        let connection_target = path.to_string_lossy().to_string();
+        (connection_target, path.clone(), Some(path))
+    }
+}
+
 /// Creates the parent directory tree for the Avalanche cache database path.
 ///
 /// # Parameters
@@ -336,7 +363,10 @@ fn ensure_avalanche_cache_db_parent_dir(path: &Path) -> Result<(), Box<dyn Error
 ///
 /// # Expected Output
 /// - Deletes the cache file when present; no stdout/stderr output.
-pub fn cleanup_avalanche_cache_db(seed: Option<u64>, db_folder: &str) {
+pub fn cleanup_avalanche_cache_db(seed: Option<u64>, db_folder: &str, in_memory: bool) {
+    if in_memory {
+        return;
+    }
     let path = resolve_avalanche_cache_db_path(seed, db_folder);
     if path.exists() {
         let _ = fs::remove_file(path);
@@ -355,6 +385,7 @@ pub fn cleanup_avalanche_cache_db(seed: Option<u64>, db_folder: &str) {
 /// - Owns a SQLite connection pool and deletes the backing file on drop.
 pub(crate) struct AvalancheCacheGuard {
     pub(crate) path: PathBuf,
+    cleanup_path: Option<PathBuf>,
     pool: Option<AvalancheSqlitePool>,
     page_rows: i64,
 }
@@ -402,16 +433,18 @@ impl AvalancheCacheGuard {
     /// # Expected Output
     /// - Creates the SQLite database under the configured folder, creating parent directories as needed.
     pub(crate) fn new(seed: Option<u64>, engine: &EngineConfig) -> Result<Self, Box<dyn Error>> {
-        let path = resolve_avalanche_cache_db_path(seed, &engine.sqlite_db_folder);
-        ensure_avalanche_cache_db_parent_dir(&path)?;
-        if path.exists() {
-            let _ = fs::remove_file(&path);
+        let (connection_target, path, cleanup_path) =
+            resolve_avalanche_cache_connection_target(seed, engine);
+        if let Some(cleanup_path) = cleanup_path.as_ref() {
+            ensure_avalanche_cache_db_parent_dir(cleanup_path)?;
+            if cleanup_path.exists() {
+                let _ = fs::remove_file(cleanup_path);
+            }
         }
         let page_rows = i64::try_from(engine.sqlite_avalanche_page_size.max(1))
             .map_err(|_| "engine.sqlite_avalanche_page_size exceeds i64 range")?;
         let settings = resolve_avalanche_sqlite_settings(engine)?;
-        let manager =
-            ConnectionManager::<SqliteConnection>::new(path.to_string_lossy().to_string());
+        let manager = ConnectionManager::<SqliteConnection>::new(connection_target);
         let pool = Pool::builder()
             .max_size(engine.sqlite_worker_count)
             .connection_customizer(Box::new(AvalancheSqliteConnectionCustomizer { settings }))
@@ -481,6 +514,7 @@ impl AvalancheCacheGuard {
         .execute(&mut connection)?;
         Ok(Self {
             path,
+            cleanup_path,
             pool: Some(pool),
             page_rows,
         })
@@ -561,7 +595,9 @@ impl AvalancheCacheGuard {
 impl Drop for AvalancheCacheGuard {
     fn drop(&mut self) {
         let _ = self.pool.take();
-        let _ = fs::remove_file(&self.path);
+        if let Some(path) = self.cleanup_path.as_ref() {
+            let _ = fs::remove_file(path);
+        }
     }
 }
 

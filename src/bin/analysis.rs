@@ -316,6 +316,9 @@ fn main() -> Result<(), Box<dyn Error>> {
         avalanche_fitness_bit_width: config.engine.avalanche_fitness_bit_width,
         avalanche_fitness_r_candidate_limit: config.engine.avalanche_fitness_r_candidate_limit,
         avalanche_fitness_cx_candidate_limit: config.engine.avalanche_fitness_cx_candidate_limit,
+        avalanche_fitness_streaming_prune: config.engine.avalanche_fitness_streaming_prune,
+        avalanche_unique_r_cx_inputs: config.engine.avalanche_unique_r_cx_inputs,
+        sqlite_in_memory: config.engine.sqlite_in_memory,
         bits_decrypt: args.bits_decrypt,
         r_candidate_target_exponent: args
             .r_candidate_target_exponent
@@ -330,6 +333,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let analytics_for_handler = Arc::clone(&analytics);
     let avalanche_cache_seed = args.seed;
     let avalanche_cache_db_folder = config.engine.sqlite_db_folder.clone();
+    let avalanche_cache_in_memory = config.engine.sqlite_in_memory;
     ctrlc::set_handler(move || {
         if let Ok(mut guard) = analytics_for_handler.lock() {
             guard.finish(Some("interrupted".to_string()));
@@ -338,7 +342,11 @@ fn main() -> Result<(), Box<dyn Error>> {
                 eprintln!("Failed to write {}: {}", output_path, err);
             }
         }
-        cleanup_avalanche_cache_db(avalanche_cache_seed, &avalanche_cache_db_folder);
+        cleanup_avalanche_cache_db(
+            avalanche_cache_seed,
+            &avalanche_cache_db_folder,
+            avalanche_cache_in_memory,
+        );
         std::process::exit(130);
     })?;
 

@@ -57,9 +57,10 @@ use crate::database::{
     load_cached_selected_sample_rows_by_ids, load_cached_selected_sample_rows_page,
 };
 use crate::fitness::{
-    CachedScoredInputSummary, HammingDistancePrunedPool,
+    CachedScoredInputSummary, HammingDistancePrunedPool, StreamingScoredAvalancheFitnessPool,
     apply_cached_scored_avalanche_fitness_pass, build_candidate_message_transform,
     build_scored_avalanche_fitness_pass, extract_payload_bits_for_accuracy,
+    enforce_global_unique_cached_scored_inputs, enforce_global_unique_scored_inputs,
     group_cached_scored_inputs_by_r_candidate_with_progress,
     group_scored_inputs_by_r_candidate_with_progress, load_cached_scored_input_summaries,
     lsb_zero_count_fitness, normalize_avalanche_fitness_score, payload_message_bits,
@@ -5455,7 +5456,7 @@ fn run_sampled_avalanche_beam_search_cached(
     }
 
     let fitness_bit_width = resolve_avalanche_fitness_bit_width(engine);
-    let scored_inputs = if engine.avalanche_fitness_scoring_pass {
+    let mut scored_inputs = if engine.avalanche_fitness_scoring_pass {
         let preprocessed = apply_cached_scored_avalanche_fitness_pass(
             cache,
             batch_number,
@@ -5494,6 +5495,29 @@ fn run_sampled_avalanche_beam_search_cached(
     } else {
         load_cached_scored_input_summaries(cache, batch_number)?
     };
+    if engine.avalanche_unique_r_cx_inputs {
+        if !engine.avalanche_fitness_scoring_pass {
+            scored_inputs.sort_by(|left, right| {
+                right
+                    .score_match_pct
+                    .total_cmp(&left.score_match_pct)
+                    .then_with(|| left.batch_candidate_index.cmp(&right.batch_candidate_index))
+                    .then_with(|| left.message_index.cmp(&right.message_index))
+                    .then_with(|| left.x.cmp(&right.x))
+            });
+        }
+        let original_count = scored_inputs.len();
+        let (unique_inputs, rejected_overlap_count) =
+            enforce_global_unique_cached_scored_inputs(scored_inputs);
+        scored_inputs = unique_inputs;
+        println!(
+            "Avalanche unique-input filter for batch {}: retained {} of {} cached scored inputs after dropping {} overlapping r/x candidates",
+            batch_number,
+            scored_inputs.len(),
+            original_count,
+            rejected_overlap_count
+        );
+    }
     if scored_inputs.is_empty() {
         return Err(
             "avalanche_fitness_threshold removed all cached scored inputs for sampled avalanche"
@@ -5960,6 +5984,17 @@ fn cache_batch_scored_avalanche_inputs(
     let mut total_candidate_count = 0usize;
     let mut total_cx_evaluated_candidates = 0usize;
     let mut batch_cx_max: Option<BatchCxMax> = None;
+    let mut streaming_fitness_pool = (engine.avalanche_fitness_scoring_pass
+        && engine.avalanche_fitness_streaming_prune)
+        .then(|| {
+            StreamingScoredAvalancheFitnessPool::new(
+                resolve_avalanche_fitness_bit_width(engine),
+                engine.avalanche_fitness_r_candidate_limit,
+                engine.avalanche_fitness_cx_candidate_limit,
+                engine.avalanche_fitness_use_threshold,
+                engine.avalanche_fitness_threshold,
+            )
+        });
     let mut pending_rows = Vec::new();
     let mut pending_bytes = 0usize;
     let mut next_flush_threshold = AVALANCHE_CACHE_FLUSH_BYTES;
@@ -6080,22 +6115,36 @@ fn cache_batch_scored_avalanche_inputs(
             }
         }
         pending_bytes += chunk_aggregate.estimated_bytes;
-        pending_rows.append(&mut chunk_aggregate.scored_samples);
-        if pending_bytes >= next_flush_threshold {
-            insert_cached_scored_inputs(cache, batch_number, &pending_rows)?;
-            println!(
-                "Avalanche cache flush for batch {}: wrote {} scored inputs at approximately {:.2} GiB pending",
-                batch_number,
-                pending_rows.len(),
-                pending_bytes as f64 / (1024.0 * 1024.0 * 1024.0)
-            );
-            pending_rows.clear();
-            pending_bytes = 0;
-            next_flush_threshold = AVALANCHE_CACHE_FLUSH_BYTES;
+        if let Some(pool) = streaming_fitness_pool.as_mut() {
+            pool.extend(std::mem::take(&mut chunk_aggregate.scored_samples));
+        } else {
+            pending_rows.append(&mut chunk_aggregate.scored_samples);
+            if pending_bytes >= next_flush_threshold {
+                insert_cached_scored_inputs(cache, batch_number, &pending_rows)?;
+                println!(
+                    "Avalanche cache flush for batch {}: wrote {} scored inputs at approximately {:.2} GiB pending",
+                    batch_number,
+                    pending_rows.len(),
+                    pending_bytes as f64 / (1024.0 * 1024.0 * 1024.0)
+                );
+                pending_rows.clear();
+                pending_bytes = 0;
+                next_flush_threshold = AVALANCHE_CACHE_FLUSH_BYTES;
+            }
         }
     }
 
-    if !pending_rows.is_empty() {
+    if let Some(pool) = streaming_fitness_pool.take() {
+        let retained_inputs = pool.finalize(engine.avalanche_unique_r_cx_inputs);
+        if !retained_inputs.is_empty() {
+            insert_cached_scored_inputs(cache, batch_number, &retained_inputs)?;
+        }
+        println!(
+            "Avalanche cache streaming prune for batch {}: wrote final retained pool of {} scored inputs",
+            batch_number,
+            retained_inputs.len()
+        );
+    } else if !pending_rows.is_empty() {
         insert_cached_scored_inputs(cache, batch_number, &pending_rows)?;
         println!(
             "Avalanche cache flush for batch {}: wrote final {} scored inputs at approximately {:.2} GiB pending",
@@ -6170,7 +6219,7 @@ fn run_sampled_avalanche_beam_search(
     }
 
     let fitness_bit_width = resolve_avalanche_fitness_bit_width(engine);
-    let scored_inputs = if let Some(pass) = build_scored_avalanche_fitness_pass(engine) {
+    let mut scored_inputs = if let Some(pass) = build_scored_avalanche_fitness_pass(engine) {
         let preprocessed = pass(scored_inputs.to_vec());
         println!(
             "Avalanche fitness pass for batch {}: retained {} of {} scored inputs in a globally ranked pool using {} LSB fitness bits with effective retained-input cap {} (r-limit {} cx-limit {}, threshold-enabled {} threshold {})",
@@ -6201,6 +6250,29 @@ fn run_sampled_avalanche_beam_search(
     } else {
         scored_inputs.to_vec()
     };
+    if engine.avalanche_unique_r_cx_inputs {
+        if !engine.avalanche_fitness_scoring_pass {
+            scored_inputs.par_sort_unstable_by(|left, right| {
+                right
+                    .score_match_pct
+                    .total_cmp(&left.score_match_pct)
+                    .then_with(|| left.batch_candidate_index.cmp(&right.batch_candidate_index))
+                    .then_with(|| left.message_index.cmp(&right.message_index))
+                    .then_with(|| left.x.cmp(&right.x))
+            });
+        }
+        let original_count = scored_inputs.len();
+        let (unique_inputs, rejected_overlap_count) =
+            enforce_global_unique_scored_inputs(scored_inputs);
+        scored_inputs = unique_inputs;
+        println!(
+            "Avalanche unique-input filter for batch {}: retained {} of {} scored inputs after dropping {} overlapping r/x candidates",
+            batch_number,
+            scored_inputs.len(),
+            original_count,
+            rejected_overlap_count
+        );
+    }
     if scored_inputs.is_empty() {
         return Err(
             "avalanche_fitness_threshold removed all scored inputs for sampled avalanche".into(),
@@ -6811,108 +6883,149 @@ fn run_r_candidate_accuracy_batches(
             )?;
             (candidate_count, cx_evaluated_candidates, cx_max, sampled)
         } else {
-            let mut batch_aggregate = batch_candidates
-                .par_iter()
-                .enumerate()
-                .try_fold(
-                    AccuracyBatchAccumulator::default,
-                    |mut acc, (batch_candidate_index, candidate)| {
-                        let mut cx_max = None;
-                        let mut cx_evaluated_candidates = 0usize;
-                        let mut scored_samples = Vec::with_capacity(message_count);
-                        let target_exponent =
-                            keep_sample_details.then(|| candidate.target_exponent.normalized());
+            let chunk_size = rayon::current_num_threads().saturating_mul(8).max(1);
+            let mut batch_aggregate = AccuracyBatchAccumulator::default();
+            let mut streaming_fitness_pool = (engine.avalanche_fitness_scoring_pass
+                && engine.avalanche_fitness_streaming_prune)
+                .then(|| {
+                    StreamingScoredAvalancheFitnessPool::new(
+                        resolve_avalanche_fitness_bit_width(engine),
+                        engine.avalanche_fitness_r_candidate_limit,
+                        engine.avalanche_fitness_cx_candidate_limit,
+                        engine.avalanche_fitness_use_threshold,
+                        engine.avalanche_fitness_threshold,
+                    )
+                });
 
-                        for idx in 0..messages.len() {
-                            let shifted = &shifted_ciphertexts[idx];
-                            let hbc_result =
-                                prepare_candidate_ciphertext(engine, shifted, &candidate.r, &ctx.n);
-                            let x_value = x_values.get(idx).cloned().ok_or_else(|| {
-                                "missing ciphertext exponent for message index".to_string()
-                            })?;
-                            let d_new_owned = if engine.ciphertext_modify {
-                                let e_x = e_x_values.get(idx).ok_or_else(|| {
+            for (chunk_offset, candidate_chunk) in batch_candidates.chunks(chunk_size).enumerate() {
+                let global_offset = chunk_offset.saturating_mul(chunk_size);
+                let mut chunk_aggregate = candidate_chunk
+                    .par_iter()
+                    .enumerate()
+                    .try_fold(
+                        AccuracyBatchAccumulator::default,
+                        |mut acc, (local_index, candidate)| {
+                            let batch_candidate_index = global_offset + local_index;
+                            let mut cx_max = None;
+                            let mut cx_evaluated_candidates = 0usize;
+                            let mut scored_samples = Vec::with_capacity(message_count);
+                            let target_exponent =
+                                keep_sample_details.then(|| candidate.target_exponent.normalized());
+
+                            for idx in 0..messages.len() {
+                                let shifted = &shifted_ciphertexts[idx];
+                                let hbc_result = prepare_candidate_ciphertext(
+                                    engine,
+                                    shifted,
+                                    &candidate.r,
+                                    &ctx.n,
+                                );
+                                let x_value = x_values.get(idx).cloned().ok_or_else(|| {
                                     "missing ciphertext exponent for message index".to_string()
                                 })?;
-                                Some(mod_inverse(e_x, &candidate.phi_new).ok_or_else(|| {
-                                    format!(
-                                        "analysis_batch missing modular inverse for x {}",
-                                        x_value
-                                    )
-                                })?)
-                            } else {
-                                None
-                            };
-                            let d_new = d_new_owned.as_ref().unwrap_or(&candidate.d_new);
+                                let d_new_owned = if engine.ciphertext_modify {
+                                    let e_x = e_x_values.get(idx).ok_or_else(|| {
+                                        "missing ciphertext exponent for message index".to_string()
+                                    })?;
+                                    Some(mod_inverse(e_x, &candidate.phi_new).ok_or_else(
+                                        || {
+                                            format!(
+                                                "analysis_batch missing modular inverse for x {}",
+                                                x_value
+                                            )
+                                        },
+                                    )?)
+                                } else {
+                                    None
+                                };
+                                let d_new = d_new_owned.as_ref().unwrap_or(&candidate.d_new);
 
-                            let dm = derive_candidate_message_from_result(
-                                ctx,
-                                engine,
-                                &hbc_result,
-                                &candidate.r,
-                                d_new,
-                            );
-                            let (dm_bits, match_pct) =
-                                truncated_match_percentage(&dm, &avalanche_message_bits);
-                            cx_evaluated_candidates += 1;
-                            if cx_max
-                                .as_ref()
-                                .is_none_or(|current: &BatchCxMax| match_pct > current.match_pct)
-                            {
-                                cx_max = Some(BatchCxMax {
-                                    match_pct,
-                                    x: x_value.clone(),
-                                    r: candidate.r.clone(),
+                                let dm = derive_candidate_message_from_result(
+                                    ctx,
+                                    engine,
+                                    &hbc_result,
+                                    &candidate.r,
+                                    d_new,
+                                );
+                                let (dm_bits, match_pct) =
+                                    truncated_match_percentage(&dm, &avalanche_message_bits);
+                                cx_evaluated_candidates += 1;
+                                if cx_max.as_ref().is_none_or(|current: &BatchCxMax| {
+                                    match_pct > current.match_pct
+                                }) {
+                                    cx_max = Some(BatchCxMax {
+                                        match_pct,
+                                        x: x_value.clone(),
+                                        r: candidate.r.clone(),
+                                        batch_candidate_index,
+                                    });
+                                }
+
+                                scored_samples.push(ScoredAvalancheInput {
                                     batch_candidate_index,
+                                    message_index: idx,
+                                    r: candidate.r.clone(),
+                                    x: x_value,
+                                    score_match_pct: match_pct,
+                                    message_bits: PackedBits::from_bools(&dm_bits),
+                                    detail: target_exponent.as_ref().map(|target_exponent| {
+                                        ScoredAvalancheInputDetail {
+                                            target_exponent: target_exponent.clone(),
+                                            hbc_ciphertext_r: hbc_result.clone(),
+                                            candidate_decryption: dm.clone(),
+                                        }
+                                    }),
                                 });
+                                let done = batch_cx_done.fetch_add(1, Ordering::Relaxed) + 1;
+                                log_parallel_progress_every_ten_percent(
+                                    done,
+                                    batch_cx_total,
+                                    &batch_cx_next_pct,
+                                    &batch_cx_label,
+                                );
+                                log_parallel_progress_every_interval(
+                                    done,
+                                    batch_cx_total,
+                                    &batch_cx_started_at,
+                                    &batch_cx_next_log_at_ms,
+                                    &batch_cx_label,
+                                    Duration::from_secs(5),
+                                );
                             }
 
-                            scored_samples.push(ScoredAvalancheInput {
-                                batch_candidate_index,
-                                message_index: idx,
-                                r: candidate.r.clone(),
-                                x: x_value,
-                                score_match_pct: match_pct,
-                                message_bits: PackedBits::from_bools(&dm_bits),
-                                detail: target_exponent.as_ref().map(|target_exponent| {
-                                    ScoredAvalancheInputDetail {
-                                        target_exponent: target_exponent.clone(),
-                                        hbc_ciphertext_r: hbc_result.clone(),
-                                        candidate_decryption: dm.clone(),
-                                    }
-                                }),
-                            });
-                            let done = batch_cx_done.fetch_add(1, Ordering::Relaxed) + 1;
-                            log_parallel_progress_every_ten_percent(
-                                done,
-                                batch_cx_total,
-                                &batch_cx_next_pct,
-                                &batch_cx_label,
-                            );
-                            log_parallel_progress_every_interval(
-                                done,
-                                batch_cx_total,
-                                &batch_cx_started_at,
-                                &batch_cx_next_log_at_ms,
-                                &batch_cx_label,
-                                Duration::from_secs(5),
-                            );
-                        }
+                            acc.candidate_count += 1;
+                            acc.cx_evaluated_candidates += cx_evaluated_candidates;
+                            if let Some(candidate) = cx_max {
+                                acc.set_cx_max(candidate);
+                            }
+                            acc.scored_samples.extend(scored_samples);
+                            Ok::<_, String>(acc)
+                        },
+                    )
+                    .try_reduce(AccuracyBatchAccumulator::default, |left, right| {
+                        Ok::<_, String>(left.merge(right))
+                    })
+                    .map_err(|err| -> Box<dyn Error> { err.into() })?;
 
-                        acc.candidate_count += 1;
-                        acc.cx_evaluated_candidates += cx_evaluated_candidates;
-                        if let Some(candidate) = cx_max {
-                            acc.set_cx_max(candidate);
-                        }
-                        acc.scored_samples.extend(scored_samples);
-                        Ok::<_, String>(acc)
-                    },
-                )
-                .try_reduce(AccuracyBatchAccumulator::default, |left, right| {
-                    Ok::<_, String>(left.merge(right))
-                })
-                .map_err(|err| -> Box<dyn Error> { err.into() })?;
-            let batch_scored_inputs = batch_aggregate.scored_samples;
+                batch_aggregate.candidate_count += chunk_aggregate.candidate_count;
+                batch_aggregate.cx_evaluated_candidates += chunk_aggregate.cx_evaluated_candidates;
+                if let Some(candidate) = chunk_aggregate.cx_max.take() {
+                    batch_aggregate.set_cx_max(candidate);
+                }
+                if let Some(pool) = streaming_fitness_pool.as_mut() {
+                    pool.extend(std::mem::take(&mut chunk_aggregate.scored_samples));
+                } else {
+                    batch_aggregate
+                        .scored_samples
+                        .append(&mut chunk_aggregate.scored_samples);
+                }
+            }
+
+            let batch_scored_inputs = if let Some(pool) = streaming_fitness_pool.take() {
+                pool.finalize(engine.avalanche_unique_r_cx_inputs)
+            } else {
+                std::mem::take(&mut batch_aggregate.scored_samples)
+            };
             let sampled = run_sampled_avalanche_beam_search(
                 engine,
                 &message,
@@ -7833,6 +7946,122 @@ mod tests {
             .map(|input| (input.batch_candidate_index, input.message_index))
             .collect::<Vec<_>>();
         assert_eq!(retained_keys, vec![(0, 0), (0, 1)]);
+    }
+
+    #[test]
+    fn test_enforce_global_unique_scored_inputs_rejects_overlapping_r_and_x_values() {
+        let (retained, rejected_overlap_count) = enforce_global_unique_scored_inputs(vec![
+            ScoredAvalancheInput {
+                batch_candidate_index: 0,
+                message_index: 0,
+                r: BigUint::from(3u8),
+                x: BigUint::from(5u8),
+                score_match_pct: 90.0,
+                message_bits: PackedBits::from_bools(&[false, false, false, false]),
+                detail: None,
+            },
+            ScoredAvalancheInput {
+                batch_candidate_index: 1,
+                message_index: 0,
+                r: BigUint::from(3u8),
+                x: BigUint::from(7u8),
+                score_match_pct: 80.0,
+                message_bits: PackedBits::from_bools(&[false, false, false, true]),
+                detail: None,
+            },
+            ScoredAvalancheInput {
+                batch_candidate_index: 2,
+                message_index: 0,
+                r: BigUint::from(11u8),
+                x: BigUint::from(5u8),
+                score_match_pct: 70.0,
+                message_bits: PackedBits::from_bools(&[false, false, true, true]),
+                detail: None,
+            },
+            ScoredAvalancheInput {
+                batch_candidate_index: 3,
+                message_index: 0,
+                r: BigUint::from(13u8),
+                x: BigUint::from(17u8),
+                score_match_pct: 60.0,
+                message_bits: PackedBits::from_bools(&[true, true, true, true]),
+                detail: None,
+            },
+        ]);
+
+        assert_eq!(rejected_overlap_count, 2);
+        let retained_keys = retained
+            .iter()
+            .map(|input| (input.batch_candidate_index, input.message_index))
+            .collect::<Vec<_>>();
+        assert_eq!(retained_keys, vec![(0, 0), (3, 0)]);
+    }
+
+    #[test]
+    fn test_streaming_scored_avalanche_fitness_pool_matches_batch_fitness_selection() {
+        let inputs = vec![
+            ScoredAvalancheInput {
+                batch_candidate_index: 0,
+                message_index: 0,
+                r: BigUint::from(3u8),
+                x: BigUint::from(1u8),
+                score_match_pct: 70.0,
+                message_bits: PackedBits::from_bools(&[false, false, false, false, true]),
+                detail: None,
+            },
+            ScoredAvalancheInput {
+                batch_candidate_index: 0,
+                message_index: 1,
+                r: BigUint::from(3u8),
+                x: BigUint::from(3u8),
+                score_match_pct: 60.0,
+                message_bits: PackedBits::from_bools(&[false, true, false, false, true]),
+                detail: None,
+            },
+            ScoredAvalancheInput {
+                batch_candidate_index: 1,
+                message_index: 0,
+                r: BigUint::from(5u8),
+                x: BigUint::from(5u8),
+                score_match_pct: 65.0,
+                message_bits: PackedBits::from_bools(&[false, false, false, true, true]),
+                detail: None,
+            },
+            ScoredAvalancheInput {
+                batch_candidate_index: 1,
+                message_index: 1,
+                r: BigUint::from(5u8),
+                x: BigUint::from(7u8),
+                score_match_pct: 55.0,
+                message_bits: PackedBits::from_bools(&[false, false, true, true, true]),
+                detail: None,
+            },
+            ScoredAvalancheInput {
+                batch_candidate_index: 2,
+                message_index: 0,
+                r: BigUint::from(7u8),
+                x: BigUint::from(9u8),
+                score_match_pct: 90.0,
+                message_bits: PackedBits::from_bools(&[true, true, true, true, true]),
+                detail: None,
+            },
+        ];
+
+        let expected = apply_scored_avalanche_fitness_pass(inputs.clone(), 4, 2, 1, false, 0.580);
+        let mut streaming_pool = StreamingScoredAvalancheFitnessPool::new(4, 2, 1, false, 0.580);
+        streaming_pool.extend(inputs[..2].to_vec());
+        streaming_pool.extend(inputs[2..].to_vec());
+        let retained = streaming_pool.finalize(false);
+
+        let expected_keys = expected
+            .iter()
+            .map(|input| (input.batch_candidate_index, input.message_index))
+            .collect::<Vec<_>>();
+        let retained_keys = retained
+            .iter()
+            .map(|input| (input.batch_candidate_index, input.message_index))
+            .collect::<Vec<_>>();
+        assert_eq!(retained_keys, expected_keys);
     }
 
     #[test]
@@ -9246,6 +9475,39 @@ mod tests {
         );
         assert!(mmap_size.mmap_size > 0);
         assert!(mmap_size.mmap_size <= i64::try_from(engine.sqlite_mmap_size).unwrap());
+    }
+
+    #[test]
+    fn test_avalanche_cache_supports_shared_in_memory_mode() {
+        let mut engine = EngineConfig::default();
+        engine.sqlite_in_memory = true;
+
+        #[derive(Debug, QueryableByName)]
+        struct CountStarRow {
+            #[diesel(sql_type = diesel::sql_types::BigInt, column_name = table_count)]
+            count: i64,
+        }
+
+        let cache =
+            AvalancheCacheGuard::new(Some(10_004), &engine).expect("cache should initialize");
+        assert!(
+            cache
+                .path
+                .to_string_lossy()
+                .contains("mode=memory&cache=shared")
+        );
+        assert!(!cache.path.exists());
+
+        let mut connection = cache.pool().expect("pool should exist").get().unwrap();
+        let table_count = sql_query(
+            "SELECT COUNT(*) AS table_count
+             FROM sqlite_master
+             WHERE type = 'table'
+               AND name IN ('avalanche_cache_inputs', 'avalanche_cache_samples')",
+        )
+        .get_result::<CountStarRow>(&mut connection)
+        .expect("schema should exist in shared in-memory cache");
+        assert_eq!(table_count.count, 2);
     }
 
     #[test]

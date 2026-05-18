@@ -239,6 +239,12 @@ pub struct EngineConfig {
     /// Percentage of thresholded fitness-ranked candidates logged for each Avalanche batch.
     #[serde(default = "default_avalanche_fitness_log_top_pct")]
     pub avalanche_fitness_log_top_pct: f64,
+    /// Whether batch scoring should prune the fitness-ranked Avalanche input pool incrementally while candidates are still being processed.
+    #[serde(default = "default_avalanche_fitness_streaming_prune")]
+    pub avalanche_fitness_streaming_prune: bool,
+    /// Whether sampled Avalanche should keep a globally unique set with no repeated `r` or `x` values.
+    #[serde(default = "default_avalanche_unique_r_cx_inputs")]
+    pub avalanche_unique_r_cx_inputs: bool,
     #[serde(default = "default_same_r_batch")]
     pub same_r_batch: bool,
     #[serde(default = "default_ciphertext_modify")]
@@ -272,6 +278,9 @@ pub struct EngineConfig {
     /// Number of rows per SQLite Avalanche cache page used for batched inserts and reads.
     #[serde(default = "default_sqlite_avalanche_page_size")]
     pub sqlite_avalanche_page_size: usize,
+    /// Whether the Avalanche cache should use a shared in-memory SQLite database instead of an on-disk file.
+    #[serde(default = "default_sqlite_in_memory")]
+    pub sqlite_in_memory: bool,
     /// Whether to sort avalanche candidates by Hamming distance.
     #[serde(default = "default_use_hamming_distance")]
     pub use_hamming_distance: bool,
@@ -443,6 +452,8 @@ impl Default for EngineConfig {
             avalanche_fitness_use_threshold: default_avalanche_fitness_use_threshold(),
             avalanche_fitness_threshold: default_avalanche_fitness_threshold(),
             avalanche_fitness_log_top_pct: default_avalanche_fitness_log_top_pct(),
+            avalanche_fitness_streaming_prune: default_avalanche_fitness_streaming_prune(),
+            avalanche_unique_r_cx_inputs: default_avalanche_unique_r_cx_inputs(),
             same_r_batch: default_same_r_batch(),
             ciphertext_modify: default_ciphertext_modify(),
             oracle_accuracy_threshold: default_oracle_accuracy_threshold(),
@@ -455,6 +466,7 @@ impl Default for EngineConfig {
             sqlite_worker_count: default_sqlite_worker_count(),
             sqlite_db_folder: default_sqlite_db_folder(),
             sqlite_avalanche_page_size: default_sqlite_avalanche_page_size(),
+            sqlite_in_memory: default_sqlite_in_memory(),
             use_hamming_distance: default_use_hamming_distance(),
             mirror_invert_candidates: default_mirror_invert_candidates(),
             override_best_r: None,
@@ -1645,6 +1657,34 @@ fn default_avalanche_fitness_log_top_pct() -> f64 {
     0.30
 }
 
+/// Default flag for streaming Avalanche fitness pruning during batch scoring.
+///
+/// # Parameters
+/// - None.
+///
+/// # Returns
+/// - `bool`: Default enable state for incremental fitness-ranked pruning.
+///
+/// # Expected Output
+/// - Returns a constant default value; no side effects.
+fn default_avalanche_fitness_streaming_prune() -> bool {
+    false
+}
+
+/// Default flag for enforcing globally unique `r` and `x` Avalanche inputs.
+///
+/// # Parameters
+/// - None.
+///
+/// # Returns
+/// - `bool`: Default uniqueness-enforcement setting.
+///
+/// # Expected Output
+/// - Returns a constant default value; no side effects.
+fn default_avalanche_unique_r_cx_inputs() -> bool {
+    false
+}
+
 /// Default flag for using the same r candidate across a batch.
 ///
 /// # Parameters
@@ -1811,6 +1851,20 @@ fn default_sqlite_db_folder() -> String {
 /// - Returns a constant default value; no side effects.
 fn default_sqlite_avalanche_page_size() -> usize {
     4_096
+}
+
+/// Default flag for keeping the Avalanche cache SQLite database in memory.
+///
+/// # Parameters
+/// - None.
+///
+/// # Returns
+/// - `bool`: Default SQLite cache storage mode.
+///
+/// # Expected Output
+/// - Returns a constant default value; no side effects.
+fn default_sqlite_in_memory() -> bool {
+    false
 }
 
 /// Default toggle for Hamming-distance sorting in avalanche candidate ordering.
@@ -2078,12 +2132,15 @@ mod tests {
         assert!(engine.avalanche_fitness_use_threshold);
         assert!((engine.avalanche_fitness_threshold - 0.580).abs() < f64::EPSILON);
         assert!((engine.avalanche_fitness_log_top_pct - 0.30).abs() < f64::EPSILON);
+        assert!(!engine.avalanche_fitness_streaming_prune);
+        assert!(!engine.avalanche_unique_r_cx_inputs);
         assert_eq!(engine.sqlite_soft_heap, 10 * 1024 * 1024 * 1024);
         assert_eq!(engine.sqlite_hard_heap, 10 * 1024 * 1024 * 1024);
         assert_eq!(engine.sqlite_mmap_size, 10 * 1024 * 1024 * 1024);
         assert_eq!(engine.sqlite_worker_count, 16);
         assert_eq!(engine.sqlite_db_folder, "/tmp");
         assert_eq!(engine.sqlite_avalanche_page_size, 4_096);
+        assert!(!engine.sqlite_in_memory);
     }
 
     #[test]
@@ -2298,6 +2355,34 @@ mod tests {
             .expect("load config");
 
         assert!((config.engine.avalanche_fitness_log_top_pct - 0.45).abs() < f64::EPSILON);
+
+        let _ = fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn test_load_config_accepts_streaming_prune_unique_inputs_and_in_memory_sqlite() {
+        let temp_dir = temp_path("stream_prune_unique_sqlite");
+        fs::create_dir_all(&temp_dir).expect("create temp config dir");
+        fs::write(
+            temp_dir.join("config.json"),
+            concat!(
+                "{\n",
+                "  \"engine\": {\n",
+                "    \"avalanche_fitness_streaming_prune\": true,\n",
+                "    \"avalanche_unique_r_cx_inputs\": true,\n",
+                "    \"sqlite_in_memory\": true\n",
+                "  }\n",
+                "}\n",
+            ),
+        )
+        .expect("write config");
+
+        let config = load_config(temp_dir.join("config.json").to_str().expect("utf8 path"))
+            .expect("load config");
+
+        assert!(config.engine.avalanche_fitness_streaming_prune);
+        assert!(config.engine.avalanche_unique_r_cx_inputs);
+        assert!(config.engine.sqlite_in_memory);
 
         let _ = fs::remove_dir_all(&temp_dir);
     }

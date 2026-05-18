@@ -106,6 +106,12 @@ pub struct AnalyticsCliArgs {
     pub avalanche_fitness_r_candidate_limit: usize,
     /// Secondary retention dimension used to derive the global retained-input cap after fitness preprocessing.
     pub avalanche_fitness_cx_candidate_limit: usize,
+    /// Whether batch scoring incrementally pruned the fitness-ranked Avalanche pool while candidates were processed.
+    pub avalanche_fitness_streaming_prune: bool,
+    /// Whether sampled Avalanche enforced a globally unique set of `r` and `x` inputs.
+    pub avalanche_unique_r_cx_inputs: bool,
+    /// Whether the Avalanche cache SQLite database was kept in memory instead of on disk.
+    pub sqlite_in_memory: bool,
     /// Expected bit width for decryptions.
     pub bits_decrypt: Option<u32>,
     /// Optional CLI override for speculative r-candidate target exponent.
@@ -157,6 +163,9 @@ pub(crate) struct AnalyticsCliInfo {
     avalanche_fitness_bit_width: usize,
     avalanche_fitness_r_candidate_limit: usize,
     avalanche_fitness_cx_candidate_limit: usize,
+    avalanche_fitness_streaming_prune: bool,
+    avalanche_unique_r_cx_inputs: bool,
+    sqlite_in_memory: bool,
     bits_decrypt: Option<u32>,
     r_candidate_target_exponent: Option<BigDecimal>,
     r_candidate_target_exponent_minimum: Option<BigDecimal>,
@@ -645,6 +654,9 @@ impl SessionAnalytics {
             avalanche_fitness_bit_width: args.avalanche_fitness_bit_width,
             avalanche_fitness_r_candidate_limit: args.avalanche_fitness_r_candidate_limit,
             avalanche_fitness_cx_candidate_limit: args.avalanche_fitness_cx_candidate_limit,
+            avalanche_fitness_streaming_prune: args.avalanche_fitness_streaming_prune,
+            avalanche_unique_r_cx_inputs: args.avalanche_unique_r_cx_inputs,
+            sqlite_in_memory: args.sqlite_in_memory,
             bits_decrypt: args.bits_decrypt,
             r_candidate_target_exponent: args.r_candidate_target_exponent,
             r_candidate_target_exponent_minimum: args.r_candidate_target_exponent_minimum,
