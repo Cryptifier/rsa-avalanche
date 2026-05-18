@@ -57,19 +57,22 @@ use crate::database::{
     load_cached_selected_sample_rows_by_ids, load_cached_selected_sample_rows_page,
 };
 use crate::fitness::{
-    CachedScoredInputSummary, HammingDistancePrunedPool, StreamingScoredAvalancheFitnessPool,
-    apply_cached_scored_avalanche_fitness_pass, build_candidate_message_transform,
-    build_scored_avalanche_fitness_pass, extract_payload_bits_for_accuracy,
-    enforce_global_unique_cached_scored_inputs, enforce_global_unique_scored_inputs,
+    AvalancheFitnessScore, CachedScoredInputSummary, HammingDistancePrunedPool,
+    RankedScoredAvalancheInput, StreamingScoredAvalancheFitnessPool,
+    apply_cached_scored_avalanche_fitness_pass, apply_ranked_scored_avalanche_fitness_pass,
+    build_candidate_message_transform, build_scored_avalanche_fitness_pass,
+    extract_payload_bits_for_accuracy, enforce_global_unique_cached_scored_inputs,
+    enforce_global_unique_scored_inputs,
     group_cached_scored_inputs_by_r_candidate_with_progress,
     group_scored_inputs_by_r_candidate_with_progress, load_cached_scored_input_summaries,
-    lsb_zero_count_fitness, normalize_avalanche_fitness_score, payload_message_bits,
+    lsb_zero_count_fitness, normalize_avalanche_fitness_mean_score,
+    normalize_avalanche_fitness_score, payload_message_bits,
     prune_cached_scored_inputs_by_hamming_distance_percentile_with_progress,
     prune_scored_inputs_by_hamming_distance_percentile_with_progress, resolve_avalanche_bit_width,
     resolve_avalanche_fitness_bit_width, resolve_avalanche_fitness_retained_input_limit,
-    resolve_plaintext_message_bit_width, transform_message_for_candidate_scoring,
-    validate_avalanche_fitness_log_top_pct, validate_avalanche_fitness_threshold,
-    validate_message_width_under_modulus,
+    resolve_plaintext_message_bit_width, single_message_avalanche_fitness_score,
+    transform_message_for_candidate_scoring, validate_avalanche_fitness_log_top_pct,
+    validate_avalanche_fitness_threshold, validate_message_width_under_modulus,
 };
 use crate::helpers::{
     PackedBits, format_beam_float, matching_bit_counts_bytes_le, normalize_avalanche_biases,
@@ -3371,6 +3374,115 @@ fn random_message_under_n(
     }
 }
 
+/// Builds the extra random-message ciphertexts used for candidate fitness scoring.
+///
+/// # Parameters
+/// - `ctx`: RSA context containing the modulus and public exponent.
+/// - `engine`: Engine configuration controlling message width and fitness shifting.
+/// - `count`: Number of additional random messages to generate.
+/// - `rng`: Random number generator used to sample the additional payload messages.
+///
+/// # Returns
+/// - `Result<Vec<AdditionalFitnessMessage>, Box<dyn Error>>`: Additional fitness messages in
+///   generation order.
+///
+/// # Expected Output
+/// - Returns the encrypted shifted messages used for padding-bit fitness checks; no stdout/stderr
+///   output.
+fn build_additional_fitness_messages(
+    ctx: &RSAContext,
+    engine: &EngineConfig,
+    count: usize,
+    rng: &mut RngChoice,
+) -> Result<Vec<AdditionalFitnessMessage>, Box<dyn Error>> {
+    if count == 0 {
+        return Ok(Vec::new());
+    }
+
+    let mut messages = Vec::with_capacity(count);
+    for _ in 0..count {
+        let payload_message = random_message_under_n(engine, &ctx.n, rng)?;
+        let transformed_message = transform_message_for_candidate_scoring(
+            engine,
+            &payload_message,
+            &ctx.n,
+            "analysis_batch_fitness",
+        )?;
+        messages.push(AdditionalFitnessMessage {
+            base_ciphertext: transformed_message.modpow(&ctx.e, &ctx.n),
+        });
+    }
+    Ok(messages)
+}
+
+/// Computes the padding-bit fitness score for one scored Avalanche input across multiple messages.
+///
+/// # Parameters
+/// - `ctx`: RSA context containing the source modulus and exponent.
+/// - `engine`: Engine configuration controlling HBC behavior and fitness width.
+/// - `candidate_r`: Candidate modulus associated with the scored input.
+/// - `d_new`: Candidate private exponent corresponding to the current `r/x` pairing.
+/// - `x_value`: Ciphertext exponent associated with the scored input.
+/// - `current_message_bits`: Candidate decryption bits for the batch's main message.
+/// - `additional_messages`: Extra random-message ciphertexts used for fitness scoring.
+/// - `shift`: Whether ciphertexts should be shifted by encrypted `2` before candidate conversion.
+///
+/// # Returns
+/// - `AvalancheFitnessScore`: Minimum and cumulative padding-bit fitness across all evaluated
+///   messages.
+///
+/// # Expected Output
+/// - Returns the candidate fitness metrics with no stdout/stderr output.
+fn compute_padding_fitness_score(
+    ctx: &RSAContext,
+    engine: &EngineConfig,
+    candidate_r: &BigUint,
+    d_new: &BigUint,
+    x_value: &BigUint,
+    current_message_bits: &PackedBits,
+    additional_messages: &[AdditionalFitnessMessage],
+    shift: bool,
+) -> AvalancheFitnessScore {
+    let fitness_bit_width = resolve_avalanche_fitness_bit_width(engine);
+    let avalanche_bit_width = current_message_bits.len();
+    let current_score = lsb_zero_count_fitness(current_message_bits, fitness_bit_width);
+    let mut minimum_score = current_score;
+    let mut total_score = current_score;
+
+    for additional_message in additional_messages {
+        let ciphertext = if x_value.is_one() {
+            additional_message.base_ciphertext.clone()
+        } else {
+            additional_message.base_ciphertext.modpow(x_value, &ctx.n)
+        };
+        let shifted_ciphertext = maybe_shift_ciphertext(ctx, &ciphertext, shift);
+        let candidate_ciphertext = prepare_candidate_ciphertext(
+            engine,
+            &shifted_ciphertext,
+            candidate_r,
+            &ctx.n,
+        );
+        let candidate_message = derive_candidate_message_from_result(
+            ctx,
+            engine,
+            &candidate_ciphertext,
+            candidate_r,
+            d_new,
+        );
+        let candidate_message_bits =
+            biguint_to_packed_bits_le(&candidate_message, avalanche_bit_width);
+        let score = lsb_zero_count_fitness(&candidate_message_bits, fitness_bit_width);
+        minimum_score = minimum_score.min(score);
+        total_score += score;
+    }
+
+    AvalancheFitnessScore {
+        fitness_score: minimum_score,
+        fitness_total_score: total_score,
+        fitness_message_count: additional_messages.len() + 1,
+    }
+}
+
 /// Computes the analysis bit width based on configuration and message bounds.
 ///
 /// # Parameters
@@ -3728,6 +3840,11 @@ struct AccuracyCandidate {
     target_exponent: BigDecimal,
 }
 
+#[derive(Debug, Clone)]
+struct AdditionalFitnessMessage {
+    base_ciphertext: BigUint,
+}
+
 #[derive(Clone, Debug)]
 struct BeamMaxCandidate {
     beam_match_pct: f64,
@@ -4031,7 +4148,7 @@ struct AccuracyBatchAccumulator {
     candidate_count: usize,
     cx_max: Option<BatchCxMax>,
     cx_evaluated_candidates: usize,
-    scored_samples: Vec<ScoredAvalancheInput>,
+    ranked_samples: Vec<RankedScoredAvalancheInput>,
 }
 
 impl AccuracyBatchAccumulator {
@@ -4055,7 +4172,7 @@ impl AccuracyBatchAccumulator {
         if let Some(candidate) = other.cx_max.take() {
             self.set_cx_max(candidate);
         }
-        self.scored_samples.append(&mut other.scored_samples);
+        self.ranked_samples.append(&mut other.ranked_samples);
         self
     }
 }
@@ -4859,7 +4976,7 @@ fn resolve_fitness_top_cohort_count(retained_count: usize, top_pct: f64) -> usiz
 /// - Prints one header plus one line per logged candidate showing the normalized fitness percentage and match percentage.
 fn log_top_scored_avalanche_fitness_entries(
     batch_number: usize,
-    retained_inputs: &[ScoredAvalancheInput],
+    retained_inputs: &[RankedScoredAvalancheInput],
     fitness_bit_width: usize,
     top_pct: f64,
 ) {
@@ -4880,19 +4997,26 @@ fn log_top_scored_avalanche_fitness_entries(
         format_beam_float(top_pct * 100.0, BEAM_PCT_DECIMALS)
     );
     for (rank, input) in retained_inputs.iter().take(top_count).enumerate() {
-        let fitness_score = lsb_zero_count_fitness(&input.message_bits, fitness_bit_width);
         let normalized_fitness_pct =
-            normalize_avalanche_fitness_score(fitness_score, fitness_bit_width) * 100.0;
+            normalize_avalanche_fitness_score(input.fitness.fitness_score, fitness_bit_width)
+                * 100.0;
+        let normalized_mean_fitness_pct = normalize_avalanche_fitness_mean_score(
+            input.fitness.fitness_total_score,
+            fitness_bit_width,
+            input.fitness.fitness_message_count,
+        ) * 100.0;
         println!(
-            "Avalanche fitness top cohort for batch {} [{}]: batch-index {} message-index {} x {} fitness {} ({}%) match {}%",
+            "Avalanche fitness top cohort for batch {} [{}]: batch-index {} message-index {} x {} minimum-padding-fitness {} ({}%) mean-padding-fitness {}% across {} message(s) match {}%",
             batch_number,
             rank + 1,
-            input.batch_candidate_index,
-            input.message_index,
-            input.x,
-            fitness_score,
+            input.input.batch_candidate_index,
+            input.input.message_index,
+            input.input.x,
+            input.fitness.fitness_score,
             format_beam_float(normalized_fitness_pct, BEAM_PCT_DECIMALS),
-            format_beam_float(input.score_match_pct, BEAM_PCT_DECIMALS),
+            format_beam_float(normalized_mean_fitness_pct, BEAM_PCT_DECIMALS),
+            input.fitness.fitness_message_count,
+            format_beam_float(input.input.score_match_pct, BEAM_PCT_DECIMALS),
         );
     }
 }
@@ -4934,16 +5058,24 @@ fn log_top_cached_avalanche_fitness_entries(
     );
     for (rank, input) in retained_inputs.iter().take(top_count).enumerate() {
         let normalized_fitness_pct =
-            normalize_avalanche_fitness_score(input.fitness_score, fitness_bit_width) * 100.0;
+            normalize_avalanche_fitness_score(input.fitness.fitness_score, fitness_bit_width)
+                * 100.0;
+        let normalized_mean_fitness_pct = normalize_avalanche_fitness_mean_score(
+            input.fitness.fitness_total_score,
+            fitness_bit_width,
+            input.fitness.fitness_message_count,
+        ) * 100.0;
         println!(
-            "Avalanche fitness top cohort for batch {} [{}]: batch-index {} message-index {} x {} fitness {} ({}%) match {}%",
+            "Avalanche fitness top cohort for batch {} [{}]: batch-index {} message-index {} x {} minimum-padding-fitness {} ({}%) mean-padding-fitness {}% across {} message(s) match {}%",
             batch_number,
             rank + 1,
             input.batch_candidate_index,
             input.message_index,
             input.x,
-            input.fitness_score,
+            input.fitness.fitness_score,
             format_beam_float(normalized_fitness_pct, BEAM_PCT_DECIMALS),
+            format_beam_float(normalized_mean_fitness_pct, BEAM_PCT_DECIMALS),
+            input.fitness.fitness_message_count,
             format_beam_float(input.score_match_pct, BEAM_PCT_DECIMALS),
         );
     }
@@ -5467,7 +5599,7 @@ fn run_sampled_avalanche_beam_search_cached(
             engine.avalanche_fitness_threshold,
         )?;
         println!(
-            "Avalanche fitness pass for batch {}: retained {} of {} cached scored inputs in a globally ranked pool using {} LSB fitness bits with effective retained-input cap {} (r-limit {} cx-limit {}, threshold-enabled {} threshold {})",
+            "Avalanche fitness pass for batch {}: retained {} of {} cached scored inputs in a globally ranked pool using {} LSB fitness bits with effective retained-input cap {} (r-limit {} cx-limit {}, threshold-enabled {} threshold {}, additional-random-messages {})",
             batch_number,
             preprocessed.len(),
             cached_input_total,
@@ -5483,7 +5615,8 @@ fn run_sampled_avalanche_beam_search_cached(
             } else {
                 "off"
             },
-            format_beam_float(engine.avalanche_fitness_threshold, 3)
+            format_beam_float(engine.avalanche_fitness_threshold, 3),
+            engine.avalanche_fitness_additional_random_messages
         );
         log_top_cached_avalanche_fitness_entries(
             batch_number,
@@ -5913,6 +6046,8 @@ fn run_sampled_avalanche_beam_search_cached(
 /// - `x_values`: Ciphertext exponents corresponding to `shifted_ciphertexts`.
 /// - `e_x_values`: Optional `e * x` values used when ciphertext modification is enabled.
 /// - `avalanche_message_bits`: Shifted reference bits used for match scoring.
+/// - `additional_fitness_messages`: Extra random-message ciphertexts used for padding-bit fitness checks.
+/// - `shift`: Whether ciphertexts should be shifted by encrypted `2` before candidate conversion.
 /// - `batch_cx_total`: Total number of `c^x` candidates evaluated in the batch.
 /// - `batch_cx_done`: Shared progress counter for `c^x` evaluation logs.
 /// - `batch_cx_next_pct`: Shared percentage-step threshold for `c^x` evaluation logs.
@@ -5936,6 +6071,8 @@ fn cache_batch_scored_avalanche_inputs(
     x_values: &[BigUint],
     e_x_values: &[BigUint],
     avalanche_message_bits: &[bool],
+    additional_fitness_messages: &[AdditionalFitnessMessage],
+    shift: bool,
     batch_cx_total: u64,
     batch_cx_done: &AtomicU64,
     batch_cx_next_pct: &AtomicU64,
@@ -5949,7 +6086,7 @@ fn cache_batch_scored_avalanche_inputs(
         candidate_count: usize,
         cx_max: Option<BatchCxMax>,
         cx_evaluated_candidates: usize,
-        scored_samples: Vec<ScoredAvalancheInput>,
+        ranked_samples: Vec<RankedScoredAvalancheInput>,
         estimated_bytes: usize,
     }
 
@@ -5975,7 +6112,7 @@ fn cache_batch_scored_avalanche_inputs(
             if let Some(candidate) = other.cx_max.take() {
                 self.set_cx_max(candidate);
             }
-            self.scored_samples.append(&mut other.scored_samples);
+            self.ranked_samples.append(&mut other.ranked_samples);
             self
         }
     }
@@ -6010,7 +6147,7 @@ fn cache_batch_scored_avalanche_inputs(
                     let batch_candidate_index = global_offset + local_index;
                     let mut cx_max = None;
                     let mut cx_evaluated_candidates = 0usize;
-                    let mut scored_samples = Vec::with_capacity(shifted_ciphertexts.len());
+                    let mut ranked_samples = Vec::with_capacity(shifted_ciphertexts.len());
                     let target_exponent =
                         keep_sample_details.then(|| candidate.target_exponent.normalized());
 
@@ -6054,13 +6191,14 @@ fn cache_batch_scored_avalanche_inputs(
                             });
                         }
 
+                        let message_bits = PackedBits::from_bools(&dm_bits);
                         let scored_input = ScoredAvalancheInput {
                             batch_candidate_index,
                             message_index: idx,
                             r: candidate.r.clone(),
                             x: x_value,
                             score_match_pct: match_pct,
-                            message_bits: PackedBits::from_bools(&dm_bits),
+                            message_bits: message_bits.clone(),
                             detail: target_exponent.as_ref().map(|target_exponent| {
                                 ScoredAvalancheInputDetail {
                                     target_exponent: target_exponent.clone(),
@@ -6069,9 +6207,22 @@ fn cache_batch_scored_avalanche_inputs(
                                 }
                             }),
                         };
+                        let fitness = compute_padding_fitness_score(
+                            ctx,
+                            engine,
+                            &candidate.r,
+                            d_new,
+                            &scored_input.x,
+                            &message_bits,
+                            additional_fitness_messages,
+                            shift,
+                        );
                         acc.estimated_bytes +=
                             approximate_scored_avalanche_input_bytes(&scored_input);
-                        scored_samples.push(scored_input);
+                        ranked_samples.push(RankedScoredAvalancheInput {
+                            input: scored_input,
+                            fitness,
+                        });
                         let done = batch_cx_done.fetch_add(1, Ordering::Relaxed) + 1;
                         log_parallel_progress_every_ten_percent(
                             done,
@@ -6094,7 +6245,7 @@ fn cache_batch_scored_avalanche_inputs(
                     if let Some(candidate) = cx_max {
                         acc.set_cx_max(candidate);
                     }
-                    acc.scored_samples.extend(scored_samples);
+                    acc.ranked_samples.extend(ranked_samples);
                     Ok::<_, String>(acc)
                 },
             )
@@ -6116,9 +6267,9 @@ fn cache_batch_scored_avalanche_inputs(
         }
         pending_bytes += chunk_aggregate.estimated_bytes;
         if let Some(pool) = streaming_fitness_pool.as_mut() {
-            pool.extend(std::mem::take(&mut chunk_aggregate.scored_samples));
+            pool.extend_with_scores(std::mem::take(&mut chunk_aggregate.ranked_samples));
         } else {
-            pending_rows.append(&mut chunk_aggregate.scored_samples);
+            pending_rows.append(&mut chunk_aggregate.ranked_samples);
             if pending_bytes >= next_flush_threshold {
                 insert_cached_scored_inputs(cache, batch_number, &pending_rows)?;
                 println!(
@@ -6176,10 +6327,48 @@ fn cache_batch_scored_avalanche_inputs(
 ///
 /// # Expected Output
 /// - Prints sampled-avalanche progress and returns sampled avalanche results.
+#[cfg_attr(not(test), allow(dead_code))]
 fn run_sampled_avalanche_beam_search(
     engine: &EngineConfig,
     payload_message: &BigUint,
     scored_inputs: &[ScoredAvalancheInput],
+    batch_number: usize,
+    prefer_beam_score_ordering: bool,
+    rng: &mut RngChoice,
+) -> Result<SampledAvalancheBatchResult, Box<dyn Error>> {
+    run_sampled_avalanche_beam_search_with_ranked_inputs(
+        engine,
+        payload_message,
+        scored_inputs,
+        None,
+        batch_number,
+        prefer_beam_score_ordering,
+        rng,
+    )
+}
+
+/// Runs sampled avalanche combinations over the scored batch outputs with optional pre-ranked
+/// fitness metadata.
+///
+/// # Parameters
+/// - `engine`: Engine configuration controlling combination sampling and beam scoring.
+/// - `payload_message`: Original plaintext payload used for scoring and to derive the widened reference.
+/// - `scored_inputs`: Scored candidate decryptions available for sampling.
+/// - `ranked_inputs`: Optional scored inputs plus precomputed padding-bit fitness metrics.
+/// - `batch_number`: One-based batch index used for progress logging.
+/// - `prefer_beam_score_ordering`: Whether selection should prefer beam score over known match percentage.
+/// - `rng`: Random number generator for combination sampling.
+///
+/// # Returns
+/// - `Result<SampledAvalancheBatchResult, Box<dyn Error>>`: Sample logs plus the selected best sample.
+///
+/// # Expected Output
+/// - Prints sampled-avalanche progress and returns sampled avalanche results.
+fn run_sampled_avalanche_beam_search_with_ranked_inputs(
+    engine: &EngineConfig,
+    payload_message: &BigUint,
+    scored_inputs: &[ScoredAvalancheInput],
+    ranked_inputs: Option<&[RankedScoredAvalancheInput]>,
     batch_number: usize,
     prefer_beam_score_ordering: bool,
     rng: &mut RngChoice,
@@ -6219,10 +6408,37 @@ fn run_sampled_avalanche_beam_search(
     }
 
     let fitness_bit_width = resolve_avalanche_fitness_bit_width(engine);
-    let mut scored_inputs = if let Some(pass) = build_scored_avalanche_fitness_pass(engine) {
-        let preprocessed = pass(scored_inputs.to_vec());
+    let mut scored_inputs = if engine.avalanche_fitness_scoring_pass {
+        let preprocessed_ranked_inputs = if let Some(ranked_inputs) = ranked_inputs {
+            apply_ranked_scored_avalanche_fitness_pass(
+                ranked_inputs.to_vec(),
+                fitness_bit_width,
+                engine.avalanche_fitness_r_candidate_limit,
+                engine.avalanche_fitness_cx_candidate_limit,
+                engine.avalanche_fitness_use_threshold,
+                engine.avalanche_fitness_threshold,
+            )
+        } else if let Some(pass) = build_scored_avalanche_fitness_pass(engine) {
+            let preprocessed = pass(scored_inputs.to_vec());
+            preprocessed
+                .into_iter()
+                .map(|input| RankedScoredAvalancheInput {
+                    fitness: single_message_avalanche_fitness_score(
+                        &input.message_bits,
+                        fitness_bit_width,
+                    ),
+                    input,
+                })
+                .collect::<Vec<_>>()
+        } else {
+            Vec::new()
+        };
+        let preprocessed = preprocessed_ranked_inputs
+            .iter()
+            .map(|input| input.input.clone())
+            .collect::<Vec<_>>();
         println!(
-            "Avalanche fitness pass for batch {}: retained {} of {} scored inputs in a globally ranked pool using {} LSB fitness bits with effective retained-input cap {} (r-limit {} cx-limit {}, threshold-enabled {} threshold {})",
+            "Avalanche fitness pass for batch {}: retained {} of {} scored inputs in a globally ranked pool using {} LSB fitness bits with effective retained-input cap {} (r-limit {} cx-limit {}, threshold-enabled {} threshold {}, additional-random-messages {})",
             batch_number,
             preprocessed.len(),
             scored_inputs.len(),
@@ -6238,11 +6454,12 @@ fn run_sampled_avalanche_beam_search(
             } else {
                 "off"
             },
-            format_beam_float(engine.avalanche_fitness_threshold, 3)
+            format_beam_float(engine.avalanche_fitness_threshold, 3),
+            engine.avalanche_fitness_additional_random_messages
         );
         log_top_scored_avalanche_fitness_entries(
             batch_number,
-            &preprocessed,
+            &preprocessed_ranked_inputs,
             fitness_bit_width,
             engine.avalanche_fitness_log_top_pct,
         );
@@ -6831,6 +7048,19 @@ fn run_r_candidate_accuracy_batches(
 
         let avalanche_bit_width = resolve_avalanche_bit_width(engine);
         let avalanche_message_bits = biguint_to_bits_le(&avalanche_message, avalanche_bit_width);
+        let additional_fitness_messages = build_additional_fitness_messages(
+            ctx,
+            engine,
+            engine.avalanche_fitness_additional_random_messages,
+            rng,
+        )?;
+        if !additional_fitness_messages.is_empty() {
+            println!(
+                "Accuracy batch {} fitness scoring: testing each c^x/r candidate across {} additional random message(s) for padding-bit consistency",
+                batch_number,
+                additional_fitness_messages.len()
+            );
+        }
         let batch_cx_total = u64::try_from(batch_candidates.len())
             .map_err(|_| "batch candidate count exceeds u64 range")?
             .checked_mul(
@@ -6865,6 +7095,8 @@ fn run_r_candidate_accuracy_batches(
                     &x_values,
                     &e_x_values,
                     &avalanche_message_bits,
+                    &additional_fitness_messages,
+                    shift,
                     batch_cx_total,
                     &batch_cx_done,
                     &batch_cx_next_pct,
@@ -6908,7 +7140,7 @@ fn run_r_candidate_accuracy_batches(
                             let batch_candidate_index = global_offset + local_index;
                             let mut cx_max = None;
                             let mut cx_evaluated_candidates = 0usize;
-                            let mut scored_samples = Vec::with_capacity(message_count);
+                            let mut ranked_samples = Vec::with_capacity(message_count);
                             let target_exponent =
                                 keep_sample_details.then(|| candidate.target_exponent.normalized());
 
@@ -6961,13 +7193,14 @@ fn run_r_candidate_accuracy_batches(
                                     });
                                 }
 
-                                scored_samples.push(ScoredAvalancheInput {
+                                let message_bits = PackedBits::from_bools(&dm_bits);
+                                let scored_input = ScoredAvalancheInput {
                                     batch_candidate_index,
                                     message_index: idx,
                                     r: candidate.r.clone(),
                                     x: x_value,
                                     score_match_pct: match_pct,
-                                    message_bits: PackedBits::from_bools(&dm_bits),
+                                    message_bits: message_bits.clone(),
                                     detail: target_exponent.as_ref().map(|target_exponent| {
                                         ScoredAvalancheInputDetail {
                                             target_exponent: target_exponent.clone(),
@@ -6975,6 +7208,20 @@ fn run_r_candidate_accuracy_batches(
                                             candidate_decryption: dm.clone(),
                                         }
                                     }),
+                                };
+                                let fitness = compute_padding_fitness_score(
+                                    ctx,
+                                    engine,
+                                    &candidate.r,
+                                    d_new,
+                                    &scored_input.x,
+                                    &message_bits,
+                                    &additional_fitness_messages,
+                                    shift,
+                                );
+                                ranked_samples.push(RankedScoredAvalancheInput {
+                                    input: scored_input,
+                                    fitness,
                                 });
                                 let done = batch_cx_done.fetch_add(1, Ordering::Relaxed) + 1;
                                 log_parallel_progress_every_ten_percent(
@@ -6998,7 +7245,7 @@ fn run_r_candidate_accuracy_batches(
                             if let Some(candidate) = cx_max {
                                 acc.set_cx_max(candidate);
                             }
-                            acc.scored_samples.extend(scored_samples);
+                            acc.ranked_samples.extend(ranked_samples);
                             Ok::<_, String>(acc)
                         },
                     )
@@ -7013,23 +7260,28 @@ fn run_r_candidate_accuracy_batches(
                     batch_aggregate.set_cx_max(candidate);
                 }
                 if let Some(pool) = streaming_fitness_pool.as_mut() {
-                    pool.extend(std::mem::take(&mut chunk_aggregate.scored_samples));
+                    pool.extend_with_scores(std::mem::take(&mut chunk_aggregate.ranked_samples));
                 } else {
                     batch_aggregate
-                        .scored_samples
-                        .append(&mut chunk_aggregate.scored_samples);
+                        .ranked_samples
+                        .append(&mut chunk_aggregate.ranked_samples);
                 }
             }
 
-            let batch_scored_inputs = if let Some(pool) = streaming_fitness_pool.take() {
+            let batch_ranked_inputs = if let Some(pool) = streaming_fitness_pool.take() {
                 pool.finalize(engine.avalanche_unique_r_cx_inputs)
             } else {
-                std::mem::take(&mut batch_aggregate.scored_samples)
+                std::mem::take(&mut batch_aggregate.ranked_samples)
             };
-            let sampled = run_sampled_avalanche_beam_search(
+            let batch_scored_inputs = batch_ranked_inputs
+                .iter()
+                .map(|input| input.input.clone())
+                .collect::<Vec<_>>();
+            let sampled = run_sampled_avalanche_beam_search_with_ranked_inputs(
                 engine,
                 &message,
                 &batch_scored_inputs,
+                Some(&batch_ranked_inputs),
                 batch_number,
                 prefer_beam_score_ordering,
                 rng,
@@ -8059,7 +8311,7 @@ mod tests {
             .collect::<Vec<_>>();
         let retained_keys = retained
             .iter()
-            .map(|input| (input.batch_candidate_index, input.message_index))
+            .map(|input| (input.input.batch_candidate_index, input.input.message_index))
             .collect::<Vec<_>>();
         assert_eq!(retained_keys, expected_keys);
     }
@@ -9548,7 +9800,15 @@ mod tests {
         let cache = AvalancheCacheGuard::new(Some(10_002), &config.engine)
             .expect("cache should initialize");
         cache.clear_batch(1).expect("cache clear should succeed");
-        insert_cached_scored_inputs(&cache, 1, &scored_inputs)
+        let ranked_inputs = scored_inputs
+            .iter()
+            .cloned()
+            .map(|input| RankedScoredAvalancheInput {
+                fitness: single_message_avalanche_fitness_score(&input.message_bits, 4),
+                input,
+            })
+            .collect::<Vec<_>>();
+        insert_cached_scored_inputs(&cache, 1, &ranked_inputs)
             .expect("cache insert should succeed");
 
         let mut rng = RngChoice::from_seed(RngMode::Standard, 19);
@@ -9600,7 +9860,18 @@ mod tests {
         let cache =
             AvalancheCacheGuard::new(Some(9_999), &config.engine).expect("cache should initialize");
         cache.clear_batch(1).expect("cache clear should succeed");
-        insert_cached_scored_inputs(&cache, 1, &scored_inputs)
+        let ranked_inputs = scored_inputs
+            .iter()
+            .cloned()
+            .map(|input| RankedScoredAvalancheInput {
+                fitness: single_message_avalanche_fitness_score(
+                    &input.message_bits,
+                    resolve_avalanche_fitness_bit_width(&config.engine),
+                ),
+                input,
+            })
+            .collect::<Vec<_>>();
+        insert_cached_scored_inputs(&cache, 1, &ranked_inputs)
             .expect("cache insert should succeed");
 
         let mut in_memory_rng = RngChoice::from_seed(RngMode::Standard, 77);

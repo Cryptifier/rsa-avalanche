@@ -79,6 +79,11 @@
     "avalanche_fitness_use_threshold": true,
     "avalanche_fitness_threshold": 0.580,
     "avalanche_fitness_log_top_pct": 0.30,
+    // Additional random-message fitness checks:
+    // - 0: score each c^x/r candidate only on the batch's main message.
+    // - >0: also test that many extra random messages, rank by the worst padding-bit fitness,
+    //   and use the mean padding-bit fitness as a tiebreaker for retained Avalanche inputs.
+    "avalanche_fitness_additional_random_messages": 2,
     // Streaming fitness pruning:
     // - true: keep only the current best retained r/c^x pool as fitness scores are computed.
     // - false: keep all scored inputs until the later batch-level fitness pass runs.

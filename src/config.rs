@@ -239,6 +239,9 @@ pub struct EngineConfig {
     /// Percentage of thresholded fitness-ranked candidates logged for each Avalanche batch.
     #[serde(default = "default_avalanche_fitness_log_top_pct")]
     pub avalanche_fitness_log_top_pct: f64,
+    /// Number of additional random messages used to test padding-bit fitness for each retained `c^x/r` candidate.
+    #[serde(default = "default_avalanche_fitness_additional_random_messages")]
+    pub avalanche_fitness_additional_random_messages: usize,
     /// Whether batch scoring should prune the fitness-ranked Avalanche input pool incrementally while candidates are still being processed.
     #[serde(default = "default_avalanche_fitness_streaming_prune")]
     pub avalanche_fitness_streaming_prune: bool,
@@ -452,6 +455,8 @@ impl Default for EngineConfig {
             avalanche_fitness_use_threshold: default_avalanche_fitness_use_threshold(),
             avalanche_fitness_threshold: default_avalanche_fitness_threshold(),
             avalanche_fitness_log_top_pct: default_avalanche_fitness_log_top_pct(),
+            avalanche_fitness_additional_random_messages:
+                default_avalanche_fitness_additional_random_messages(),
             avalanche_fitness_streaming_prune: default_avalanche_fitness_streaming_prune(),
             avalanche_unique_r_cx_inputs: default_avalanche_unique_r_cx_inputs(),
             same_r_batch: default_same_r_batch(),
@@ -1657,6 +1662,20 @@ fn default_avalanche_fitness_log_top_pct() -> f64 {
     0.30
 }
 
+/// Default number of additional random messages used to test padding fitness per candidate.
+///
+/// # Parameters
+/// - None.
+///
+/// # Returns
+/// - `usize`: Default number of extra random-message fitness checks.
+///
+/// # Expected Output
+/// - Returns a constant default value; no side effects.
+fn default_avalanche_fitness_additional_random_messages() -> usize {
+    0
+}
+
 /// Default flag for streaming Avalanche fitness pruning during batch scoring.
 ///
 /// # Parameters
@@ -2132,6 +2151,7 @@ mod tests {
         assert!(engine.avalanche_fitness_use_threshold);
         assert!((engine.avalanche_fitness_threshold - 0.580).abs() < f64::EPSILON);
         assert!((engine.avalanche_fitness_log_top_pct - 0.30).abs() < f64::EPSILON);
+        assert_eq!(engine.avalanche_fitness_additional_random_messages, 0);
         assert!(!engine.avalanche_fitness_streaming_prune);
         assert!(!engine.avalanche_unique_r_cx_inputs);
         assert_eq!(engine.sqlite_soft_heap, 10 * 1024 * 1024 * 1024);
@@ -2368,6 +2388,7 @@ mod tests {
             concat!(
                 "{\n",
                 "  \"engine\": {\n",
+                "    \"avalanche_fitness_additional_random_messages\": 3,\n",
                 "    \"avalanche_fitness_streaming_prune\": true,\n",
                 "    \"avalanche_unique_r_cx_inputs\": true,\n",
                 "    \"sqlite_in_memory\": true\n",
@@ -2380,6 +2401,7 @@ mod tests {
         let config = load_config(temp_dir.join("config.json").to_str().expect("utf8 path"))
             .expect("load config");
 
+        assert_eq!(config.engine.avalanche_fitness_additional_random_messages, 3);
         assert!(config.engine.avalanche_fitness_streaming_prune);
         assert!(config.engine.avalanche_unique_r_cx_inputs);
         assert!(config.engine.sqlite_in_memory);

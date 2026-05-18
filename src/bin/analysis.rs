@@ -316,6 +316,9 @@ fn main() -> Result<(), Box<dyn Error>> {
         avalanche_fitness_bit_width: config.engine.avalanche_fitness_bit_width,
         avalanche_fitness_r_candidate_limit: config.engine.avalanche_fitness_r_candidate_limit,
         avalanche_fitness_cx_candidate_limit: config.engine.avalanche_fitness_cx_candidate_limit,
+        avalanche_fitness_additional_random_messages: config
+            .engine
+            .avalanche_fitness_additional_random_messages,
         avalanche_fitness_streaming_prune: config.engine.avalanche_fitness_streaming_prune,
         avalanche_unique_r_cx_inputs: config.engine.avalanche_unique_r_cx_inputs,
         sqlite_in_memory: config.engine.sqlite_in_memory,

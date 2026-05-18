@@ -23,6 +23,7 @@ use crate::analytics::{
 use crate::avalanche::AvalancheNode;
 use crate::config::EngineConfig;
 use crate::helpers::PackedBits;
+use crate::fitness::RankedScoredAvalancheInput;
 use crate::methods::{
     ScoredAvalancheInput, ScoredAvalancheInputDetail, SelectedAvalancheSample, recursive_tier_bits,
 };
@@ -38,6 +39,9 @@ diesel::table! {
         r_text -> Text,
         x_text -> Text,
         score_match_pct -> Double,
+        fitness_score -> BigInt,
+        fitness_total_score -> BigInt,
+        fitness_message_count -> BigInt,
         message_bits -> Binary,
         message_bit_len -> Integer,
         target_exponent_text -> Nullable<Text>,
@@ -81,6 +85,9 @@ struct NewCachedAvalancheInput {
     r_text: String,
     x_text: String,
     score_match_pct: f64,
+    fitness_score: i64,
+    fitness_total_score: i64,
+    fitness_message_count: i64,
     message_bits: Vec<u8>,
     message_bit_len: i32,
     target_exponent_text: Option<String>,
@@ -97,6 +104,9 @@ pub(crate) struct CachedAvalancheInputRow {
     pub(crate) r_text: String,
     pub(crate) x_text: String,
     pub(crate) score_match_pct: f64,
+    pub(crate) fitness_score: i64,
+    pub(crate) fitness_total_score: i64,
+    pub(crate) fitness_message_count: i64,
     pub(crate) message_bits: Vec<u8>,
     pub(crate) message_bit_len: i32,
     pub(crate) target_exponent_text: Option<String>,
@@ -459,6 +469,9 @@ impl AvalancheCacheGuard {
                 r_text TEXT NOT NULL,
                 x_text TEXT NOT NULL,
                 score_match_pct DOUBLE NOT NULL,
+                fitness_score BIGINT NOT NULL DEFAULT 0,
+                fitness_total_score BIGINT NOT NULL DEFAULT 0,
+                fitness_message_count BIGINT NOT NULL DEFAULT 1,
                 message_bits BLOB NOT NULL,
                 message_bit_len INTEGER NOT NULL,
                 target_exponent_text TEXT NULL,
@@ -467,6 +480,24 @@ impl AvalancheCacheGuard {
             )",
         )
         .execute(&mut connection)?;
+        ensure_sqlite_column(
+            &mut connection,
+            "avalanche_cache_inputs",
+            "fitness_score",
+            "fitness_score BIGINT NOT NULL DEFAULT 0",
+        )?;
+        ensure_sqlite_column(
+            &mut connection,
+            "avalanche_cache_inputs",
+            "fitness_total_score",
+            "fitness_total_score BIGINT NOT NULL DEFAULT 0",
+        )?;
+        ensure_sqlite_column(
+            &mut connection,
+            "avalanche_cache_inputs",
+            "fitness_message_count",
+            "fitness_message_count BIGINT NOT NULL DEFAULT 1",
+        )?;
         sql_query(
             "CREATE INDEX IF NOT EXISTS avalanche_cache_inputs_batch_idx
                 ON avalanche_cache_inputs (batch_number, batch_candidate_index, message_index)",
@@ -638,29 +669,38 @@ pub(crate) fn approximate_scored_avalanche_input_bytes(input: &ScoredAvalancheIn
 /// - Returns an owned insert payload; no stdout/stderr output.
 fn serialize_scored_avalanche_input_for_cache(
     batch_number: usize,
-    input: &ScoredAvalancheInput,
+    input: &RankedScoredAvalancheInput,
 ) -> Result<NewCachedAvalancheInput, Box<dyn Error>> {
     Ok(NewCachedAvalancheInput {
         batch_number: i32::try_from(batch_number).map_err(|_| "batch number exceeds i32 range")?,
-        batch_candidate_index: i32::try_from(input.batch_candidate_index)
+        batch_candidate_index: i32::try_from(input.input.batch_candidate_index)
             .map_err(|_| "batch candidate index exceeds i32 range")?,
-        message_index: i32::try_from(input.message_index)
+        message_index: i32::try_from(input.input.message_index)
             .map_err(|_| "message index exceeds i32 range")?,
-        r_text: input.r.to_string(),
-        x_text: input.x.to_string(),
-        score_match_pct: input.score_match_pct,
-        message_bits: input.message_bits.bytes_le().to_vec(),
-        message_bit_len: i32::try_from(input.message_bits.len())
+        r_text: input.input.r.to_string(),
+        x_text: input.input.x.to_string(),
+        score_match_pct: input.input.score_match_pct,
+        fitness_score: i64::try_from(input.fitness.fitness_score)
+            .map_err(|_| "fitness score exceeds i64 range")?,
+        fitness_total_score: i64::try_from(input.fitness.fitness_total_score)
+            .map_err(|_| "fitness total score exceeds i64 range")?,
+        fitness_message_count: i64::try_from(input.fitness.fitness_message_count)
+            .map_err(|_| "fitness message count exceeds i64 range")?,
+        message_bits: input.input.message_bits.bytes_le().to_vec(),
+        message_bit_len: i32::try_from(input.input.message_bits.len())
             .map_err(|_| "message bit length exceeds i32 range")?,
         target_exponent_text: input
+            .input
             .detail
             .as_ref()
             .map(|detail| detail.target_exponent.normalized().to_string()),
         hbc_ciphertext_r_text: input
+            .input
             .detail
             .as_ref()
             .map(|detail| detail.hbc_ciphertext_r.to_string()),
         candidate_decryption_text: input
+            .input
             .detail
             .as_ref()
             .map(|detail| detail.candidate_decryption.to_string()),
@@ -734,7 +774,7 @@ fn deserialize_scored_avalanche_input_row(
 pub(crate) fn insert_cached_scored_inputs(
     cache: &AvalancheCacheGuard,
     batch_number: usize,
-    inputs: &[ScoredAvalancheInput],
+    inputs: &[RankedScoredAvalancheInput],
 ) -> Result<(), Box<dyn Error>> {
     if inputs.is_empty() {
         return Ok(());

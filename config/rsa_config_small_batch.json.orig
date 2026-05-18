@@ -90,6 +90,23 @@
     "sqlite_worker_count": 64,
     "sqlite_db_folder": "/tmp",
     "sqlite_avalanche_page_size": 256,
+    // SQLite cache storage mode:
+    // - false: use the on-disk SQLite database in sqlite_db_folder.
+    // - true: keep the cache in shared memory and avoid syncing it to disk.
+    "sqlite_in_memory": false,
+    // Additional random-message fitness checks:
+    // - 0: score each c^x/r candidate only on the batch's main message.
+    // - >0: also test that many extra random messages, rank by the worst padding-bit fitness,
+    //   and use the mean padding-bit fitness as a tiebreaker for retained Avalanche inputs.
+    "avalanche_fitness_additional_random_messages": 2,
+    // Streaming fitness pruning:
+    // - true: keep only the current best retained r/c^x pool as fitness scores are computed.
+    // - false: keep all scored inputs until the later batch-level fitness pass runs.
+    "avalanche_fitness_streaming_prune": true,
+    // Global Avalanche input uniqueness:
+    // - true: retain only a globally unique set with no repeated r or x candidates.
+    // - false: allow multiple scored inputs to reuse the same r or x values.
+    "avalanche_unique_r_cx_inputs": true,
     // Cap how many distinct r values can appear in one sampled avalanche input;
     // each selected r still contributes all of its sampled c^x variants.
     "avalanche_combination_mixed_r_candidates": 64,

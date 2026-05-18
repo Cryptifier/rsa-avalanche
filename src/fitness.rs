@@ -37,14 +37,22 @@ pub(crate) struct CachedScoredInputSummary {
     pub(crate) score_match_pct: f64,
     pub(crate) r: BigUint,
     pub(crate) x: BigUint,
+    pub(crate) fitness: AvalancheFitnessScore,
+}
+
+/// Stored fitness metadata used to rank retained Avalanche inputs.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct AvalancheFitnessScore {
     pub(crate) fitness_score: usize,
+    pub(crate) fitness_total_score: usize,
+    pub(crate) fitness_message_count: usize,
 }
 
 /// Ranked scored-input entry retained by the streaming fitness-pruning path.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub(crate) struct RankedScoredAvalancheInput {
     pub(crate) input: ScoredAvalancheInput,
-    pub(crate) fitness_score: usize,
+    pub(crate) fitness: AvalancheFitnessScore,
 }
 
 /// Incremental bounded pool used to prune scored Avalanche inputs while batches are processed.
@@ -222,6 +230,53 @@ pub(crate) fn normalize_avalanche_fitness_score(
     fitness_score as f64 / fitness_bit_width as f64
 }
 
+/// Converts the cumulative padding-bit fitness score into an average normalized `[0, 1]` ratio.
+///
+/// # Parameters
+/// - `fitness_total_score`: Sum of padding-bit fitness scores across all evaluated messages.
+/// - `fitness_bit_width`: Number of least-significant bits considered by the fitness pass.
+/// - `fitness_message_count`: Number of messages evaluated for the fitness score.
+///
+/// # Returns
+/// - `f64`: Average normalized padding-bit fitness across all evaluated messages.
+///
+/// # Expected Output
+/// - Returns the normalized mean fitness value; no stdout/stderr output.
+pub(crate) fn normalize_avalanche_fitness_mean_score(
+    fitness_total_score: usize,
+    fitness_bit_width: usize,
+    fitness_message_count: usize,
+) -> f64 {
+    if fitness_bit_width == 0 || fitness_message_count == 0 {
+        return 0.0;
+    }
+
+    fitness_total_score as f64 / (fitness_bit_width * fitness_message_count) as f64
+}
+
+/// Builds the default one-message padding-bit fitness score for a scored Avalanche input.
+///
+/// # Parameters
+/// - `message_bits`: Packed candidate bits for the scored input.
+/// - `fitness_bit_width`: Number of least-significant bits considered by the fitness pass.
+///
+/// # Returns
+/// - `AvalancheFitnessScore`: Single-message padding-bit fitness metrics.
+///
+/// # Expected Output
+/// - Returns the single-message score with no stdout/stderr output.
+pub(crate) fn single_message_avalanche_fitness_score(
+    message_bits: &PackedBits,
+    fitness_bit_width: usize,
+) -> AvalancheFitnessScore {
+    let fitness_score = lsb_zero_count_fitness(message_bits, fitness_bit_width);
+    AvalancheFitnessScore {
+        fitness_score,
+        fitness_total_score: fitness_score,
+        fitness_message_count: 1,
+    }
+}
+
 /// Resolves the retained-input cap for the global Avalanche fitness pool.
 ///
 /// # Parameters
@@ -291,8 +346,15 @@ fn compare_ranked_scored_avalanche_inputs(
     right: &RankedScoredAvalancheInput,
 ) -> CmpOrdering {
     right
+        .fitness
         .fitness_score
-        .cmp(&left.fitness_score)
+        .cmp(&left.fitness.fitness_score)
+        .then_with(|| {
+            right
+                .fitness
+                .fitness_total_score
+                .cmp(&left.fitness.fitness_total_score)
+        })
         .then_with(|| {
             right
                 .input
@@ -320,8 +382,15 @@ fn compare_cached_scored_input_summaries(
     right: &CachedScoredInputSummary,
 ) -> CmpOrdering {
     right
+        .fitness
         .fitness_score
-        .cmp(&left.fitness_score)
+        .cmp(&left.fitness.fitness_score)
+        .then_with(|| {
+            right
+                .fitness
+                .fitness_total_score
+                .cmp(&left.fitness.fitness_total_score)
+        })
         .then_with(|| right.score_match_pct.total_cmp(&left.score_match_pct))
         .then_with(|| left.batch_candidate_index.cmp(&right.batch_candidate_index))
         .then_with(|| left.message_index.cmp(&right.message_index))
@@ -443,16 +512,43 @@ impl StreamingScoredAvalancheFitnessPool {
     /// # Expected Output
     /// - Computes per-input fitness scores, applies threshold filtering, and periodically prunes the
     ///   retained pool in place; no stdout/stderr output.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn extend(&mut self, inputs: Vec<ScoredAvalancheInput>) {
         if inputs.is_empty() {
             return;
         }
 
-        self.total_inputs += inputs.len();
+        let ranked_inputs = inputs
+            .into_iter()
+            .map(|input| RankedScoredAvalancheInput {
+                fitness: single_message_avalanche_fitness_score(&input.message_bits, self.fitness_bit_width),
+                input,
+            })
+            .collect::<Vec<_>>();
+        self.extend_with_scores(ranked_inputs);
+    }
+
+    /// Extends the streaming fitness pool with one processed chunk of pre-scored inputs.
+    ///
+    /// # Parameters
+    /// - `ranked_inputs`: Newly scored Avalanche inputs plus their padding-bit fitness metrics.
+    ///
+    /// # Returns
+    /// - `()`: This method returns nothing.
+    ///
+    /// # Expected Output
+    /// - Applies threshold filtering to the provided metrics and periodically prunes the retained
+    ///   pool in place; no stdout/stderr output.
+    pub(crate) fn extend_with_scores(&mut self, ranked_inputs: Vec<RankedScoredAvalancheInput>) {
+        if ranked_inputs.is_empty() {
+            return;
+        }
+
+        self.total_inputs += ranked_inputs.len();
         self.total_groups
-            .extend(inputs.iter().map(|input| input.batch_candidate_index));
-        for input in inputs {
-            let fitness_score = lsb_zero_count_fitness(&input.message_bits, self.fitness_bit_width);
+            .extend(ranked_inputs.iter().map(|input| input.input.batch_candidate_index));
+        for ranked_input in ranked_inputs {
+            let fitness_score = ranked_input.fitness.fitness_score;
             if self.use_fitness_threshold
                 && normalize_avalanche_fitness_score(fitness_score, self.fitness_bit_width)
                     < self.fitness_threshold
@@ -461,11 +557,8 @@ impl StreamingScoredAvalancheFitnessPool {
             }
             self.threshold_retained_input_count += 1;
             self.threshold_retained_groups
-                .insert(input.batch_candidate_index);
-            self.ranked_inputs.push(RankedScoredAvalancheInput {
-                input,
-                fitness_score,
-            });
+                .insert(ranked_input.input.batch_candidate_index);
+            self.ranked_inputs.push(ranked_input);
         }
 
         if self.retained_input_limit > 0
@@ -493,7 +586,7 @@ impl StreamingScoredAvalancheFitnessPool {
     pub(crate) fn finalize(
         mut self,
         enforce_global_uniqueness: bool,
-    ) -> Vec<ScoredAvalancheInput> {
+    ) -> Vec<RankedScoredAvalancheInput> {
         retain_best_ranked_inputs(
             &mut self.ranked_inputs,
             self.retained_input_limit,
@@ -542,19 +635,28 @@ impl StreamingScoredAvalancheFitnessPool {
         }
         if let Some(best_input) = self.ranked_inputs.first() {
             let best_fitness_pct =
-                normalize_avalanche_fitness_score(best_input.fitness_score, self.fitness_bit_width)
-                    * 100.0;
+                normalize_avalanche_fitness_score(
+                    best_input.fitness.fitness_score,
+                    self.fitness_bit_width,
+                ) * 100.0;
+            let best_mean_fitness_pct = normalize_avalanche_fitness_mean_score(
+                best_input.fitness.fitness_total_score,
+                self.fitness_bit_width,
+                best_input.fitness.fitness_message_count,
+            ) * 100.0;
             println!(
-                "Avalanche fitness maxima: best candidate batch-index {} message-index {} x {} fitness {} ({}%) match {}%",
+                "Avalanche fitness maxima: best candidate batch-index {} message-index {} x {} minimum-padding-fitness {} ({}%) mean-padding-fitness {}% across {} message(s) match {}%",
                 best_input.input.batch_candidate_index,
                 best_input.input.message_index,
                 best_input.input.x,
-                best_input.fitness_score,
+                best_input.fitness.fitness_score,
                 format_beam_float(best_fitness_pct, BEAM_PCT_DECIMALS),
+                format_beam_float(best_mean_fitness_pct, BEAM_PCT_DECIMALS),
+                best_input.fitness.fitness_message_count,
                 format_beam_float(best_input.input.score_match_pct, BEAM_PCT_DECIMALS),
             );
         }
-        self.ranked_inputs.into_iter().map(|input| input.input).collect()
+        self.ranked_inputs
     }
 }
 
@@ -741,16 +843,57 @@ pub(crate) fn apply_scored_avalanche_fitness_pass(
         return inputs;
     }
 
-    #[derive(Debug)]
-    struct RankedInput {
-        input: ScoredAvalancheInput,
-        fitness_score: usize,
+    let ranked_inputs = inputs
+        .into_iter()
+        .map(|input| RankedScoredAvalancheInput {
+            fitness: single_message_avalanche_fitness_score(&input.message_bits, fitness_bit_width),
+            input,
+        })
+        .collect::<Vec<_>>();
+    apply_ranked_scored_avalanche_fitness_pass(
+        ranked_inputs,
+        fitness_bit_width,
+        r_candidate_limit,
+        cx_candidate_limit,
+        use_fitness_threshold,
+        fitness_threshold,
+    )
+    .into_iter()
+    .map(|input| input.input)
+    .collect()
+}
+
+/// Applies the scored-input fitness pass to pre-ranked Avalanche inputs.
+///
+/// # Parameters
+/// - `ranked_inputs`: Flattened scored inputs plus precomputed padding-bit fitness scores.
+/// - `fitness_bit_width`: Number of least-significant bits used for the normalized threshold.
+/// - `r_candidate_limit`: Primary retention dimension used to derive the global retained-input cap.
+/// - `cx_candidate_limit`: Secondary retention dimension used to derive the global retained-input cap.
+/// - `use_fitness_threshold`: Whether candidates below the normalized threshold should be dropped.
+/// - `fitness_threshold`: Minimum normalized padding-bit fitness required when thresholding is enabled.
+///
+/// # Returns
+/// - `Vec<RankedScoredAvalancheInput>`: Fitness-ranked and truncated scored inputs plus their scores.
+///
+/// # Expected Output
+/// - Returns the filtered pool in descending fitness order; no stdout/stderr output.
+pub(crate) fn apply_ranked_scored_avalanche_fitness_pass(
+    ranked_inputs: Vec<RankedScoredAvalancheInput>,
+    fitness_bit_width: usize,
+    r_candidate_limit: usize,
+    cx_candidate_limit: usize,
+    use_fitness_threshold: bool,
+    fitness_threshold: f64,
+) -> Vec<RankedScoredAvalancheInput> {
+    if ranked_inputs.is_empty() {
+        return ranked_inputs;
     }
 
-    let total_inputs = inputs.len();
-    let total_groups = inputs
+    let total_inputs = ranked_inputs.len();
+    let total_groups = ranked_inputs
         .iter()
-        .map(|input| input.batch_candidate_index)
+        .map(|input| input.input.batch_candidate_index)
         .collect::<HashSet<_>>()
         .len();
     let retained_input_limit =
@@ -760,15 +903,14 @@ pub(crate) fn apply_scored_avalanche_fitness_pass(
         total_inputs, total_groups
     );
 
-    let mut ranked_inputs = inputs
+    let mut ranked_inputs = ranked_inputs
         .into_par_iter()
-        .map(|input| RankedInput {
-            fitness_score: lsb_zero_count_fitness(&input.message_bits, fitness_bit_width),
-            input,
-        })
         .filter(|input| {
             !use_fitness_threshold
-                || normalize_avalanche_fitness_score(input.fitness_score, fitness_bit_width)
+                || normalize_avalanche_fitness_score(
+                    input.fitness.fitness_score,
+                    fitness_bit_width,
+                )
                     >= fitness_threshold
         })
         .collect::<Vec<_>>();
@@ -788,24 +930,11 @@ pub(crate) fn apply_scored_avalanche_fitness_pass(
             format_beam_float(fitness_threshold, 3)
         );
     }
-    retain_best_ranked_inputs(&mut ranked_inputs, retained_input_limit, |left, right| {
-        right
-            .fitness_score
-            .cmp(&left.fitness_score)
-            .then_with(|| {
-                right
-                    .input
-                    .score_match_pct
-                    .total_cmp(&left.input.score_match_pct)
-            })
-            .then_with(|| {
-                left.input
-                    .batch_candidate_index
-                    .cmp(&right.input.batch_candidate_index)
-            })
-            .then_with(|| left.input.message_index.cmp(&right.input.message_index))
-            .then_with(|| left.input.x.cmp(&right.input.x))
-    });
+    retain_best_ranked_inputs(
+        &mut ranked_inputs,
+        retained_input_limit,
+        compare_ranked_scored_avalanche_inputs,
+    );
     let retained_group_count = ranked_inputs
         .iter()
         .map(|input| input.input.batch_candidate_index)
@@ -818,18 +947,28 @@ pub(crate) fn apply_scored_avalanche_fitness_pass(
     );
     if let Some(best_input) = ranked_inputs.first() {
         let best_fitness_pct =
-            normalize_avalanche_fitness_score(best_input.fitness_score, fitness_bit_width) * 100.0;
+            normalize_avalanche_fitness_score(
+                best_input.fitness.fitness_score,
+                fitness_bit_width,
+            ) * 100.0;
+        let best_mean_fitness_pct = normalize_avalanche_fitness_mean_score(
+            best_input.fitness.fitness_total_score,
+            fitness_bit_width,
+            best_input.fitness.fitness_message_count,
+        ) * 100.0;
         println!(
-            "Avalanche fitness maxima: best candidate batch-index {} message-index {} x {} fitness {} ({}%) match {}%",
+            "Avalanche fitness maxima: best candidate batch-index {} message-index {} x {} minimum-padding-fitness {} ({}%) mean-padding-fitness {}% across {} message(s) match {}%",
             best_input.input.batch_candidate_index,
             best_input.input.message_index,
             best_input.input.x,
-            best_input.fitness_score,
+            best_input.fitness.fitness_score,
             format_beam_float(best_fitness_pct, BEAM_PCT_DECIMALS),
+            format_beam_float(best_mean_fitness_pct, BEAM_PCT_DECIMALS),
+            best_input.fitness.fitness_message_count,
             format_beam_float(best_input.input.score_match_pct, BEAM_PCT_DECIMALS),
         );
     }
-    ranked_inputs.into_iter().map(|input| input.input).collect()
+    ranked_inputs
 }
 
 #[derive(Clone, Debug)]
@@ -1215,7 +1354,7 @@ pub(crate) fn load_cached_scored_input_summaries(
                             .x_text
                             .parse::<BigUint>()
                             .map_err(|err| err.to_string())?,
-                        fitness_score: 0,
+                        fitness: AvalancheFitnessScore::default(),
                     })
                 })
                 .collect::<Result<Vec<_>, _>>()?;
@@ -1281,8 +1420,6 @@ pub(crate) fn apply_cached_scored_avalanche_fitness_pass(
             let items = rows
                 .into_iter()
                 .map(|row| {
-                    let message_bit_len = usize::try_from(row.message_bit_len)
-                        .map_err(|_| "cached message bit length exceeds usize range".to_string())?;
                     let batch_candidate_index = usize::try_from(row.batch_candidate_index)
                         .map_err(|_| {
                             "cached batch candidate index exceeds usize range".to_string()
@@ -1301,10 +1438,14 @@ pub(crate) fn apply_cached_scored_avalanche_fitness_pass(
                             .x_text
                             .parse::<BigUint>()
                             .map_err(|err| err.to_string())?,
-                        fitness_score: lsb_zero_count_fitness(
-                            &PackedBits::from_bytes_le(&row.message_bits, message_bit_len),
-                            fitness_bit_width,
-                        ),
+                        fitness: AvalancheFitnessScore {
+                            fitness_score: usize::try_from(row.fitness_score)
+                                .map_err(|_| "cached fitness score exceeds usize range".to_string())?,
+                            fitness_total_score: usize::try_from(row.fitness_total_score)
+                                .map_err(|_| "cached fitness total score exceeds usize range".to_string())?,
+                            fitness_message_count: usize::try_from(row.fitness_message_count)
+                                .map_err(|_| "cached fitness message count exceeds usize range".to_string())?,
+                        },
                     })
                 })
                 .collect::<Result<Vec<_>, _>>()?;
@@ -1332,7 +1473,7 @@ pub(crate) fn apply_cached_scored_avalanche_fitness_pass(
     let mut ranked_inputs = scored_inputs;
     if use_fitness_threshold {
         ranked_inputs.retain(|input| {
-            normalize_avalanche_fitness_score(input.fitness_score, fitness_bit_width)
+            normalize_avalanche_fitness_score(input.fitness.fitness_score, fitness_bit_width)
                 >= fitness_threshold
         });
     }
@@ -1369,14 +1510,24 @@ pub(crate) fn apply_cached_scored_avalanche_fitness_pass(
     );
     if let Some(best_input) = ranked_inputs.first() {
         let best_fitness_pct =
-            normalize_avalanche_fitness_score(best_input.fitness_score, fitness_bit_width) * 100.0;
+            normalize_avalanche_fitness_score(
+                best_input.fitness.fitness_score,
+                fitness_bit_width,
+            ) * 100.0;
+        let best_mean_fitness_pct = normalize_avalanche_fitness_mean_score(
+            best_input.fitness.fitness_total_score,
+            fitness_bit_width,
+            best_input.fitness.fitness_message_count,
+        ) * 100.0;
         println!(
-            "Avalanche fitness maxima: best cached candidate batch-index {} message-index {} x {} fitness {} ({}%) match {}%",
+            "Avalanche fitness maxima: best cached candidate batch-index {} message-index {} x {} minimum-padding-fitness {} ({}%) mean-padding-fitness {}% across {} message(s) match {}%",
             best_input.batch_candidate_index,
             best_input.message_index,
             best_input.x,
-            best_input.fitness_score,
+            best_input.fitness.fitness_score,
             format_beam_float(best_fitness_pct, BEAM_PCT_DECIMALS),
+            format_beam_float(best_mean_fitness_pct, BEAM_PCT_DECIMALS),
+            best_input.fitness.fitness_message_count,
             format_beam_float(best_input.score_match_pct, BEAM_PCT_DECIMALS),
         );
     }
@@ -1400,7 +1551,7 @@ pub(crate) fn enforce_global_unique_scored_inputs(
     let ranked_inputs = inputs
         .into_iter()
         .map(|input| RankedScoredAvalancheInput {
-            fitness_score: 0,
+            fitness: AvalancheFitnessScore::default(),
             input,
         })
         .collect::<Vec<_>>();

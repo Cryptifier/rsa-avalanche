@@ -106,6 +106,8 @@ pub struct AnalyticsCliArgs {
     pub avalanche_fitness_r_candidate_limit: usize,
     /// Secondary retention dimension used to derive the global retained-input cap after fitness preprocessing.
     pub avalanche_fitness_cx_candidate_limit: usize,
+    /// Number of additional random messages used to test padding fitness for each retained `c^x/r` input.
+    pub avalanche_fitness_additional_random_messages: usize,
     /// Whether batch scoring incrementally pruned the fitness-ranked Avalanche pool while candidates were processed.
     pub avalanche_fitness_streaming_prune: bool,
     /// Whether sampled Avalanche enforced a globally unique set of `r` and `x` inputs.
@@ -163,6 +165,7 @@ pub(crate) struct AnalyticsCliInfo {
     avalanche_fitness_bit_width: usize,
     avalanche_fitness_r_candidate_limit: usize,
     avalanche_fitness_cx_candidate_limit: usize,
+    avalanche_fitness_additional_random_messages: usize,
     avalanche_fitness_streaming_prune: bool,
     avalanche_unique_r_cx_inputs: bool,
     sqlite_in_memory: bool,
@@ -654,6 +657,8 @@ impl SessionAnalytics {
             avalanche_fitness_bit_width: args.avalanche_fitness_bit_width,
             avalanche_fitness_r_candidate_limit: args.avalanche_fitness_r_candidate_limit,
             avalanche_fitness_cx_candidate_limit: args.avalanche_fitness_cx_candidate_limit,
+            avalanche_fitness_additional_random_messages: args
+                .avalanche_fitness_additional_random_messages,
             avalanche_fitness_streaming_prune: args.avalanche_fitness_streaming_prune,
             avalanche_unique_r_cx_inputs: args.avalanche_unique_r_cx_inputs,
             sqlite_in_memory: args.sqlite_in_memory,
