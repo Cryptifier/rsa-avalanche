@@ -656,10 +656,11 @@ impl StreamingScoredAvalancheFitnessPool {
                 best_input.fitness.fitness_message_count,
             ) * 100.0;
             println!(
-                "Avalanche fitness maxima: best candidate batch-index {} message-index {} x {} minimum-padding-fitness {} ({}%) mean-padding-fitness {}% across {} message(s) match {}%",
+                "Avalanche fitness maxima: best candidate batch-index {} message-index {} x {} inverted {} minimum-padding-fitness {} ({}%) mean-padding-fitness {}% across {} message(s) match {}%",
                 best_input.input.batch_candidate_index,
                 best_input.input.message_index,
                 best_input.input.x,
+                best_input.input.contents_have_been_inverted,
                 best_input.fitness.fitness_score,
                 format_beam_float(best_fitness_pct, BEAM_PCT_DECIMALS),
                 format_beam_float(best_mean_fitness_pct, BEAM_PCT_DECIMALS),
@@ -963,10 +964,11 @@ pub(crate) fn apply_ranked_scored_avalanche_fitness_pass(
             best_input.fitness.fitness_message_count,
         ) * 100.0;
         println!(
-            "Avalanche fitness maxima: best candidate batch-index {} message-index {} x {} minimum-padding-fitness {} ({}%) mean-padding-fitness {}% across {} message(s) match {}%",
+            "Avalanche fitness maxima: best candidate batch-index {} message-index {} x {} inverted {} minimum-padding-fitness {} ({}%) mean-padding-fitness {}% across {} message(s) match {}%",
             best_input.input.batch_candidate_index,
             best_input.input.message_index,
             best_input.input.x,
+            best_input.input.contents_have_been_inverted,
             best_input.fitness.fitness_score,
             format_beam_float(best_fitness_pct, BEAM_PCT_DECIMALS),
             format_beam_float(best_mean_fitness_pct, BEAM_PCT_DECIMALS),
@@ -1530,10 +1532,11 @@ pub(crate) fn apply_cached_scored_avalanche_fitness_pass(
             best_input.fitness.fitness_message_count,
         ) * 100.0;
         println!(
-            "Avalanche fitness maxima: best cached candidate batch-index {} message-index {} x {} minimum-padding-fitness {} ({}%) mean-padding-fitness {}% across {} message(s) match {}%",
+            "Avalanche fitness maxima: best cached candidate batch-index {} message-index {} x {} inverted {} minimum-padding-fitness {} ({}%) mean-padding-fitness {}% across {} message(s) match {}%",
             best_input.batch_candidate_index,
             best_input.message_index,
             best_input.x,
+            best_input.contents_have_been_inverted,
             best_input.fitness.fitness_score,
             format_beam_float(best_fitness_pct, BEAM_PCT_DECIMALS),
             format_beam_float(best_mean_fitness_pct, BEAM_PCT_DECIMALS),

@@ -5202,12 +5202,13 @@ fn log_top_scored_avalanche_fitness_entries(
             input.fitness.fitness_message_count,
         ) * 100.0;
         println!(
-            "Avalanche fitness top cohort for batch {} [{}]: batch-index {} message-index {} x {} minimum-padding-fitness {} ({}%) mean-padding-fitness {}% across {} message(s) match {}%",
+            "Avalanche fitness top cohort for batch {} [{}]: batch-index {} message-index {} x {} inverted {} minimum-padding-fitness {} ({}%) mean-padding-fitness {}% across {} message(s) match {}%",
             batch_number,
             rank + 1,
             input.input.batch_candidate_index,
             input.input.message_index,
             input.input.x,
+            input.input.contents_have_been_inverted,
             input.fitness.fitness_score,
             format_beam_float(normalized_fitness_pct, BEAM_PCT_DECIMALS),
             format_beam_float(normalized_mean_fitness_pct, BEAM_PCT_DECIMALS),
@@ -5262,12 +5263,13 @@ fn log_top_cached_avalanche_fitness_entries(
             input.fitness.fitness_message_count,
         ) * 100.0;
         println!(
-            "Avalanche fitness top cohort for batch {} [{}]: batch-index {} message-index {} x {} minimum-padding-fitness {} ({}%) mean-padding-fitness {}% across {} message(s) match {}%",
+            "Avalanche fitness top cohort for batch {} [{}]: batch-index {} message-index {} x {} inverted {} minimum-padding-fitness {} ({}%) mean-padding-fitness {}% across {} message(s) match {}%",
             batch_number,
             rank + 1,
             input.batch_candidate_index,
             input.message_index,
             input.x,
+            input.contents_have_been_inverted,
             input.fitness.fitness_score,
             format_beam_float(normalized_fitness_pct, BEAM_PCT_DECIMALS),
             format_beam_float(normalized_mean_fitness_pct, BEAM_PCT_DECIMALS),
