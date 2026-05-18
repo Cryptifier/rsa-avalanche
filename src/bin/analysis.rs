@@ -321,6 +321,9 @@ fn main() -> Result<(), Box<dyn Error>> {
             .avalanche_fitness_additional_random_messages,
         avalanche_fitness_streaming_prune: config.engine.avalanche_fitness_streaming_prune,
         avalanche_unique_r_cx_inputs: config.engine.avalanche_unique_r_cx_inputs,
+        avalanche_include_max_fitness_candidates_in_order: config
+            .engine
+            .avalanche_include_max_fitness_candidates_in_order,
         sqlite_in_memory: config.engine.sqlite_in_memory,
         bits_decrypt: args.bits_decrypt,
         r_candidate_target_exponent: args

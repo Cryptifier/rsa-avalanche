@@ -248,6 +248,10 @@ pub struct EngineConfig {
     /// Whether sampled Avalanche should keep a globally unique set with no repeated `r` or `x` values.
     #[serde(default = "default_avalanche_unique_r_cx_inputs")]
     pub avalanche_unique_r_cx_inputs: bool,
+    /// Whether sampled Avalanche should always include one deterministic input built from the
+    /// highest-ranked retained candidates in order before randomized sampling.
+    #[serde(default = "default_avalanche_include_max_fitness_candidates_in_order")]
+    pub avalanche_include_max_fitness_candidates_in_order: bool,
     #[serde(default = "default_same_r_batch")]
     pub same_r_batch: bool,
     #[serde(default = "default_ciphertext_modify")]
@@ -459,6 +463,8 @@ impl Default for EngineConfig {
                 default_avalanche_fitness_additional_random_messages(),
             avalanche_fitness_streaming_prune: default_avalanche_fitness_streaming_prune(),
             avalanche_unique_r_cx_inputs: default_avalanche_unique_r_cx_inputs(),
+            avalanche_include_max_fitness_candidates_in_order:
+                default_avalanche_include_max_fitness_candidates_in_order(),
             same_r_batch: default_same_r_batch(),
             ciphertext_modify: default_ciphertext_modify(),
             oracle_accuracy_threshold: default_oracle_accuracy_threshold(),
@@ -1704,6 +1710,20 @@ fn default_avalanche_unique_r_cx_inputs() -> bool {
     false
 }
 
+/// Default flag for seeding sampled Avalanche with the top retained candidates in rank order.
+///
+/// # Parameters
+/// - None.
+///
+/// # Returns
+/// - `bool`: Default ordered-seed enable state.
+///
+/// # Expected Output
+/// - Returns a constant default value; no side effects.
+fn default_avalanche_include_max_fitness_candidates_in_order() -> bool {
+    true
+}
+
 /// Default flag for using the same r candidate across a batch.
 ///
 /// # Parameters
@@ -2154,6 +2174,7 @@ mod tests {
         assert_eq!(engine.avalanche_fitness_additional_random_messages, 0);
         assert!(!engine.avalanche_fitness_streaming_prune);
         assert!(!engine.avalanche_unique_r_cx_inputs);
+        assert!(engine.avalanche_include_max_fitness_candidates_in_order);
         assert_eq!(engine.sqlite_soft_heap, 10 * 1024 * 1024 * 1024);
         assert_eq!(engine.sqlite_hard_heap, 10 * 1024 * 1024 * 1024);
         assert_eq!(engine.sqlite_mmap_size, 10 * 1024 * 1024 * 1024);
@@ -2391,6 +2412,7 @@ mod tests {
                 "    \"avalanche_fitness_additional_random_messages\": 3,\n",
                 "    \"avalanche_fitness_streaming_prune\": true,\n",
                 "    \"avalanche_unique_r_cx_inputs\": true,\n",
+                "    \"avalanche_include_max_fitness_candidates_in_order\": false,\n",
                 "    \"sqlite_in_memory\": true\n",
                 "  }\n",
                 "}\n",
@@ -2404,6 +2426,7 @@ mod tests {
         assert_eq!(config.engine.avalanche_fitness_additional_random_messages, 3);
         assert!(config.engine.avalanche_fitness_streaming_prune);
         assert!(config.engine.avalanche_unique_r_cx_inputs);
+        assert!(!config.engine.avalanche_include_max_fitness_candidates_in_order);
         assert!(config.engine.sqlite_in_memory);
 
         let _ = fs::remove_dir_all(&temp_dir);

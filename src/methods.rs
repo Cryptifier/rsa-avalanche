@@ -4268,6 +4268,100 @@ fn select_random_scored_inputs(
         .collect()
 }
 
+/// Builds a deterministic sample plan from the leading retained items in their current order.
+///
+/// # Parameters
+/// - `items`: Retained items already ordered from best to worst for Avalanche input seeding.
+/// - `sample_size`: Maximum number of items to include in the ordered plan.
+///
+/// # Returns
+/// - `Vec<T>`: Ordered plan containing the leading retained items.
+///
+/// # Expected Output
+/// - Returns up to `sample_size` leading items with no stdout/stderr output.
+fn build_in_order_flat_sample_plan<T: Clone>(items: &[T], sample_size: usize) -> Vec<T> {
+    items.iter().take(sample_size).cloned().collect()
+}
+
+/// Builds a deterministic sample plan from the leading retained items while respecting a group cap.
+///
+/// # Parameters
+/// - `items`: Retained items already ordered from best to worst for Avalanche input seeding.
+/// - `sample_size`: Maximum number of items to include in the ordered plan.
+/// - `distinct_group_limit`: Maximum number of distinct groups allowed in the ordered plan.
+/// - `group_key`: Closure returning the group identifier for one retained item.
+///
+/// # Returns
+/// - `Vec<T>`: Ordered plan containing the highest-ranked items that satisfy the group cap.
+///
+/// # Expected Output
+/// - Returns up to `sample_size` items in their original order with no stdout/stderr output.
+fn build_in_order_group_limited_sample_plan<T: Clone, G, F>(
+    items: &[T],
+    sample_size: usize,
+    distinct_group_limit: usize,
+    mut group_key: F,
+) -> Vec<T>
+where
+    G: Eq + std::hash::Hash,
+    F: FnMut(&T) -> G,
+{
+    if sample_size == 0 || distinct_group_limit == 0 || items.is_empty() {
+        return Vec::new();
+    }
+
+    let mut selected = Vec::with_capacity(sample_size.min(items.len()));
+    let mut seen_groups = HashSet::new();
+    for item in items {
+        if selected.len() >= sample_size {
+            break;
+        }
+
+        let key = group_key(item);
+        if seen_groups.contains(&key) || seen_groups.len() < distinct_group_limit {
+            seen_groups.insert(key);
+            selected.push(item.clone());
+        }
+    }
+
+    selected
+}
+
+/// Builds a sorted signature for a scored-input sample plan.
+///
+/// # Parameters
+/// - `plan`: One sampled Avalanche input plan from the in-memory scored pool.
+///
+/// # Returns
+/// - `Vec<(usize, usize)>`: Sorted signature identifying the sampled scored inputs.
+///
+/// # Expected Output
+/// - Returns a deterministic sorted signature with no stdout/stderr output.
+fn scored_input_plan_signature(plan: &[ScoredAvalancheInput]) -> Vec<(usize, usize)> {
+    let mut signature = plan
+        .iter()
+        .map(|input| (input.batch_candidate_index, input.message_index))
+        .collect::<Vec<_>>();
+    signature.sort_unstable();
+    signature
+}
+
+/// Builds a sorted signature for a cached row-id sample plan.
+///
+/// # Parameters
+/// - `plan`: One sampled Avalanche input plan represented by cached row ids.
+///
+/// # Returns
+/// - `Vec<i64>`: Sorted signature identifying the sampled cached rows.
+///
+/// # Expected Output
+/// - Returns a deterministic sorted signature with no stdout/stderr output.
+fn cached_input_id_plan_signature(plan: &[i64]) -> Vec<i64> {
+    let mut signature = plan.to_vec();
+    signature.sort_unstable();
+    signature
+}
+
 /// Builds distinct sample plans from a flat item list.
 ///
 /// # Parameters
@@ -5727,34 +5821,98 @@ fn run_sampled_avalanche_beam_search_cached(
     } else {
         "mixed-r-combinations"
     };
+    let mut ordered_sample_input_count = 0usize;
     let sample_plans = if engine.avalanche_random_chacha20_inputs {
         let pruned_input_ids = pruned_scored_inputs
             .iter()
             .map(|summary| summary.id)
             .collect::<Vec<_>>();
-        build_unique_flat_sample_plans(
+        let mut sample_plans = Vec::new();
+        let ordered_signature =
+            if engine.avalanche_include_max_fitness_candidates_in_order {
+                let ordered_plan =
+                    build_in_order_flat_sample_plan(&pruned_input_ids, engine.avalanche_combination_size);
+                ordered_sample_input_count = ordered_plan.len();
+                if ordered_plan.is_empty() {
+                    None
+                } else {
+                    let signature = cached_input_id_plan_signature(&ordered_plan);
+                    sample_plans.push(ordered_plan);
+                    Some(signature)
+                }
+            } else {
+                None
+            };
+        let mut random_plans = build_unique_flat_sample_plans(
             &pruned_input_ids,
             engine.avalanche_combination_size,
             sample_count,
             rng,
-        )
+        );
+        if let Some(signature) = ordered_signature.as_ref() {
+            random_plans.retain(|plan| cached_input_id_plan_signature(plan) != *signature);
+        }
+        sample_plans.extend(
+            random_plans
+                .into_iter()
+                .take(sample_count.saturating_sub(sample_plans.len())),
+        );
+        sample_plans
     } else {
+        let mut sample_plans = Vec::new();
+        let ordered_signature =
+            if engine.avalanche_include_max_fitness_candidates_in_order {
+                let ordered_plan = build_in_order_group_limited_sample_plan(
+                    &pruned_scored_inputs,
+                    engine.avalanche_combination_size,
+                    mixed_r_candidate_count,
+                    |summary: &CachedScoredInputSummary| summary.batch_candidate_index,
+                )
+                .into_iter()
+                .map(|summary| summary.id)
+                .collect::<Vec<_>>();
+                ordered_sample_input_count = ordered_plan.len();
+                if ordered_plan.is_empty() {
+                    None
+                } else {
+                    let signature = cached_input_id_plan_signature(&ordered_plan);
+                    sample_plans.push(ordered_plan);
+                    Some(signature)
+                }
+            } else {
+                None
+            };
         let grouped_input_ids = grouped_inputs
             .iter()
             .map(|group| group.input_ids.clone())
             .collect::<Vec<_>>();
-        build_unique_grouped_sample_plans(
+        let mut random_plans = build_unique_grouped_sample_plans(
             &grouped_input_ids,
             mixed_r_candidate_count,
             engine.avalanche_combination_size,
             sample_count,
             rng,
-        )
+        );
+        if let Some(signature) = ordered_signature.as_ref() {
+            random_plans.retain(|plan| cached_input_id_plan_signature(plan) != *signature);
+        }
+        sample_plans.extend(
+            random_plans
+                .into_iter()
+                .take(sample_count.saturating_sub(sample_plans.len())),
+        );
+        sample_plans
     };
     let effective_sample_count = sample_plans.len();
+    if ordered_sample_input_count > 0 {
+        println!(
+            "Avalanche ordered fitness seed for batch {}: included {} retained cached input(s) in rank order before randomized sampling",
+            batch_number, ordered_sample_input_count
+        );
+    }
 
     println!(
-        "Avalanche combination setup for batch {}: scored inputs {} r-candidate-pool {} selection-mode {} configured-mixed-r-candidates {} effective-mixed-r-candidates {} configured-samples {} effective-samples {} recursion-depth {} recursive-group-sizes {:?} recursive-resample-counts {:?} majority-vote {} sample-smoothing {} majority-print {} recursive-input {} statistics-collection {} keep-all-samples {} hamming-prune {} kept-percentile {} outlier-preference-pct {}",
+        "Avalanche combination setup for batch {}: scored inputs {} r-candidate-pool {} selection-mode {} configured-mixed-r-candidates {} effective-mixed-r-candidates {} configured-samples {} effective-samples {} recursion-depth {} recursive-group-sizes {:?} recursive-resample-counts {:?} majority-vote {} sample-smoothing {} majority-print {} recursive-input {} statistics-collection {} keep-all-samples {} hamming-prune {} kept-percentile {} outlier-preference-pct {} ordered-max-fitness-inputs {}",
         batch_number,
         pool_size,
         r_candidate_pool_size,
@@ -5794,7 +5952,12 @@ fn run_sampled_avalanche_beam_search_cached(
             "off"
         },
         engine.avalanche_combination_hamming_distance_keep_percentile,
-        engine.avalanche_combination_hamming_distance_outlier_preference_pct
+        engine.avalanche_combination_hamming_distance_outlier_preference_pct,
+        if engine.avalanche_include_max_fitness_candidates_in_order {
+            "on"
+        } else {
+            "off"
+        }
     );
     if engine.avalanche_combination_hamming_distance_prune && pool_size < scored_inputs.len() {
         println!(
@@ -6560,30 +6723,93 @@ fn run_sampled_avalanche_beam_search_with_ranked_inputs(
     } else {
         "mixed-r-combinations"
     };
+    let mut ordered_sample_input_count = 0usize;
     let sample_plans = if engine.avalanche_random_chacha20_inputs {
-        build_unique_flat_sample_plans(
+        let mut sample_plans = Vec::new();
+        let ordered_signature =
+            if engine.avalanche_include_max_fitness_candidates_in_order {
+                let ordered_plan = build_in_order_flat_sample_plan(
+                    &pruned_scored_inputs,
+                    engine.avalanche_combination_size,
+                );
+                ordered_sample_input_count = ordered_plan.len();
+                if ordered_plan.is_empty() {
+                    None
+                } else {
+                    let signature = scored_input_plan_signature(&ordered_plan);
+                    sample_plans.push(ordered_plan);
+                    Some(signature)
+                }
+            } else {
+                None
+            };
+        let mut random_plans = build_unique_flat_sample_plans(
             &pruned_scored_inputs,
             engine.avalanche_combination_size,
             sample_count,
             rng,
-        )
+        );
+        if let Some(signature) = ordered_signature.as_ref() {
+            random_plans.retain(|plan| scored_input_plan_signature(plan) != *signature);
+        }
+        sample_plans.extend(
+            random_plans
+                .into_iter()
+                .take(sample_count.saturating_sub(sample_plans.len())),
+        );
+        sample_plans
     } else {
+        let mut sample_plans = Vec::new();
+        let ordered_signature =
+            if engine.avalanche_include_max_fitness_candidates_in_order {
+                let ordered_plan = build_in_order_group_limited_sample_plan(
+                    &pruned_scored_inputs,
+                    engine.avalanche_combination_size,
+                    mixed_r_candidate_count,
+                    |input: &ScoredAvalancheInput| input.batch_candidate_index,
+                );
+                ordered_sample_input_count = ordered_plan.len();
+                if ordered_plan.is_empty() {
+                    None
+                } else {
+                    let signature = scored_input_plan_signature(&ordered_plan);
+                    sample_plans.push(ordered_plan);
+                    Some(signature)
+                }
+            } else {
+                None
+            };
         let grouped_sample_inputs = grouped_inputs
             .iter()
             .map(|group| group.inputs.clone())
             .collect::<Vec<_>>();
-        build_unique_grouped_sample_plans(
+        let mut random_plans = build_unique_grouped_sample_plans(
             &grouped_sample_inputs,
             mixed_r_candidate_count,
             engine.avalanche_combination_size,
             sample_count,
             rng,
-        )
+        );
+        if let Some(signature) = ordered_signature.as_ref() {
+            random_plans.retain(|plan| scored_input_plan_signature(plan) != *signature);
+        }
+        sample_plans.extend(
+            random_plans
+                .into_iter()
+                .take(sample_count.saturating_sub(sample_plans.len())),
+        );
+        sample_plans
     };
     let effective_sample_count = sample_plans.len();
+    if ordered_sample_input_count > 0 {
+        println!(
+            "Avalanche ordered fitness seed for batch {}: included {} retained input(s) in rank order before randomized sampling",
+            batch_number, ordered_sample_input_count
+        );
+    }
 
     println!(
-        "Avalanche combination setup for batch {}: scored inputs {} r-candidate-pool {} selection-mode {} configured-mixed-r-candidates {} effective-mixed-r-candidates {} configured-samples {} effective-samples {} recursion-depth {} recursive-group-sizes {:?} recursive-resample-counts {:?} majority-vote {} sample-smoothing {} majority-print {} recursive-input {} statistics-collection {} keep-all-samples {} hamming-prune {} kept-percentile {} outlier-preference-pct {}",
+        "Avalanche combination setup for batch {}: scored inputs {} r-candidate-pool {} selection-mode {} configured-mixed-r-candidates {} effective-mixed-r-candidates {} configured-samples {} effective-samples {} recursion-depth {} recursive-group-sizes {:?} recursive-resample-counts {:?} majority-vote {} sample-smoothing {} majority-print {} recursive-input {} statistics-collection {} keep-all-samples {} hamming-prune {} kept-percentile {} outlier-preference-pct {} ordered-max-fitness-inputs {}",
         batch_number,
         pool_size,
         r_candidate_pool_size,
@@ -6623,7 +6849,12 @@ fn run_sampled_avalanche_beam_search_with_ranked_inputs(
             "off"
         },
         engine.avalanche_combination_hamming_distance_keep_percentile,
-        engine.avalanche_combination_hamming_distance_outlier_preference_pct
+        engine.avalanche_combination_hamming_distance_outlier_preference_pct,
+        if engine.avalanche_include_max_fitness_candidates_in_order {
+            "on"
+        } else {
+            "off"
+        }
     );
     if engine.avalanche_combination_hamming_distance_prune && pool_size < scored_inputs.len() {
         println!(
@@ -9401,6 +9632,30 @@ mod tests {
         );
         assert_eq!(unique_signatures.len(), sample_plans.len());
         assert!(flattened.len() > unique_inputs.len());
+    }
+
+    #[test]
+    fn test_build_in_order_flat_sample_plan_preserves_leading_ranked_items() {
+        let inputs = vec![5usize, 4, 3, 2];
+
+        let plan = build_in_order_flat_sample_plan(&inputs, 3);
+
+        assert_eq!(plan, vec![5usize, 4, 3]);
+    }
+
+    #[test]
+    fn test_build_in_order_group_limited_sample_plan_respects_group_cap_and_order() {
+        let inputs = vec![
+            (0usize, 'a'),
+            (0usize, 'b'),
+            (1usize, 'c'),
+            (2usize, 'd'),
+            (1usize, 'e'),
+        ];
+
+        let plan = build_in_order_group_limited_sample_plan(&inputs, 4, 2, |entry| entry.0);
+
+        assert_eq!(plan, vec![(0usize, 'a'), (0usize, 'b'), (1usize, 'c'), (1usize, 'e')]);
     }
 
     #[test]

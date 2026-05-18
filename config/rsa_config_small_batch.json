@@ -113,6 +113,11 @@
     // - true: retain only a globally unique set with no repeated r or x candidates.
     // - false: allow multiple scored inputs to reuse the same r or x values.
     "avalanche_unique_r_cx_inputs": true,
+    // Ordered max-fitness Avalanche seed:
+    // - true: include one deterministic Avalanche input built from the highest-ranked retained
+    //   candidates in order before randomized sampling fills the remaining sample plans.
+    // - false: rely only on randomized retained-input sampling.
+    "avalanche_include_max_fitness_candidates_in_order": true,
     // Cap how many distinct r values can appear in one sampled avalanche input;
     // each selected r still contributes all of its sampled c^x variants.
     "avalanche_combination_mixed_r_candidates": 64,

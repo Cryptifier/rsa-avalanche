@@ -112,6 +112,8 @@ pub struct AnalyticsCliArgs {
     pub avalanche_fitness_streaming_prune: bool,
     /// Whether sampled Avalanche enforced a globally unique set of `r` and `x` inputs.
     pub avalanche_unique_r_cx_inputs: bool,
+    /// Whether sampled Avalanche always included one deterministic ordered plan from the highest-ranked retained inputs.
+    pub avalanche_include_max_fitness_candidates_in_order: bool,
     /// Whether the Avalanche cache SQLite database was kept in memory instead of on disk.
     pub sqlite_in_memory: bool,
     /// Expected bit width for decryptions.
@@ -168,6 +170,7 @@ pub(crate) struct AnalyticsCliInfo {
     avalanche_fitness_additional_random_messages: usize,
     avalanche_fitness_streaming_prune: bool,
     avalanche_unique_r_cx_inputs: bool,
+    avalanche_include_max_fitness_candidates_in_order: bool,
     sqlite_in_memory: bool,
     bits_decrypt: Option<u32>,
     r_candidate_target_exponent: Option<BigDecimal>,
@@ -661,6 +664,8 @@ impl SessionAnalytics {
                 .avalanche_fitness_additional_random_messages,
             avalanche_fitness_streaming_prune: args.avalanche_fitness_streaming_prune,
             avalanche_unique_r_cx_inputs: args.avalanche_unique_r_cx_inputs,
+            avalanche_include_max_fitness_candidates_in_order: args
+                .avalanche_include_max_fitness_candidates_in_order,
             sqlite_in_memory: args.sqlite_in_memory,
             bits_decrypt: args.bits_decrypt,
             r_candidate_target_exponent: args.r_candidate_target_exponent,
