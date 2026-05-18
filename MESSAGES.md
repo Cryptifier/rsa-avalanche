@@ -29,6 +29,7 @@ Consumers should treat missing fields as empty string, null, or 0 (per field typ
 - `beam_bit_one_threshold`: number
 - `avalanche_probability_spread_exponent`: number
 - `avalanche_combination_samples`: number
+- `avalanche_solver_global_log_enable`: boolean
 - `avalanche_combination_size`: number
 - `avalanche_combination_mixed_r_candidates`: number
 - `avalanche_combination_pool_size`: number

@@ -187,6 +187,8 @@ for i in $(seq 1 "${RUNS}"); do
   cx_match_pct=$(echo "${cx_match_line}" | sed -n 's/.*match \([0-9.]*\)%.*/\1/p')
   majority_vote_line=$(grep -F -m1 "Avalanche majority vote run max:" "${run_output}" || true)
   majority_vote_match_pct=$(echo "${majority_vote_line}" | extract_first_match_pct)
+  global_majority_vote_line=$(grep -F -m1 "Avalanche global majority vote:" "${run_output}" || true)
+  global_majority_vote_match_pct=$(echo "${global_majority_vote_line}" | extract_first_match_pct)
   beam_run_max_line=$(grep -F -m1 "Avalanche beam run max:" "${run_output}" || true)
   beam_run_max_match_pct=$(echo "${beam_run_max_line}" | extract_first_match_pct)
   batch_match_percentages=$(grep -F -m1 "Avalanche batch top match percentages:" "${run_output}" | sed -n 's/.*\[\(.*\)\]/\1/p' || true)
@@ -278,6 +280,16 @@ for i in $(seq 1 "${RUNS}"); do
     majority_match_color="${YELLOW}"
   fi
 
+  if [[ -n "${global_majority_vote_match_pct}" ]]; then
+    if awk -v v="${global_majority_vote_match_pct}" 'BEGIN { exit (v >= 50.0) ? 0 : 1 }'; then
+      global_majority_match_color="${GREEN}"
+    else
+      global_majority_match_color="${RED}"
+    fi
+  else
+    global_majority_match_color="${YELLOW}"
+  fi
+
   if [[ -n "${top_output_match_pct}" ]]; then
     if awk -v v="${top_output_match_pct}" -v threshold="${VERDICT_MATCH_THRESHOLD_PCT}" 'BEGIN { exit (v >= threshold) ? 0 : 1 }'; then
       top_output_match_color="${GREEN}"
@@ -296,9 +308,9 @@ for i in $(seq 1 "${RUNS}"); do
   fi
 
   if [[ ${status} -eq 0 ]]; then
-    echo "Run ${i} summary: c^x max match ${match_color}${cx_match_pct:-N/A}%${RESET}, beam run max ${beam_match_color}${beam_run_max_match_pct:-N/A}%${RESET}, majority vote match ${majority_match_color}${majority_vote_match_pct:-N/A}%${RESET}, top avalanche output match ${top_output_match_color}${top_output_match_pct:-N/A}%${RESET}, solver ${solver_color}${solver_status}${RESET}, c^x candidates ${cx_candidates_total:-N/A}, avalanche candidates ${avalanche_candidates_total:-N/A}, verdict ${verdict_color}${verdict}${RESET}, duration ${duration_s}s"
+    echo "Run ${i} summary: c^x max match ${match_color}${cx_match_pct:-N/A}%${RESET}, beam run max ${beam_match_color}${beam_run_max_match_pct:-N/A}%${RESET}, majority vote match ${majority_match_color}${majority_vote_match_pct:-N/A}%${RESET}, global majority vote match ${global_majority_match_color}${global_majority_vote_match_pct:-N/A}%${RESET}, top avalanche output match ${top_output_match_color}${top_output_match_pct:-N/A}%${RESET}, solver ${solver_color}${solver_status}${RESET}, c^x candidates ${cx_candidates_total:-N/A}, avalanche candidates ${avalanche_candidates_total:-N/A}, verdict ${verdict_color}${verdict}${RESET}, duration ${duration_s}s"
   else
-    echo "Run ${i} summary: ${RED}FAILED (exit ${status})${RESET}, c^x max match ${match_color}${cx_match_pct:-N/A}%${RESET}, beam run max ${beam_match_color}${beam_run_max_match_pct:-N/A}%${RESET}, majority vote match ${majority_match_color}${majority_vote_match_pct:-N/A}%${RESET}, top avalanche output match ${top_output_match_color}${top_output_match_pct:-N/A}%${RESET}, solver ${solver_color}${solver_status}${RESET}, c^x candidates ${cx_candidates_total:-N/A}, avalanche candidates ${avalanche_candidates_total:-N/A}, verdict ${verdict_color}${verdict}${RESET}, duration ${duration_s}s"
+    echo "Run ${i} summary: ${RED}FAILED (exit ${status})${RESET}, c^x max match ${match_color}${cx_match_pct:-N/A}%${RESET}, beam run max ${beam_match_color}${beam_run_max_match_pct:-N/A}%${RESET}, majority vote match ${majority_match_color}${majority_vote_match_pct:-N/A}%${RESET}, global majority vote match ${global_majority_match_color}${global_majority_vote_match_pct:-N/A}%${RESET}, top avalanche output match ${top_output_match_color}${top_output_match_pct:-N/A}%${RESET}, solver ${solver_color}${solver_status}${RESET}, c^x candidates ${cx_candidates_total:-N/A}, avalanche candidates ${avalanche_candidates_total:-N/A}, verdict ${verdict_color}${verdict}${RESET}, duration ${duration_s}s"
   fi
   echo "Session JSON: ${session_path}"
   if [[ -n "${beam_run_max_line}" ]]; then
@@ -306,6 +318,9 @@ for i in $(seq 1 "${RUNS}"); do
   fi
   if [[ -n "${majority_vote_line}" ]]; then
     echo "${majority_vote_line}"
+  fi
+  if [[ -n "${global_majority_vote_line}" ]]; then
+    echo "${global_majority_vote_line}"
   fi
   beam_comparison_block=$(awk '
     /Avalanche beam colored hex/ {print; capture=1; next}
@@ -315,7 +330,11 @@ for i in $(seq 1 "${RUNS}"); do
     /Avalanche majority vote colored hex/ {print; capture=1; next}
     capture {print; if (/^Hex match key:/) exit}
   ' "${run_output}")
-  if [[ -n "${beam_comparison_block}" || -n "${majority_comparison_block}" ]]; then
+  global_majority_comparison_block=$(awk '
+    /Avalanche global majority vote colored hex/ {print; capture=1; next}
+    capture {print; if (/^Hex match key:/) exit}
+  ' "${run_output}")
+  if [[ -n "${beam_comparison_block}" || -n "${majority_comparison_block}" || -n "${global_majority_comparison_block}" ]]; then
     if [[ -n "${beam_comparison_block}" ]]; then
       echo "${beam_comparison_block}"
     else
@@ -326,6 +345,12 @@ for i in $(seq 1 "${RUNS}"); do
       echo "${majority_comparison_block}"
     else
       echo "Avalanche majority vote colored comparison: N/A"
+    fi
+    echo "-----"
+    if [[ -n "${global_majority_comparison_block}" ]]; then
+      echo "${global_majority_comparison_block}"
+    else
+      echo "Avalanche global majority vote colored comparison: N/A"
     fi
   fi
   if [[ -n "${batch_match_percentages}" ]]; then

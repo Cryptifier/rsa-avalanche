@@ -152,6 +152,9 @@ pub struct EngineConfig {
     /// Whether the final-tier Avalanche solver should compare batch-pair sample products for whole-message recovery.
     #[serde(default = "default_avalanche_solver_enable")]
     pub avalanche_solver_enable: bool,
+    /// Whether Avalanche runs should log the global majority vote across every final-tier output.
+    #[serde(default = "default_avalanche_solver_global_log_enable")]
+    pub avalanche_solver_global_log_enable: bool,
     /// Maximum number of differing sample bits the Avalanche solver may brute-force per batch-pair sample comparison.
     #[serde(default = "default_avalanche_solver_max_bits")]
     pub avalanche_solver_max_bits: usize,
@@ -429,6 +432,7 @@ impl Default for EngineConfig {
             analysis_batch_candidates: default_analysis_batch_candidates(),
             analysis_batch_batches: default_analysis_batch_batches(),
             avalanche_solver_enable: default_avalanche_solver_enable(),
+            avalanche_solver_global_log_enable: default_avalanche_solver_global_log_enable(),
             avalanche_solver_max_bits: default_avalanche_solver_max_bits(),
             avalanche_combination_samples: default_avalanche_combination_samples(),
             avalanche_combination_size: default_avalanche_combination_size(),
@@ -1296,6 +1300,20 @@ fn default_analysis_batch_batches() -> u64 {
 /// - Returns a constant default value; no side effects.
 fn default_avalanche_solver_enable() -> bool {
     false
+}
+
+/// Default enable flag for logging the global final-tier Avalanche majority vote.
+///
+/// # Parameters
+/// - None.
+///
+/// # Returns
+/// - `bool`: `true` so runs log the aggregate final-tier majority vote by default.
+///
+/// # Expected Output
+/// - Returns a constant default value; no side effects.
+fn default_avalanche_solver_global_log_enable() -> bool {
+    true
 }
 
 /// Default maximum flip count for each Avalanche solver brute-force search.
@@ -2487,6 +2505,7 @@ mod tests {
                 "{\n",
                 "  \"engine\": {\n",
                 "    \"avalanche_solver_enable\": true,\n",
+                "    \"avalanche_solver_global_log_enable\": false,\n",
                 "    \"avalanche_solver_max_bits\": 5\n",
                 "  }\n",
                 "}\n",
@@ -2498,6 +2517,7 @@ mod tests {
             .expect("load config");
 
         assert!(config.engine.avalanche_solver_enable);
+        assert!(!config.engine.avalanche_solver_global_log_enable);
         assert_eq!(config.engine.avalanche_solver_max_bits, 5);
 
         let _ = fs::remove_dir_all(&temp_dir);

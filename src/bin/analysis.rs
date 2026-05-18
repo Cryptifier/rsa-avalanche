@@ -130,6 +130,10 @@ struct Args {
     #[arg(long = "avalanche-combination-majority-vote-print")]
     avalanche_combination_majority_vote_print: Option<bool>,
 
+    /// Whether Avalanche logs a global majority vote across all final-tier outputs
+    #[arg(long = "avalanche-solver-global-log-enable")]
+    avalanche_solver_global_log_enable: Option<bool>,
+
     /// Whether recursive Avalanche tiers carry forward the top beam-search bits instead of majority-vote bits
     #[arg(long = "avalanche-use-top-beam")]
     avalanche_use_top_beam: Option<bool>,
@@ -232,6 +236,9 @@ fn main() -> Result<(), Box<dyn Error>> {
     if let Some(majority_vote_print) = args.avalanche_combination_majority_vote_print {
         config.engine.avalanche_combination_majority_vote_print = majority_vote_print;
     }
+    if let Some(global_log_enable) = args.avalanche_solver_global_log_enable {
+        config.engine.avalanche_solver_global_log_enable = global_log_enable;
+    }
     if let Some(use_top_beam) = args.avalanche_use_top_beam {
         config.engine.avalanche_use_top_beam = use_top_beam;
     }
@@ -273,6 +280,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         avalanche_probability_spread_exponent: config.engine.avalanche_probability_spread_exponent,
         avalanche_combination_samples: config.engine.avalanche_combination_samples,
         avalanche_solver_enable: config.engine.avalanche_solver_enable,
+        avalanche_solver_global_log_enable: config.engine.avalanche_solver_global_log_enable,
         avalanche_solver_max_bits: config.engine.avalanche_solver_max_bits,
         avalanche_combination_size: config.engine.avalanche_combination_size,
         avalanche_combination_mixed_r_candidates: config
