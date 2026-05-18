@@ -3438,7 +3438,45 @@ fn build_additional_fitness_messages(
     Ok(messages)
 }
 
-/// Computes padding fitness and aggregate match percentage for one scored Avalanche input.
+/// Compares original and inverted score metrics to decide whether inversion is beneficial.
+///
+/// # Parameters
+/// - `original`: Score metrics for the candidate bits as produced.
+/// - `inverted`: Score metrics for the bitwise-inverted candidate contents.
+///
+/// # Returns
+/// - `bool`: `true` when the inverted contents should replace the original candidate bits.
+///
+/// # Expected Output
+/// - Returns the comparison result with no stdout/stderr output.
+fn should_invert_scored_avalanche_input(
+    original: &AvalancheInputScoreMetrics,
+    inverted: &AvalancheInputScoreMetrics,
+) -> bool {
+    inverted.fitness.fitness_score > original.fitness.fitness_score
+        || (inverted.fitness.fitness_score == original.fitness.fitness_score
+            && inverted.fitness.fitness_total_score > original.fitness.fitness_total_score)
+        || (inverted.fitness.fitness_score == original.fitness.fitness_score
+            && inverted.fitness.fitness_total_score == original.fitness.fitness_total_score
+            && inverted.score_match_pct > original.score_match_pct)
+}
+
+/// Computes the normalized candidate decryption for one scored Avalanche input.
+///
+/// # Parameters
+/// - `message_bits`: Candidate message bits that will be forwarded into the Avalanche search.
+///
+/// # Returns
+/// - `BigUint`: Integer reconstructed from the normalized fixed-width candidate bits.
+///
+/// # Expected Output
+/// - Returns a fixed-width candidate integer with no stdout/stderr output.
+fn normalized_scored_avalanche_candidate_decryption(message_bits: &PackedBits) -> BigUint {
+    bits_le_to_biguint(&message_bits.to_bools())
+}
+
+/// Computes padding fitness, aggregate match percentage, and inversion state for one scored
+/// Avalanche input.
 ///
 /// # Parameters
 /// - `ctx`: RSA context containing the source modulus and exponent.
@@ -3453,7 +3491,7 @@ fn build_additional_fitness_messages(
 ///
 /// # Returns
 /// - `AvalancheInputScoreMetrics`: Padding fitness metrics plus the aggregate match percentage
-///   across all evaluated messages.
+///   across all evaluated messages and whether the bits were normalized by inversion.
 ///
 /// # Expected Output
 /// - Returns the candidate score metrics with no stdout/stderr output.
@@ -3471,9 +3509,15 @@ fn compute_avalanche_input_score_metrics(
     let fitness_bit_width = resolve_avalanche_fitness_bit_width(engine);
     let avalanche_bit_width = current_message_bits.len();
     let current_score = lsb_zero_count_fitness(current_message_bits, fitness_bit_width);
+    let current_inverted_message_bits = current_message_bits.bitnot();
+    let current_inverted_score =
+        lsb_zero_count_fitness(&current_inverted_message_bits, fitness_bit_width);
     let mut minimum_score = current_score;
     let mut total_score = current_score;
     let mut total_match_pct = current_match_pct;
+    let mut inverted_minimum_score = current_inverted_score;
+    let mut inverted_total_score = current_inverted_score;
+    let mut inverted_total_match_pct = 100.0 - current_match_pct;
 
     for additional_message in additional_messages {
         let ciphertext = if x_value.is_one() {
@@ -3494,20 +3538,41 @@ fn compute_avalanche_input_score_metrics(
         let candidate_message_bits =
             biguint_to_packed_bits_le(&candidate_message, avalanche_bit_width);
         let score = lsb_zero_count_fitness(&candidate_message_bits, fitness_bit_width);
+        let inverted_score =
+            lsb_zero_count_fitness(&candidate_message_bits.bitnot(), fitness_bit_width);
         minimum_score = minimum_score.min(score);
         total_score += score;
-        total_match_pct +=
+        let match_pct =
             packed_match_percentage(&candidate_message_bits, &additional_message.message_bits);
+        total_match_pct += match_pct;
+        inverted_minimum_score = inverted_minimum_score.min(inverted_score);
+        inverted_total_score += inverted_score;
+        inverted_total_match_pct += 100.0 - match_pct;
     }
 
     let fitness_message_count = additional_messages.len() + 1;
-    AvalancheInputScoreMetrics {
+    let original_metrics = AvalancheInputScoreMetrics {
         fitness: AvalancheFitnessScore {
             fitness_score: minimum_score,
             fitness_total_score: total_score,
             fitness_message_count,
         },
         score_match_pct: total_match_pct / fitness_message_count as f64,
+        contents_have_been_inverted: false,
+    };
+    let inverted_metrics = AvalancheInputScoreMetrics {
+        fitness: AvalancheFitnessScore {
+            fitness_score: inverted_minimum_score,
+            fitness_total_score: inverted_total_score,
+            fitness_message_count,
+        },
+        score_match_pct: inverted_total_match_pct / fitness_message_count as f64,
+        contents_have_been_inverted: true,
+    };
+    if should_invert_scored_avalanche_input(&original_metrics, &inverted_metrics) {
+        inverted_metrics
+    } else {
+        original_metrics
     }
 }
 
@@ -3878,6 +3943,7 @@ struct AdditionalFitnessMessage {
 struct AvalancheInputScoreMetrics {
     fitness: AvalancheFitnessScore,
     score_match_pct: f64,
+    contents_have_been_inverted: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -3960,6 +4026,7 @@ pub(crate) struct ScoredAvalancheInput {
     pub(crate) r: BigUint,
     pub(crate) x: BigUint,
     pub(crate) score_match_pct: f64,
+    pub(crate) contents_have_been_inverted: bool,
     pub(crate) message_bits: PackedBits,
     pub(crate) detail: Option<ScoredAvalancheInputDetail>,
 }
@@ -5325,6 +5392,7 @@ fn execute_sampled_avalanche_sample(
                         target_exponent: detail.target_exponent.clone(),
                         x: input.x.clone(),
                         score_match_pct: input.score_match_pct,
+                        contents_have_been_inverted: input.contents_have_been_inverted,
                         hbc_ciphertext_r: detail.hbc_ciphertext_r.clone(),
                         candidate_decryption: detail.candidate_decryption.clone(),
                     }
@@ -5474,6 +5542,7 @@ fn execute_sampled_avalanche_sample_from_cache(
                         target_exponent: detail.target_exponent.clone(),
                         x: input.x.clone(),
                         score_match_pct: input.score_match_pct,
+                        contents_have_been_inverted: input.contents_have_been_inverted,
                         hbc_ciphertext_r: detail.hbc_ciphertext_r.clone(),
                         candidate_decryption: detail.candidate_decryption.clone(),
                     }
@@ -6402,18 +6471,32 @@ fn cache_batch_scored_avalanche_inputs(
                             additional_fitness_messages,
                             shift,
                         );
+                        let message_bits = if score_metrics.contents_have_been_inverted {
+                            message_bits.bitnot()
+                        } else {
+                            message_bits
+                        };
                         let scored_input = ScoredAvalancheInput {
                             batch_candidate_index,
                             message_index: idx,
                             r: candidate.r.clone(),
                             x: x_value,
                             score_match_pct: score_metrics.score_match_pct,
+                            contents_have_been_inverted: score_metrics.contents_have_been_inverted,
                             message_bits: message_bits.clone(),
                             detail: target_exponent.as_ref().map(|target_exponent| {
                                 ScoredAvalancheInputDetail {
                                     target_exponent: target_exponent.clone(),
                                     hbc_ciphertext_r: hbc_result.clone(),
-                                    candidate_decryption: dm.clone(),
+                                    candidate_decryption: if score_metrics
+                                        .contents_have_been_inverted
+                                    {
+                                        normalized_scored_avalanche_candidate_decryption(
+                                            &message_bits,
+                                        )
+                                    } else {
+                                        dm.clone()
+                                    },
                                 }
                             }),
                         };
@@ -7469,18 +7552,33 @@ fn run_r_candidate_accuracy_batches(
                                     &additional_fitness_messages,
                                     shift,
                                 );
+                                let message_bits = if score_metrics.contents_have_been_inverted {
+                                    message_bits.bitnot()
+                                } else {
+                                    message_bits
+                                };
                                 let scored_input = ScoredAvalancheInput {
                                     batch_candidate_index,
                                     message_index: idx,
                                     r: candidate.r.clone(),
                                     x: x_value,
                                     score_match_pct: score_metrics.score_match_pct,
+                                    contents_have_been_inverted: score_metrics
+                                        .contents_have_been_inverted,
                                     message_bits: message_bits.clone(),
                                     detail: target_exponent.as_ref().map(|target_exponent| {
                                         ScoredAvalancheInputDetail {
                                             target_exponent: target_exponent.clone(),
                                             hbc_ciphertext_r: hbc_result.clone(),
-                                            candidate_decryption: dm.clone(),
+                                            candidate_decryption: if score_metrics
+                                                .contents_have_been_inverted
+                                            {
+                                                normalized_scored_avalanche_candidate_decryption(
+                                                    &message_bits,
+                                                )
+                                            } else {
+                                                dm.clone()
+                                            },
                                         }
                                     }),
                                 };
@@ -8359,6 +8457,38 @@ mod tests {
     }
 
     #[test]
+    fn test_compute_avalanche_input_score_metrics_detects_inverted_candidate_contents() {
+        let mut config = Config::default();
+        config.engine.message.bits = 4;
+        config.engine.avalanche_fitness_bit_width = 4;
+
+        let ctx = RSAContext {
+            key_bit_width: 6,
+            n: BigUint::from(55u8),
+            e: BigUint::from(3u8),
+        };
+        let current_message_bits = PackedBits::from_bools(&[true, true, true, true]);
+
+        let metrics = compute_avalanche_input_score_metrics(
+            &ctx,
+            &config.engine,
+            &BigUint::from(5u8),
+            &BigUint::one(),
+            &BigUint::one(),
+            &current_message_bits,
+            0.0,
+            &[],
+            false,
+        );
+
+        assert!(metrics.contents_have_been_inverted);
+        assert_eq!(metrics.fitness.fitness_score, 4);
+        assert_eq!(metrics.fitness.fitness_total_score, 4);
+        assert_eq!(metrics.fitness.fitness_message_count, 1);
+        assert!((metrics.score_match_pct - 100.0).abs() < 1e-9);
+    }
+
+    #[test]
     fn test_resolve_avalanche_fitness_retained_input_limit_combines_limits() {
         assert_eq!(resolve_avalanche_fitness_retained_input_limit(0, 0), 0);
         assert_eq!(resolve_avalanche_fitness_retained_input_limit(3, 0), 3);
@@ -8386,6 +8516,7 @@ mod tests {
                     r: BigUint::from(3u8),
                     x: BigUint::from(1u8),
                     score_match_pct: 70.0,
+                    contents_have_been_inverted: false,
                     message_bits: PackedBits::from_bools(&[false, false, false, false, true]),
                     detail: None,
                 },
@@ -8395,6 +8526,7 @@ mod tests {
                     r: BigUint::from(3u8),
                     x: BigUint::from(3u8),
                     score_match_pct: 60.0,
+                    contents_have_been_inverted: false,
                     message_bits: PackedBits::from_bools(&[false, true, false, false, true]),
                     detail: None,
                 },
@@ -8404,6 +8536,7 @@ mod tests {
                     r: BigUint::from(5u8),
                     x: BigUint::from(1u8),
                     score_match_pct: 65.0,
+                    contents_have_been_inverted: false,
                     message_bits: PackedBits::from_bools(&[false, false, false, true, true]),
                     detail: None,
                 },
@@ -8413,6 +8546,7 @@ mod tests {
                     r: BigUint::from(5u8),
                     x: BigUint::from(3u8),
                     score_match_pct: 55.0,
+                    contents_have_been_inverted: false,
                     message_bits: PackedBits::from_bools(&[false, false, true, true, true]),
                     detail: None,
                 },
@@ -8422,6 +8556,7 @@ mod tests {
                     r: BigUint::from(7u8),
                     x: BigUint::from(1u8),
                     score_match_pct: 90.0,
+                    contents_have_been_inverted: false,
                     message_bits: PackedBits::from_bools(&[true, true, true, true, true]),
                     detail: None,
                 },
@@ -8450,6 +8585,7 @@ mod tests {
                     r: BigUint::from(3u8),
                     x: BigUint::from(1u8),
                     score_match_pct: 80.0,
+                    contents_have_been_inverted: false,
                     message_bits: PackedBits::from_bools(&[false, true, false, false, true]),
                     detail: None,
                 },
@@ -8459,6 +8595,7 @@ mod tests {
                     r: BigUint::from(5u8),
                     x: BigUint::from(1u8),
                     score_match_pct: 70.0,
+                    contents_have_been_inverted: false,
                     message_bits: PackedBits::from_bools(&[false, false, true, true, true]),
                     detail: None,
                 },
@@ -8487,6 +8624,7 @@ mod tests {
                     r: BigUint::from(3u8),
                     x: BigUint::from(1u8),
                     score_match_pct: 92.0,
+                    contents_have_been_inverted: false,
                     message_bits: PackedBits::from_bools(&[false, false, false, false, true]),
                     detail: None,
                 },
@@ -8496,6 +8634,7 @@ mod tests {
                     r: BigUint::from(3u8),
                     x: BigUint::from(3u8),
                     score_match_pct: 88.0,
+                    contents_have_been_inverted: false,
                     message_bits: PackedBits::from_bools(&[false, false, false, true, true]),
                     detail: None,
                 },
@@ -8505,6 +8644,7 @@ mod tests {
                     r: BigUint::from(5u8),
                     x: BigUint::from(1u8),
                     score_match_pct: 40.0,
+                    contents_have_been_inverted: false,
                     message_bits: PackedBits::from_bools(&[false, true, true, true, true]),
                     detail: None,
                 },
@@ -8532,6 +8672,7 @@ mod tests {
                 r: BigUint::from(3u8),
                 x: BigUint::from(5u8),
                 score_match_pct: 90.0,
+                contents_have_been_inverted: false,
                 message_bits: PackedBits::from_bools(&[false, false, false, false]),
                 detail: None,
             },
@@ -8541,6 +8682,7 @@ mod tests {
                 r: BigUint::from(3u8),
                 x: BigUint::from(7u8),
                 score_match_pct: 80.0,
+                contents_have_been_inverted: false,
                 message_bits: PackedBits::from_bools(&[false, false, false, true]),
                 detail: None,
             },
@@ -8550,6 +8692,7 @@ mod tests {
                 r: BigUint::from(11u8),
                 x: BigUint::from(5u8),
                 score_match_pct: 70.0,
+                contents_have_been_inverted: false,
                 message_bits: PackedBits::from_bools(&[false, false, true, true]),
                 detail: None,
             },
@@ -8559,6 +8702,7 @@ mod tests {
                 r: BigUint::from(13u8),
                 x: BigUint::from(17u8),
                 score_match_pct: 60.0,
+                contents_have_been_inverted: false,
                 message_bits: PackedBits::from_bools(&[true, true, true, true]),
                 detail: None,
             },
@@ -8581,6 +8725,7 @@ mod tests {
                 r: BigUint::from(3u8),
                 x: BigUint::from(1u8),
                 score_match_pct: 70.0,
+                contents_have_been_inverted: false,
                 message_bits: PackedBits::from_bools(&[false, false, false, false, true]),
                 detail: None,
             },
@@ -8590,6 +8735,7 @@ mod tests {
                 r: BigUint::from(3u8),
                 x: BigUint::from(3u8),
                 score_match_pct: 60.0,
+                contents_have_been_inverted: false,
                 message_bits: PackedBits::from_bools(&[false, true, false, false, true]),
                 detail: None,
             },
@@ -8599,6 +8745,7 @@ mod tests {
                 r: BigUint::from(5u8),
                 x: BigUint::from(5u8),
                 score_match_pct: 65.0,
+                contents_have_been_inverted: false,
                 message_bits: PackedBits::from_bools(&[false, false, false, true, true]),
                 detail: None,
             },
@@ -8608,6 +8755,7 @@ mod tests {
                 r: BigUint::from(5u8),
                 x: BigUint::from(7u8),
                 score_match_pct: 55.0,
+                contents_have_been_inverted: false,
                 message_bits: PackedBits::from_bools(&[false, false, true, true, true]),
                 detail: None,
             },
@@ -8617,6 +8765,7 @@ mod tests {
                 r: BigUint::from(7u8),
                 x: BigUint::from(9u8),
                 score_match_pct: 90.0,
+                contents_have_been_inverted: false,
                 message_bits: PackedBits::from_bools(&[true, true, true, true, true]),
                 detail: None,
             },
@@ -8651,6 +8800,7 @@ mod tests {
             r: BigUint::from(3u8),
             x: BigUint::from(1u8),
             score_match_pct: 75.0,
+            contents_have_been_inverted: false,
             message_bits: PackedBits::from_bools(&[true, false]),
             detail: None,
         }];
@@ -8672,6 +8822,7 @@ mod tests {
                 r: BigUint::from(3u8),
                 x: BigUint::from(1u8),
                 score_match_pct: 75.0,
+                contents_have_been_inverted: false,
                 message_bits: PackedBits::from_bools(&[true, false]),
                 detail: None,
             },
@@ -8681,6 +8832,7 @@ mod tests {
                 r: BigUint::from(3u8),
                 x: BigUint::from(3u8),
                 score_match_pct: 70.0,
+                contents_have_been_inverted: false,
                 message_bits: PackedBits::from_bools(&[false, true]),
                 detail: None,
             },
@@ -8690,6 +8842,7 @@ mod tests {
                 r: BigUint::from(5u8),
                 x: BigUint::from(1u8),
                 score_match_pct: 65.0,
+                contents_have_been_inverted: false,
                 message_bits: PackedBits::from_bools(&[true, true]),
                 detail: None,
             },
@@ -8699,6 +8852,7 @@ mod tests {
                 r: BigUint::from(5u8),
                 x: BigUint::from(3u8),
                 score_match_pct: 60.0,
+                contents_have_been_inverted: false,
                 message_bits: PackedBits::from_bools(&[false, false]),
                 detail: None,
             },
@@ -8737,6 +8891,7 @@ mod tests {
                 r: BigUint::from(3u8),
                 x: BigUint::from(1u8),
                 score_match_pct: 75.0,
+                contents_have_been_inverted: false,
                 message_bits: PackedBits::from_bools(&[true, false]),
                 detail: None,
             },
@@ -8746,6 +8901,7 @@ mod tests {
                 r: BigUint::from(3u8),
                 x: BigUint::from(3u8),
                 score_match_pct: 70.0,
+                contents_have_been_inverted: false,
                 message_bits: PackedBits::from_bools(&[false, true]),
                 detail: None,
             },
@@ -8755,6 +8911,7 @@ mod tests {
                 r: BigUint::from(5u8),
                 x: BigUint::from(1u8),
                 score_match_pct: 65.0,
+                contents_have_been_inverted: false,
                 message_bits: PackedBits::from_bools(&[true, true]),
                 detail: None,
             },
@@ -8786,6 +8943,7 @@ mod tests {
                     r: BigUint::from(distance + 3),
                     x: BigUint::from(1u8),
                     score_match_pct: 100.0 - (distance as f64 * 10.0),
+                    contents_have_been_inverted: false,
                     message_bits: PackedBits::from_bools(&bits),
                     detail: None,
                 }
@@ -8826,6 +8984,7 @@ mod tests {
                     r: BigUint::from(distance + 3),
                     x: BigUint::from(1u8),
                     score_match_pct: 100.0 - (distance as f64 * 10.0),
+                    contents_have_been_inverted: false,
                     message_bits: PackedBits::from_bools(&bits),
                     detail: None,
                 }
@@ -8868,6 +9027,7 @@ mod tests {
             r: BigUint::from(3u8),
             x: BigUint::from(1u8),
             score_match_pct: 75.0,
+            contents_have_been_inverted: false,
             message_bits: PackedBits::from_bools(&[true, false]),
             detail: None,
         }];
@@ -8907,6 +9067,7 @@ mod tests {
             r: BigUint::from(3u8),
             x: BigUint::from(1u8),
             score_match_pct: 75.0,
+            contents_have_been_inverted: false,
             message_bits: PackedBits::from_bools(&[true, false]),
             detail: None,
         }];
@@ -8944,6 +9105,7 @@ mod tests {
                 r: BigUint::from(3u8),
                 x: BigUint::from(1u8),
                 score_match_pct: 75.0,
+                contents_have_been_inverted: false,
                 message_bits: PackedBits::from_bools(&[true, false]),
                 detail: None,
             },
@@ -8953,6 +9115,7 @@ mod tests {
                 r: BigUint::from(5u8),
                 x: BigUint::from(3u8),
                 score_match_pct: 65.0,
+                contents_have_been_inverted: false,
                 message_bits: PackedBits::from_bools(&[false, true]),
                 detail: None,
             },
@@ -8995,6 +9158,7 @@ mod tests {
                 r: BigUint::from(3u8),
                 x: BigUint::from(1u8),
                 score_match_pct: 80.0,
+                contents_have_been_inverted: false,
                 message_bits: PackedBits::from_bools(&[false, false, false, false, true]),
                 detail: None,
             },
@@ -9004,6 +9168,7 @@ mod tests {
                 r: BigUint::from(3u8),
                 x: BigUint::from(3u8),
                 score_match_pct: 70.0,
+                contents_have_been_inverted: false,
                 message_bits: PackedBits::from_bools(&[false, true, true, true, true]),
                 detail: None,
             },
@@ -9013,6 +9178,7 @@ mod tests {
                 r: BigUint::from(5u8),
                 x: BigUint::from(1u8),
                 score_match_pct: 95.0,
+                contents_have_been_inverted: false,
                 message_bits: PackedBits::from_bools(&[false, false, true, true, true]),
                 detail: None,
             },
@@ -9070,6 +9236,7 @@ mod tests {
                 r: BigUint::from(3u8),
                 x: BigUint::from(1u8),
                 score_match_pct: 70.0,
+                contents_have_been_inverted: false,
                 message_bits: PackedBits::from_bools(&[false, true, true, true]),
                 detail: None,
             },
@@ -9079,6 +9246,7 @@ mod tests {
                 r: BigUint::from(5u8),
                 x: BigUint::from(1u8),
                 score_match_pct: 65.0,
+                contents_have_been_inverted: false,
                 message_bits: PackedBits::from_bools(&[true, true, true, true]),
                 detail: None,
             },
@@ -9114,6 +9282,7 @@ mod tests {
             r: BigUint::from(3u8),
             x: BigUint::from(1u8),
             score_match_pct: 70.0,
+            contents_have_been_inverted: false,
             message_bits: PackedBits::from_bools(&[false, true, true, true]),
             detail: None,
         }];
@@ -9149,6 +9318,7 @@ mod tests {
             r: BigUint::from(3u8),
             x: BigUint::from(1u8),
             score_match_pct: 80.0,
+            contents_have_been_inverted: false,
             message_bits: PackedBits::from_bools(&[
                 true, true, true, true, true, true, true, true, true, false,
             ]),
@@ -9195,6 +9365,7 @@ mod tests {
             r: BigUint::from(3u8),
             x: BigUint::from(1u8),
             score_match_pct: 80.0,
+            contents_have_been_inverted: true,
             message_bits: PackedBits::from_bools(&[
                 true, true, true, true, true, true, true, true, true, false,
             ]),
@@ -9221,6 +9392,7 @@ mod tests {
             .first()
             .expect("sampled avalanche should retain serialized sample");
         assert_eq!(retained.majority_vote_bits, vec![true, false]);
+        assert!(retained.inputs[0].contents_have_been_inverted);
         assert_eq!(retained.beam_results.len(), 1);
         assert_eq!(retained.beam_results[0].hex, "01");
         assert_eq!(retained.beam_results[0].bit_width, 2);
@@ -9243,6 +9415,7 @@ mod tests {
                 r: BigUint::from(3u8),
                 x: BigUint::from(1u8),
                 score_match_pct: 80.0,
+                contents_have_been_inverted: false,
                 message_bits: PackedBits::from_bools(&[true, false]),
                 detail: None,
             },
@@ -9252,6 +9425,7 @@ mod tests {
                 r: BigUint::from(5u8),
                 x: BigUint::from(1u8),
                 score_match_pct: 70.0,
+                contents_have_been_inverted: false,
                 message_bits: PackedBits::from_bools(&[true, true]),
                 detail: None,
             },
@@ -9261,6 +9435,7 @@ mod tests {
                 r: BigUint::from(7u8),
                 x: BigUint::from(1u8),
                 score_match_pct: 60.0,
+                contents_have_been_inverted: false,
                 message_bits: PackedBits::from_bools(&[false, true]),
                 detail: None,
             },
@@ -9270,6 +9445,7 @@ mod tests {
                 r: BigUint::from(11u8),
                 x: BigUint::from(1u8),
                 score_match_pct: 55.0,
+                contents_have_been_inverted: false,
                 message_bits: PackedBits::from_bools(&[false, false]),
                 detail: None,
             },
@@ -9317,6 +9493,7 @@ mod tests {
                 r: BigUint::from(3u8),
                 x: BigUint::from(1u8),
                 score_match_pct: 80.0,
+                contents_have_been_inverted: false,
                 message_bits: PackedBits::from_bools(&[true, false]),
                 detail: None,
             },
@@ -9326,6 +9503,7 @@ mod tests {
                 r: BigUint::from(5u8),
                 x: BigUint::from(1u8),
                 score_match_pct: 70.0,
+                contents_have_been_inverted: false,
                 message_bits: PackedBits::from_bools(&[true, true]),
                 detail: None,
             },
@@ -9335,6 +9513,7 @@ mod tests {
                 r: BigUint::from(7u8),
                 x: BigUint::from(1u8),
                 score_match_pct: 60.0,
+                contents_have_been_inverted: false,
                 message_bits: PackedBits::from_bools(&[false, true]),
                 detail: None,
             },
@@ -9344,6 +9523,7 @@ mod tests {
                 r: BigUint::from(11u8),
                 x: BigUint::from(1u8),
                 score_match_pct: 55.0,
+                contents_have_been_inverted: false,
                 message_bits: PackedBits::from_bools(&[false, false]),
                 detail: None,
             },
@@ -9387,6 +9567,7 @@ mod tests {
                 r: BigUint::from((index + 3) as u32),
                 x: BigUint::from(1u8),
                 score_match_pct: 80.0 - (index as f64 * 5.0),
+                contents_have_been_inverted: false,
                 message_bits: PackedBits::from_bools(&[index % 2 == 0, index < 2]),
                 detail: Some(ScoredAvalancheInputDetail {
                     target_exponent: BigDecimal::from(2u8),
@@ -9660,6 +9841,7 @@ mod tests {
                 r: BigUint::from(3u8),
                 x: BigUint::from(1u8),
                 score_match_pct: 75.0,
+                contents_have_been_inverted: false,
                 message_bits: PackedBits::from_bools(&[true, false]),
                 detail: None,
             },
@@ -9669,6 +9851,7 @@ mod tests {
                 r: BigUint::from(5u8),
                 x: BigUint::from(3u8),
                 score_match_pct: 65.0,
+                contents_have_been_inverted: false,
                 message_bits: PackedBits::from_bools(&[false, true]),
                 detail: None,
             },
@@ -9946,6 +10129,7 @@ mod tests {
                 r: BigUint::from(3u8),
                 x: BigUint::from(1u8),
                 score_match_pct: 80.0,
+                contents_have_been_inverted: false,
                 message_bits: PackedBits::from_bools(&[true, false]),
                 detail: None,
             },
@@ -9955,6 +10139,7 @@ mod tests {
                 r: BigUint::from(5u8),
                 x: BigUint::from(1u8),
                 score_match_pct: 70.0,
+                contents_have_been_inverted: false,
                 message_bits: PackedBits::from_bools(&[true, true]),
                 detail: None,
             },
@@ -9964,6 +10149,7 @@ mod tests {
                 r: BigUint::from(7u8),
                 x: BigUint::from(1u8),
                 score_match_pct: 60.0,
+                contents_have_been_inverted: false,
                 message_bits: PackedBits::from_bools(&[false, true]),
                 detail: None,
             },
@@ -9973,6 +10159,7 @@ mod tests {
                 r: BigUint::from(11u8),
                 x: BigUint::from(1u8),
                 score_match_pct: 55.0,
+                contents_have_been_inverted: false,
                 message_bits: PackedBits::from_bools(&[false, false]),
                 detail: None,
             },
@@ -10113,6 +10300,44 @@ mod tests {
     }
 
     #[test]
+    fn test_cached_scored_inputs_round_trip_preserves_inversion_flag() {
+        let config = Config::default();
+        let cache = AvalancheCacheGuard::new(Some(10_005), &config.engine)
+            .expect("cache should initialize");
+        cache.clear_batch(1).expect("cache clear should succeed");
+
+        let ranked_inputs = vec![RankedScoredAvalancheInput {
+            fitness: AvalancheFitnessScore {
+                fitness_score: 4,
+                fitness_total_score: 4,
+                fitness_message_count: 1,
+            },
+            input: ScoredAvalancheInput {
+                batch_candidate_index: 0,
+                message_index: 0,
+                r: BigUint::from(3u8),
+                x: BigUint::from(1u8),
+                score_match_pct: 100.0,
+                contents_have_been_inverted: true,
+                message_bits: PackedBits::from_bools(&[false, false, false, false]),
+                detail: None,
+            },
+        }];
+        insert_cached_scored_inputs(&cache, 1, &ranked_inputs)
+            .expect("cache insert should succeed");
+
+        let summaries =
+            load_cached_scored_input_summaries(&cache, 1).expect("summaries should load");
+        assert_eq!(summaries.len(), 1);
+        assert!(summaries[0].contents_have_been_inverted);
+
+        let loaded = load_cached_scored_inputs_by_ids(&cache, &[summaries[0].id])
+            .expect("cached inputs should load");
+        assert_eq!(loaded.len(), 1);
+        assert!(loaded[0].contents_have_been_inverted);
+    }
+
+    #[test]
     fn test_run_sampled_avalanche_beam_search_cached_errors_when_fitness_threshold_removes_all_candidates()
      {
         let mut config = Config::default();
@@ -10133,6 +10358,7 @@ mod tests {
                 r: BigUint::from(3u8),
                 x: BigUint::from(1u8),
                 score_match_pct: 70.0,
+                contents_have_been_inverted: false,
                 message_bits: PackedBits::from_bools(&[false, true, true, true]),
                 detail: None,
             },
@@ -10142,6 +10368,7 @@ mod tests {
                 r: BigUint::from(5u8),
                 x: BigUint::from(1u8),
                 score_match_pct: 65.0,
+                contents_have_been_inverted: false,
                 message_bits: PackedBits::from_bools(&[true, true, true, true]),
                 detail: None,
             },
@@ -10193,6 +10420,7 @@ mod tests {
                 r: BigUint::from(3u8),
                 x: BigUint::from(1u8),
                 score_match_pct: 80.0,
+                contents_have_been_inverted: false,
                 message_bits: PackedBits::from_bools(&[true, false, true]),
                 detail: None,
             },
@@ -10202,6 +10430,7 @@ mod tests {
                 r: BigUint::from(5u8),
                 x: BigUint::from(1u8),
                 score_match_pct: 70.0,
+                contents_have_been_inverted: false,
                 message_bits: PackedBits::from_bools(&[false, true, true]),
                 detail: None,
             },

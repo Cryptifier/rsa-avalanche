@@ -39,6 +39,7 @@ diesel::table! {
         r_text -> Text,
         x_text -> Text,
         score_match_pct -> Double,
+        contents_have_been_inverted -> Bool,
         fitness_score -> BigInt,
         fitness_total_score -> BigInt,
         fitness_message_count -> BigInt,
@@ -85,6 +86,7 @@ struct NewCachedAvalancheInput {
     r_text: String,
     x_text: String,
     score_match_pct: f64,
+    contents_have_been_inverted: bool,
     fitness_score: i64,
     fitness_total_score: i64,
     fitness_message_count: i64,
@@ -104,6 +106,7 @@ pub(crate) struct CachedAvalancheInputRow {
     pub(crate) r_text: String,
     pub(crate) x_text: String,
     pub(crate) score_match_pct: f64,
+    pub(crate) contents_have_been_inverted: bool,
     pub(crate) fitness_score: i64,
     pub(crate) fitness_total_score: i64,
     pub(crate) fitness_message_count: i64,
@@ -472,6 +475,7 @@ impl AvalancheCacheGuard {
                 r_text TEXT NOT NULL,
                 x_text TEXT NOT NULL,
                 score_match_pct DOUBLE NOT NULL,
+                contents_have_been_inverted BOOLEAN NOT NULL DEFAULT 0,
                 fitness_score BIGINT NOT NULL DEFAULT 0,
                 fitness_total_score BIGINT NOT NULL DEFAULT 0,
                 fitness_message_count BIGINT NOT NULL DEFAULT 1,
@@ -483,6 +487,12 @@ impl AvalancheCacheGuard {
             )",
         )
         .execute(&mut connection)?;
+        ensure_sqlite_column(
+            &mut connection,
+            "avalanche_cache_inputs",
+            "contents_have_been_inverted",
+            "contents_have_been_inverted BOOLEAN NOT NULL DEFAULT 0",
+        )?;
         ensure_sqlite_column(
             &mut connection,
             "avalanche_cache_inputs",
@@ -683,6 +693,7 @@ fn serialize_scored_avalanche_input_for_cache(
         r_text: input.input.r.to_string(),
         x_text: input.input.x.to_string(),
         score_match_pct: input.input.score_match_pct,
+        contents_have_been_inverted: input.input.contents_have_been_inverted,
         fitness_score: i64::try_from(input.fitness.fitness_score)
             .map_err(|_| "fitness score exceeds i64 range")?,
         fitness_total_score: i64::try_from(input.fitness.fitness_total_score)
@@ -753,6 +764,7 @@ fn deserialize_scored_avalanche_input_row(
         r: row.r_text.parse::<BigUint>()?,
         x: row.x_text.parse::<BigUint>()?,
         score_match_pct: row.score_match_pct,
+        contents_have_been_inverted: row.contents_have_been_inverted,
         message_bits: PackedBits::from_bytes_le(
             &row.message_bits,
             usize::try_from(row.message_bit_len)

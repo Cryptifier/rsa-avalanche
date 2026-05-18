@@ -35,6 +35,8 @@ pub(crate) struct CachedScoredInputSummary {
     pub(crate) batch_candidate_index: usize,
     pub(crate) message_index: usize,
     pub(crate) score_match_pct: f64,
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) contents_have_been_inverted: bool,
     pub(crate) r: BigUint,
     pub(crate) x: BigUint,
     pub(crate) fitness: AvalancheFitnessScore,
@@ -1350,6 +1352,7 @@ pub(crate) fn load_cached_scored_input_summaries(
                         message_index: usize::try_from(row.message_index)
                             .map_err(|_| "cached message index exceeds usize range".to_string())?,
                         score_match_pct: row.score_match_pct,
+                        contents_have_been_inverted: row.contents_have_been_inverted,
                         r: row
                             .r_text
                             .parse::<BigUint>()
@@ -1434,6 +1437,7 @@ pub(crate) fn apply_cached_scored_avalanche_fitness_pass(
                         message_index: usize::try_from(row.message_index)
                             .map_err(|_| "cached message index exceeds usize range".to_string())?,
                         score_match_pct: row.score_match_pct,
+                        contents_have_been_inverted: row.contents_have_been_inverted,
                         r: row
                             .r_text
                             .parse::<BigUint>()

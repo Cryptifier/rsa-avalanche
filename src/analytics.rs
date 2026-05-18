@@ -407,6 +407,8 @@ pub struct AvalancheCombinationSampleInput {
     pub x: BigUint,
     /// Match percentage used to score the source candidate.
     pub score_match_pct: f64,
+    /// Whether the source candidate bits were normalized from a detected full-bit inversion.
+    pub contents_have_been_inverted: bool,
     /// HBC ciphertext in the candidate modulus.
     pub hbc_ciphertext_r: BigUint,
     /// Candidate-derived plaintext for this source input.
