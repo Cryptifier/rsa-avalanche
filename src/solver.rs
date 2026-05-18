@@ -30,6 +30,7 @@ pub(crate) struct AvalancheSolverSample {
     pub(crate) tier_index: usize,
     pub(crate) sample_index: usize,
     pub(crate) bits: Vec<bool>,
+    pub(crate) majority_vote_bits: Vec<bool>,
 }
 
 /// Per-batch final-tier data consumed by the cross-batch Avalanche solver.
@@ -547,6 +548,7 @@ mod tests {
             tier_index: 3,
             sample_index,
             bits: bits.to_vec(),
+            majority_vote_bits: bits.to_vec(),
         }
     }
 

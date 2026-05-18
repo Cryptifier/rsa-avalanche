@@ -4121,7 +4121,7 @@ pub(crate) fn recursive_tier_bits<'a>(
 /// Converts one batch of final-tier Avalanche samples into the payload-only solver input format.
 ///
 /// # Parameters
-/// - `engine`: Engine configuration controlling how final-tier sample bits are selected.
+/// - `engine`: Engine configuration controlling how final-tier solver sample bits are selected.
 /// - `batch_number`: One-based analysis batch number used for solver logs.
 /// - `message`: Original plaintext message for the batch.
 /// - `samples`: Final-tier Avalanche samples retained for this batch.
@@ -4149,6 +4149,10 @@ fn build_avalanche_solver_batch(
                 bits: extract_payload_bits_for_accuracy(
                     engine,
                     recursive_tier_bits(sample, engine),
+                ),
+                majority_vote_bits: extract_payload_bits_for_accuracy(
+                    engine,
+                    &sample.majority_vote_bits,
                 ),
             })
             .collect(),
@@ -4183,13 +4187,13 @@ fn build_global_majority_vote_candidate(
     let mut sample_count = 0usize;
     for batch in batches {
         for sample in &batch.samples {
-            if sample.bits.len() != batch.message_bits.len() {
+            if sample.majority_vote_bits.len() != batch.message_bits.len() {
                 return Err(format!(
-                    "avalanche global majority vote sample width mismatch: batch {} tier {} sample {} has {} bits but message has {} bits",
+                    "avalanche global majority vote sample width mismatch: batch {} tier {} sample {} has {} majority-vote bits but message has {} bits",
                     sample.batch_number,
                     sample.tier_index,
                     sample.sample_index,
-                    sample.bits.len(),
+                    sample.majority_vote_bits.len(),
                     batch.message_bits.len()
                 ));
             }
@@ -4217,7 +4221,12 @@ fn build_global_majority_vote_candidate(
 
     let sample_bits = batches
         .iter()
-        .flat_map(|batch| batch.samples.iter().map(|sample| sample.bits.clone()))
+        .flat_map(|batch| {
+            batch
+                .samples
+                .iter()
+                .map(|sample| sample.majority_vote_bits.clone())
+        })
         .collect::<Vec<_>>();
     let majority_distribution =
         majority_vote_with_distribution(&sample_bits, engine.combiner_tie_breaker)
@@ -10817,13 +10826,15 @@ mod tests {
                         batch_number: 1,
                         tier_index: 1,
                         sample_index: 1,
-                        bits: vec![true, false, true],
+                        bits: vec![false, true, false],
+                        majority_vote_bits: vec![true, false, true],
                     },
                     AvalancheSolverSample {
                         batch_number: 1,
                         tier_index: 1,
                         sample_index: 2,
-                        bits: vec![true, true, true],
+                        bits: vec![false, false, false],
+                        majority_vote_bits: vec![true, true, true],
                     },
                 ],
             },
@@ -10834,7 +10845,8 @@ mod tests {
                     batch_number: 2,
                     tier_index: 2,
                     sample_index: 1,
-                    bits: vec![false, false, true],
+                    bits: vec![true, true, false],
+                    majority_vote_bits: vec![false, false, true],
                 }],
             },
         ];
@@ -10864,6 +10876,7 @@ mod tests {
                     tier_index: 1,
                     sample_index: 1,
                     bits: vec![true, false],
+                    majority_vote_bits: vec![true, false],
                 }],
             },
             AvalancheSolverBatch {
@@ -10874,6 +10887,7 @@ mod tests {
                     tier_index: 1,
                     sample_index: 1,
                     bits: vec![false, true],
+                    majority_vote_bits: vec![false, true],
                 }],
             },
         ];
