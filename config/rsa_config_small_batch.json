@@ -104,7 +104,7 @@
     // - 0: score each c^x/r candidate only on the batch's main message.
     // - >0: also test that many extra random messages, rank by the worst padding-bit fitness,
     //   and use the mean padding-bit fitness as a tiebreaker for retained Avalanche inputs.
-    "avalanche_fitness_additional_random_messages": 2,
+    "avalanche_fitness_additional_random_messages": 3,
     // Streaming fitness pruning:
     // - true: keep only the current best retained r/c^x pool as fitness scores are computed.
     // - false: keep all scored inputs until the later batch-level fitness pass runs.
@@ -112,19 +112,19 @@
     // Global Avalanche input uniqueness:
     // - true: retain only a globally unique set with no repeated r or x candidates.
     // - false: allow multiple scored inputs to reuse the same r or x values.
-    "avalanche_unique_r_cx_inputs": true,
+    "avalanche_unique_r_cx_inputs": false,
     // Ordered max-fitness Avalanche seed:
     // - true: include one deterministic Avalanche input built from the highest-ranked retained
     //   candidates in order before randomized sampling fills the remaining sample plans.
     // - false: rely only on randomized retained-input sampling.
-    "avalanche_include_max_fitness_candidates_in_order": true,
+    "avalanche_include_max_fitness_candidates_in_order": false,
     // Cap how many distinct r values can appear in one sampled avalanche input;
     // each selected r still contributes all of its sampled c^x variants.
     "avalanche_combination_mixed_r_candidates": 64,
     "avalanche_combination_samples": 300000, // N: number of sampled combinations evaluated by avalanche per batch.
     "avalanche_combination_size": 100, // Number of scored items taken in each sampled combination.
     "avalanche_combination_pool_size": 100000, // Legacy compatibility field; runtime sampling now always uses the full batch-sized pool.
-    "avalanche_combination_recursion_depth": 2, // Run one recursive Avalanche tier on top of the sampled-input tier.
+    "avalanche_combination_recursion_depth": 3, // Run one recursive Avalanche tier on top of the sampled-input tier.
     "avalanche_combination_recursive_group_size": [16, 4, 2], // Per-recursive-tier group sizes; later recursive tiers reuse the last entry.
     "avalanche_combination_recursive_resample_count": [300000, 300000, 300000], // Per-recursive-tier resample counts; 0 preserves one-pass regrouping and later recursive tiers reuse the last entry.
     // Hamming-distance pruning keeps a central percentile band of scored items
@@ -135,7 +135,7 @@
     // Majority-vote mode turns each sampled combination into per-bit frequencies
     // for the beam, then smooths them before ranking plaintext hypotheses.
     "avalanche_combination_majority_vote": true, // Use per-bit majority-vote probabilities from each sampled combination.
-    "avalanche_combination_sample_smoothing": true, // Apply Jeffreys smoothing to the sampled majority-vote probabilities before beam search.
+    "avalanche_combination_sample_smoothing": false, // Apply Jeffreys smoothing to the sampled majority-vote probabilities before beam search.
     "avalanche_combination_majority_vote_print": true, // Print a separate sampled-combination majority-vote summary alongside the beam output.
     "avalanche_statistics_collection": false, // Collect recursive Avalanche tier statistics and other heavy analytics payloads.
     // Allow batches to mix different r values while still perturbing the
