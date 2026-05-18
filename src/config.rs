@@ -2423,10 +2423,17 @@ mod tests {
         let config = load_config(temp_dir.join("config.json").to_str().expect("utf8 path"))
             .expect("load config");
 
-        assert_eq!(config.engine.avalanche_fitness_additional_random_messages, 3);
+        assert_eq!(
+            config.engine.avalanche_fitness_additional_random_messages,
+            3
+        );
         assert!(config.engine.avalanche_fitness_streaming_prune);
         assert!(config.engine.avalanche_unique_r_cx_inputs);
-        assert!(!config.engine.avalanche_include_max_fitness_candidates_in_order);
+        assert!(
+            !config
+                .engine
+                .avalanche_include_max_fitness_candidates_in_order
+        );
         assert!(config.engine.sqlite_in_memory);
 
         let _ = fs::remove_dir_all(&temp_dir);

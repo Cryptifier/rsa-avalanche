@@ -22,8 +22,8 @@ use crate::analytics::{
 };
 use crate::avalanche::AvalancheNode;
 use crate::config::EngineConfig;
-use crate::helpers::PackedBits;
 use crate::fitness::RankedScoredAvalancheInput;
+use crate::helpers::PackedBits;
 use crate::methods::{
     ScoredAvalancheInput, ScoredAvalancheInputDetail, SelectedAvalancheSample, recursive_tier_bits,
 };
@@ -335,7 +335,10 @@ fn resolve_avalanche_cache_connection_target(
     engine: &EngineConfig,
 ) -> (String, PathBuf, Option<PathBuf>) {
     if engine.sqlite_in_memory {
-        let name = format!("file:rsa_avalanche_{}?mode=memory&cache=shared", seed.unwrap_or(0));
+        let name = format!(
+            "file:rsa_avalanche_{}?mode=memory&cache=shared",
+            seed.unwrap_or(0)
+        );
         let display_path = PathBuf::from(&name);
         (name, display_path, None)
     } else {

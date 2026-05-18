@@ -361,7 +361,11 @@ fn compare_ranked_scored_avalanche_inputs(
                 .score_match_pct
                 .total_cmp(&left.input.score_match_pct)
         })
-        .then_with(|| left.input.batch_candidate_index.cmp(&right.input.batch_candidate_index))
+        .then_with(|| {
+            left.input
+                .batch_candidate_index
+                .cmp(&right.input.batch_candidate_index)
+        })
         .then_with(|| left.input.message_index.cmp(&right.input.message_index))
         .then_with(|| left.input.x.cmp(&right.input.x))
 }
@@ -521,7 +525,10 @@ impl StreamingScoredAvalancheFitnessPool {
         let ranked_inputs = inputs
             .into_iter()
             .map(|input| RankedScoredAvalancheInput {
-                fitness: single_message_avalanche_fitness_score(&input.message_bits, self.fitness_bit_width),
+                fitness: single_message_avalanche_fitness_score(
+                    &input.message_bits,
+                    self.fitness_bit_width,
+                ),
                 input,
             })
             .collect::<Vec<_>>();
@@ -545,8 +552,11 @@ impl StreamingScoredAvalancheFitnessPool {
         }
 
         self.total_inputs += ranked_inputs.len();
-        self.total_groups
-            .extend(ranked_inputs.iter().map(|input| input.input.batch_candidate_index));
+        self.total_groups.extend(
+            ranked_inputs
+                .iter()
+                .map(|input| input.input.batch_candidate_index),
+        );
         for ranked_input in ranked_inputs {
             let fitness_score = ranked_input.fitness.fitness_score;
             if self.use_fitness_threshold
@@ -634,11 +644,10 @@ impl StreamingScoredAvalancheFitnessPool {
             );
         }
         if let Some(best_input) = self.ranked_inputs.first() {
-            let best_fitness_pct =
-                normalize_avalanche_fitness_score(
-                    best_input.fitness.fitness_score,
-                    self.fitness_bit_width,
-                ) * 100.0;
+            let best_fitness_pct = normalize_avalanche_fitness_score(
+                best_input.fitness.fitness_score,
+                self.fitness_bit_width,
+            ) * 100.0;
             let best_mean_fitness_pct = normalize_avalanche_fitness_mean_score(
                 best_input.fitness.fitness_total_score,
                 self.fitness_bit_width,
@@ -907,10 +916,7 @@ pub(crate) fn apply_ranked_scored_avalanche_fitness_pass(
         .into_par_iter()
         .filter(|input| {
             !use_fitness_threshold
-                || normalize_avalanche_fitness_score(
-                    input.fitness.fitness_score,
-                    fitness_bit_width,
-                )
+                || normalize_avalanche_fitness_score(input.fitness.fitness_score, fitness_bit_width)
                     >= fitness_threshold
         })
         .collect::<Vec<_>>();
@@ -947,10 +953,8 @@ pub(crate) fn apply_ranked_scored_avalanche_fitness_pass(
     );
     if let Some(best_input) = ranked_inputs.first() {
         let best_fitness_pct =
-            normalize_avalanche_fitness_score(
-                best_input.fitness.fitness_score,
-                fitness_bit_width,
-            ) * 100.0;
+            normalize_avalanche_fitness_score(best_input.fitness.fitness_score, fitness_bit_width)
+                * 100.0;
         let best_mean_fitness_pct = normalize_avalanche_fitness_mean_score(
             best_input.fitness.fitness_total_score,
             fitness_bit_width,
@@ -1439,12 +1443,16 @@ pub(crate) fn apply_cached_scored_avalanche_fitness_pass(
                             .parse::<BigUint>()
                             .map_err(|err| err.to_string())?,
                         fitness: AvalancheFitnessScore {
-                            fitness_score: usize::try_from(row.fitness_score)
-                                .map_err(|_| "cached fitness score exceeds usize range".to_string())?,
-                            fitness_total_score: usize::try_from(row.fitness_total_score)
-                                .map_err(|_| "cached fitness total score exceeds usize range".to_string())?,
+                            fitness_score: usize::try_from(row.fitness_score).map_err(|_| {
+                                "cached fitness score exceeds usize range".to_string()
+                            })?,
+                            fitness_total_score: usize::try_from(row.fitness_total_score).map_err(
+                                |_| "cached fitness total score exceeds usize range".to_string(),
+                            )?,
                             fitness_message_count: usize::try_from(row.fitness_message_count)
-                                .map_err(|_| "cached fitness message count exceeds usize range".to_string())?,
+                                .map_err(|_| {
+                                    "cached fitness message count exceeds usize range".to_string()
+                                })?,
                         },
                     })
                 })
@@ -1510,10 +1518,8 @@ pub(crate) fn apply_cached_scored_avalanche_fitness_pass(
     );
     if let Some(best_input) = ranked_inputs.first() {
         let best_fitness_pct =
-            normalize_avalanche_fitness_score(
-                best_input.fitness.fitness_score,
-                fitness_bit_width,
-            ) * 100.0;
+            normalize_avalanche_fitness_score(best_input.fitness.fitness_score, fitness_bit_width)
+                * 100.0;
         let best_mean_fitness_pct = normalize_avalanche_fitness_mean_score(
             best_input.fitness.fitness_total_score,
             fitness_bit_width,
