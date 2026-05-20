@@ -58,6 +58,12 @@ pub struct AnalyticsCliArgs {
     pub avalanche_probability_spread_exponent: f64,
     /// Number of avalanche combination samples evaluated per batch.
     pub avalanche_combination_samples: u64,
+    /// Whether the cross-batch Avalanche solver is enabled.
+    pub avalanche_solver_enable: bool,
+    /// Whether Avalanche logs the global majority vote across all final-tier outputs.
+    pub avalanche_solver_global_log_enable: bool,
+    /// Maximum number of differing bit positions the cross-batch Avalanche solver may brute-force.
+    pub avalanche_solver_max_bits: usize,
     /// Legacy sampled-width setting retained for compatibility with older configs.
     pub avalanche_combination_size: usize,
     /// Number of distinct r candidates mixed into each avalanche combination sample.
@@ -66,10 +72,10 @@ pub struct AnalyticsCliArgs {
     pub avalanche_combination_pool_size: usize,
     /// Number of Avalanche tiers to execute, including the initial sampled-input tier.
     pub avalanche_combination_recursion_depth: usize,
-    /// Number of prior-tier samples grouped into each recursive Avalanche call.
-    pub avalanche_combination_recursive_group_size: usize,
-    /// Number of recursive samples produced per subsequent Avalanche tier; `0` preserves one-pass grouping.
-    pub avalanche_combination_recursive_resample_count: usize,
+    /// Per-recursive-tier group sizes, reusing the last entry when recursion exceeds the configured array.
+    pub avalanche_combination_recursive_group_size: Vec<usize>,
+    /// Per-recursive-tier resample counts, reusing the last entry when recursion exceeds the configured array.
+    pub avalanche_combination_recursive_resample_count: Vec<usize>,
     /// Whether sampled avalanche prunes the scored-input pool by Hamming-distance percentile before sampling.
     pub avalanche_combination_hamming_distance_prune: bool,
     /// Central percentile of Hamming distances retained when sampled-avalanche pruning is enabled.
@@ -82,6 +88,12 @@ pub struct AnalyticsCliArgs {
     pub avalanche_combination_sample_smoothing: bool,
     /// Whether sampled avalanche prints a separate majority-vote summary for the selected sample.
     pub avalanche_combination_majority_vote_print: bool,
+    /// Whether final-tier sampled Avalanche reports near-center beam probabilities in the session log.
+    pub avalanche_report_biases: bool,
+    /// Maximum absolute distance from `0.5` retained in final-tier sampled Avalanche bias reports.
+    pub avalanche_center_threshold: f64,
+    /// Whether center-bias session reporting should keep only the best overall Avalanche candidate.
+    pub avalanche_center_threshold_best: bool,
     /// Whether recursive Avalanche tiers carry forward the top beam-search bits instead of majority-vote bits.
     pub avalanche_use_top_beam: bool,
     /// Whether all sampled-avalanche combinations were retained in memory during the run.
@@ -100,6 +112,16 @@ pub struct AnalyticsCliArgs {
     pub avalanche_fitness_r_candidate_limit: usize,
     /// Secondary retention dimension used to derive the global retained-input cap after fitness preprocessing.
     pub avalanche_fitness_cx_candidate_limit: usize,
+    /// Number of additional random messages used to test padding fitness for each retained `c^x/r` input.
+    pub avalanche_fitness_additional_random_messages: usize,
+    /// Whether batch scoring incrementally pruned the fitness-ranked Avalanche pool while candidates were processed.
+    pub avalanche_fitness_streaming_prune: bool,
+    /// Whether sampled Avalanche enforced a globally unique set of `r` and `x` inputs.
+    pub avalanche_unique_r_cx_inputs: bool,
+    /// Whether sampled Avalanche always included one deterministic ordered plan from the highest-ranked retained inputs.
+    pub avalanche_include_max_fitness_candidates_in_order: bool,
+    /// Whether the Avalanche cache SQLite database was kept in memory instead of on disk.
+    pub sqlite_in_memory: bool,
     /// Expected bit width for decryptions.
     pub bits_decrypt: Option<u32>,
     /// Optional CLI override for speculative r-candidate target exponent.
@@ -127,18 +149,24 @@ pub(crate) struct AnalyticsCliInfo {
     avalanche_beam_top_k: usize,
     avalanche_probability_spread_exponent: f64,
     avalanche_combination_samples: u64,
+    avalanche_solver_enable: bool,
+    avalanche_solver_global_log_enable: bool,
+    avalanche_solver_max_bits: usize,
     avalanche_combination_size: usize,
     avalanche_combination_mixed_r_candidates: usize,
     avalanche_combination_pool_size: usize,
     avalanche_combination_recursion_depth: usize,
-    avalanche_combination_recursive_group_size: usize,
-    avalanche_combination_recursive_resample_count: usize,
+    avalanche_combination_recursive_group_size: Vec<usize>,
+    avalanche_combination_recursive_resample_count: Vec<usize>,
     avalanche_combination_hamming_distance_prune: bool,
     avalanche_combination_hamming_distance_keep_percentile: f64,
     avalanche_combination_hamming_distance_outlier_preference_pct: f64,
     avalanche_combination_majority_vote: bool,
     avalanche_combination_sample_smoothing: bool,
     avalanche_combination_majority_vote_print: bool,
+    avalanche_report_biases: bool,
+    avalanche_center_threshold: f64,
+    avalanche_center_threshold_best: bool,
     avalanche_use_top_beam: bool,
     avalanche_combination_keep_all_samples_in_memory: bool,
     avalanche_statistics_collection: bool,
@@ -148,6 +176,11 @@ pub(crate) struct AnalyticsCliInfo {
     avalanche_fitness_bit_width: usize,
     avalanche_fitness_r_candidate_limit: usize,
     avalanche_fitness_cx_candidate_limit: usize,
+    avalanche_fitness_additional_random_messages: usize,
+    avalanche_fitness_streaming_prune: bool,
+    avalanche_unique_r_cx_inputs: bool,
+    avalanche_include_max_fitness_candidates_in_order: bool,
+    sqlite_in_memory: bool,
     bits_decrypt: Option<u32>,
     r_candidate_target_exponent: Option<BigDecimal>,
     r_candidate_target_exponent_minimum: Option<BigDecimal>,
@@ -326,6 +359,9 @@ pub struct RCandidateAccuracyBatch {
     /// Per-tier sample-accuracy statistics for recursive Avalanche execution.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub avalanche_tier_statistics: Vec<AvalancheTierStatistics>,
+    /// Filtered final-tier near-center bias reports retained for session-log output.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub avalanche_final_tier_bias_reports: Vec<AvalancheFinalTierBiasReport>,
     /// Detailed avalanche combination sample results for the batch.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub avalanche_combination_samples: Vec<AvalancheCombinationSample>,
@@ -380,6 +416,8 @@ pub struct AvalancheCombinationSampleInput {
     pub x: BigUint,
     /// Match percentage used to score the source candidate.
     pub score_match_pct: f64,
+    /// Whether the source candidate bits were normalized from a detected full-bit inversion.
+    pub contents_have_been_inverted: bool,
     /// HBC ciphertext in the candidate modulus.
     pub hbc_ciphertext_r: BigUint,
     /// Candidate-derived plaintext for this source input.
@@ -401,6 +439,41 @@ pub struct AvalancheCombinationBeamResult {
     pub hex: String,
     /// Bit width of the candidate.
     pub bit_width: usize,
+}
+
+/// One final-tier beam probability retained because it sits near the `0.5` decision boundary.
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+pub struct AvalancheCenterBiasEntry {
+    /// Zero-based bit position in lsb0 order.
+    pub bit_index_lsb0: usize,
+    /// Final beam probability for predicting bit `1` after normalization and spreading.
+    pub probability_one: f64,
+    /// Signed offset from the `0.5` decision boundary.
+    pub signed_distance_from_half: f64,
+}
+
+/// Filtered near-center bias report for one final-tier sampled Avalanche output.
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+pub struct AvalancheFinalTierBiasReport {
+    /// One-based final Avalanche tier index.
+    pub tier_index: usize,
+    /// One-based sample index within the final tier.
+    pub sample_index: usize,
+    /// Near-center bit probabilities retained for the sample.
+    pub center_biases: Vec<AvalancheCenterBiasEntry>,
+}
+
+/// Filtered near-center bias report for the best overall Avalanche result in one run.
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+pub struct AvalancheBestCenterBiasReport {
+    /// One-based analysis batch number containing the best overall Avalanche result.
+    pub batch_number: usize,
+    /// One-based final Avalanche tier index.
+    pub tier_index: usize,
+    /// One-based sample index within the final tier.
+    pub sample_index: usize,
+    /// Near-center bit probabilities retained for the best overall sample.
+    pub center_biases: Vec<AvalancheCenterBiasEntry>,
 }
 
 /// Serialized avalanche combination sample including beam-search output.
@@ -567,6 +640,9 @@ impl SessionAnalytics {
             avalanche_beam_top_k: args.avalanche_beam_top_k,
             avalanche_probability_spread_exponent: args.avalanche_probability_spread_exponent,
             avalanche_combination_samples: args.avalanche_combination_samples,
+            avalanche_solver_enable: args.avalanche_solver_enable,
+            avalanche_solver_global_log_enable: args.avalanche_solver_global_log_enable,
+            avalanche_solver_max_bits: args.avalanche_solver_max_bits,
             avalanche_combination_size: args.avalanche_combination_size,
             avalanche_combination_mixed_r_candidates: args.avalanche_combination_mixed_r_candidates,
             avalanche_combination_pool_size: args.avalanche_combination_pool_size,
@@ -585,6 +661,9 @@ impl SessionAnalytics {
             avalanche_combination_sample_smoothing: args.avalanche_combination_sample_smoothing,
             avalanche_combination_majority_vote_print: args
                 .avalanche_combination_majority_vote_print,
+            avalanche_report_biases: args.avalanche_report_biases,
+            avalanche_center_threshold: args.avalanche_center_threshold,
+            avalanche_center_threshold_best: args.avalanche_center_threshold_best,
             avalanche_use_top_beam: args.avalanche_use_top_beam,
             avalanche_combination_keep_all_samples_in_memory: args
                 .avalanche_combination_keep_all_samples_in_memory,
@@ -595,6 +674,13 @@ impl SessionAnalytics {
             avalanche_fitness_bit_width: args.avalanche_fitness_bit_width,
             avalanche_fitness_r_candidate_limit: args.avalanche_fitness_r_candidate_limit,
             avalanche_fitness_cx_candidate_limit: args.avalanche_fitness_cx_candidate_limit,
+            avalanche_fitness_additional_random_messages: args
+                .avalanche_fitness_additional_random_messages,
+            avalanche_fitness_streaming_prune: args.avalanche_fitness_streaming_prune,
+            avalanche_unique_r_cx_inputs: args.avalanche_unique_r_cx_inputs,
+            avalanche_include_max_fitness_candidates_in_order: args
+                .avalanche_include_max_fitness_candidates_in_order,
+            sqlite_in_memory: args.sqlite_in_memory,
             bits_decrypt: args.bits_decrypt,
             r_candidate_target_exponent: args.r_candidate_target_exponent,
             r_candidate_target_exponent_minimum: args.r_candidate_target_exponent_minimum,

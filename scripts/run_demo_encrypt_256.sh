@@ -9,8 +9,41 @@ PLAINTEXT_HEX=${PLAINTEXT_HEX:-""}
 PLAINTEXT=${PLAINTEXT:-""}
 DIFF_SCRIPT=${DIFF_SCRIPT:-"scripts/hex_bit_diff.py"}
 
+RED=$'\033[0;31m'
+GREEN=$'\033[0;32m'
+YELLOW=$'\033[0;33m'
 BLUE=$'\033[0;34m'
 RESET=$'\033[0m'
+AVALANCHE_SOLVER_SUCCESS_MARKER="AVALANCHE SOLVER FOUND MESSAGE"
+
+solver_enabled_for_config() {
+  local config_path=$1
+  if [[ ! -f "${config_path}" ]]; then
+    echo 0
+    return
+  fi
+  if command -v python3 >/dev/null 2>&1; then
+    python3 - "${config_path}" <<'PY'
+import pathlib
+import re
+import sys
+
+path = pathlib.Path(sys.argv[1])
+text = path.read_text()
+text = re.sub(r"/\*.*?\*/", "", text, flags=re.S)
+text = re.sub(r"//.*", "", text)
+print("1" if re.search(r'"avalanche_solver_enable"\s*:\s*true\b', text) else "0")
+PY
+  else
+    if grep -Eq '"avalanche_solver_enable"[[:space:]]*:[[:space:]]*true' "${config_path}"; then
+      echo 1
+    else
+      echo 0
+    fi
+  fi
+}
+
+SOLVER_ENABLED=$(solver_enabled_for_config "${CONFIG}")
 
 if [[ "${RESUME}" != "1" ]]; then
   : > "${SCRIPT_LOG}"
@@ -36,6 +69,8 @@ best_sum=0
 best_count=0
 major_sum=0
 major_count=0
+solver_pass_count=0
+solver_fail_count=0
 
 if [[ -z "${PLAINTEXT_HEX}" && -n "${PLAINTEXT}" ]]; then
   PLAINTEXT_HEX="${PLAINTEXT#0x}"
@@ -62,6 +97,11 @@ fi
 
 echo "Running ${RUNS} demo encrypt iterations with config ${CONFIG}"
 echo "Plaintext (hex): 0x${PLAINTEXT_HEX}"
+if [[ "${SOLVER_ENABLED}" == "1" ]]; then
+  echo "Avalanche solver marker check: enabled"
+else
+  echo "Avalanche solver marker check: disabled"
+fi
 
 for i in $(seq 1 "${RUNS}"); do
   echo ""
@@ -80,6 +120,20 @@ for i in $(seq 1 "${RUNS}"); do
   cargo run --bin demo -- --bits 256 --config "${CONFIG}" --batches 100 --batch-size 3000 --decrypt --ciphertext "0x${ciphertext_hex}" | tee "${decrypt_output}"
   best_case_hex=$(grep -m1 "Recovered (best-case) hex:" "${decrypt_output}" | awk '{print $4}')
   majority_hex=$(grep -m1 "Recovered (majority) hex:" "${decrypt_output}" | awk '{print $4}')
+  solver_status="DISABLED"
+  solver_color="${YELLOW}"
+  if [[ "${SOLVER_ENABLED}" == "1" ]]; then
+    if grep -F -q "${AVALANCHE_SOLVER_SUCCESS_MARKER}" "${decrypt_output}"; then
+      solver_status="SUCCESS"
+      solver_color="${GREEN}"
+      solver_pass_count=$((solver_pass_count + 1))
+    else
+      solver_status="FAIL"
+      solver_color="${RED}"
+      solver_fail_count=$((solver_fail_count + 1))
+      echo "${RED}Avalanche solver failure: ${AVALANCHE_SOLVER_SUCCESS_MARKER} not found in run output.${RESET}"
+    fi
+  fi
 
   if [[ -x "${DIFF_SCRIPT}" ]]; then
     if [[ -n "${best_case_hex}" ]]; then
@@ -119,9 +173,14 @@ for i in $(seq 1 "${RUNS}"); do
     major_avg="N/A"
   fi
   echo "Running averages: best-case ${best_avg}%, majority ${major_avg}%"
+  echo "Avalanche solver status: ${solver_color}${solver_status}${RESET}"
 
   rm -f "${encrypt_output}" "${decrypt_output}"
   progress_bar "${i}" "${RUNS}"
 done
 
 printf "\n"
+echo "Avalanche solver marker check: $( [[ "${SOLVER_ENABLED}" == "1" ]] && echo enabled || echo disabled )"
+if [[ "${SOLVER_ENABLED}" == "1" ]]; then
+  echo "Avalanche solver checks: PASS ${solver_pass_count}, FAIL ${solver_fail_count}"
+fi

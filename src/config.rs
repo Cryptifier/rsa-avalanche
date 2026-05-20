@@ -10,7 +10,7 @@ use std::{
 
 use bigdecimal::BigDecimal;
 use num_bigint::BigUint;
-use serde::Deserialize;
+use serde::{Deserialize, Deserializer};
 
 use crate::r_candidates::RCandidateMode;
 
@@ -149,6 +149,15 @@ pub struct EngineConfig {
     pub analysis_batch_candidates: u64,
     #[serde(default = "default_analysis_batch_batches")]
     pub analysis_batch_batches: u64,
+    /// Whether the final-tier Avalanche solver should compare batch-pair sample products for whole-message recovery.
+    #[serde(default = "default_avalanche_solver_enable")]
+    pub avalanche_solver_enable: bool,
+    /// Whether Avalanche runs should log the global majority vote across every final-tier output.
+    #[serde(default = "default_avalanche_solver_global_log_enable")]
+    pub avalanche_solver_global_log_enable: bool,
+    /// Maximum number of differing sample bits the Avalanche solver may brute-force per batch-pair sample comparison.
+    #[serde(default = "default_avalanche_solver_max_bits")]
+    pub avalanche_solver_max_bits: usize,
     /// Number of avalanche combination samples to evaluate per batch.
     #[serde(default = "default_avalanche_combination_samples")]
     pub avalanche_combination_samples: u64,
@@ -164,12 +173,18 @@ pub struct EngineConfig {
     /// Number of Avalanche tiers to execute, including the initial sampled-input tier.
     #[serde(default = "default_avalanche_combination_recursion_depth")]
     pub avalanche_combination_recursion_depth: usize,
-    /// Number of sample outputs grouped into each subsequent recursive Avalanche call.
-    #[serde(default = "default_avalanche_combination_recursive_group_size")]
-    pub avalanche_combination_recursive_group_size: usize,
-    /// Number of recursive samples to produce per subsequent Avalanche tier; `0` preserves one-pass grouping.
-    #[serde(default = "default_avalanche_combination_recursive_resample_count")]
-    pub avalanche_combination_recursive_resample_count: usize,
+    /// Per-recursive-tier group sizes, reusing the last entry when recursion exceeds the configured array.
+    #[serde(
+        default = "default_avalanche_combination_recursive_group_size",
+        deserialize_with = "deserialize_nonempty_usize_array_or_scalar"
+    )]
+    pub avalanche_combination_recursive_group_size: Vec<usize>,
+    /// Per-recursive-tier resample counts, reusing the last entry when recursion exceeds the configured array.
+    #[serde(
+        default = "default_avalanche_combination_recursive_resample_count",
+        deserialize_with = "deserialize_nonempty_usize_array_or_scalar"
+    )]
+    pub avalanche_combination_recursive_resample_count: Vec<usize>,
     /// Whether sampled avalanche prunes scored inputs to a central Hamming-distance percentile band before sampling.
     #[serde(default = "default_avalanche_combination_hamming_distance_prune")]
     pub avalanche_combination_hamming_distance_prune: bool,
@@ -188,6 +203,15 @@ pub struct EngineConfig {
     /// Whether sampled avalanche prints a separate majority-vote summary for the selected sample.
     #[serde(default = "default_avalanche_combination_majority_vote_print")]
     pub avalanche_combination_majority_vote_print: bool,
+    /// Whether final-tier sampled Avalanche reports near-center beam probabilities in the session log.
+    #[serde(default = "default_avalanche_report_biases")]
+    pub avalanche_report_biases: bool,
+    /// Maximum absolute distance from `0.5` retained in final-tier sampled Avalanche bias reports.
+    #[serde(default = "default_avalanche_center_threshold")]
+    pub avalanche_center_threshold: f64,
+    /// Whether final-tier sampled Avalanche bias reporting should keep only the best overall Avalanche candidate.
+    #[serde(default = "default_avalanche_center_threshold_best")]
+    pub avalanche_center_threshold_best: bool,
     /// Whether recursive Avalanche tiers carry forward the top beam-search bits instead of majority-vote bits.
     #[serde(default = "default_avalanche_use_top_beam")]
     pub avalanche_use_top_beam: bool,
@@ -221,6 +245,22 @@ pub struct EngineConfig {
     /// Minimum normalized zero-count fitness retained by the fitness pass when thresholding is enabled.
     #[serde(default = "default_avalanche_fitness_threshold")]
     pub avalanche_fitness_threshold: f64,
+    /// Percentage of thresholded fitness-ranked candidates logged for each Avalanche batch.
+    #[serde(default = "default_avalanche_fitness_log_top_pct")]
+    pub avalanche_fitness_log_top_pct: f64,
+    /// Number of additional random messages used to test padding-bit fitness for each retained `c^x/r` candidate.
+    #[serde(default = "default_avalanche_fitness_additional_random_messages")]
+    pub avalanche_fitness_additional_random_messages: usize,
+    /// Whether batch scoring should prune the fitness-ranked Avalanche input pool incrementally while candidates are still being processed.
+    #[serde(default = "default_avalanche_fitness_streaming_prune")]
+    pub avalanche_fitness_streaming_prune: bool,
+    /// Whether sampled Avalanche should keep a globally unique set with no repeated `r` or `x` values.
+    #[serde(default = "default_avalanche_unique_r_cx_inputs")]
+    pub avalanche_unique_r_cx_inputs: bool,
+    /// Whether sampled Avalanche should always include one deterministic input built from the
+    /// highest-ranked retained candidates in order before randomized sampling.
+    #[serde(default = "default_avalanche_include_max_fitness_candidates_in_order")]
+    pub avalanche_include_max_fitness_candidates_in_order: bool,
     #[serde(default = "default_same_r_batch")]
     pub same_r_batch: bool,
     #[serde(default = "default_ciphertext_modify")]
@@ -254,6 +294,9 @@ pub struct EngineConfig {
     /// Number of rows per SQLite Avalanche cache page used for batched inserts and reads.
     #[serde(default = "default_sqlite_avalanche_page_size")]
     pub sqlite_avalanche_page_size: usize,
+    /// Whether the Avalanche cache should use a shared in-memory SQLite database instead of an on-disk file.
+    #[serde(default = "default_sqlite_in_memory")]
+    pub sqlite_in_memory: bool,
     /// Whether to sort avalanche candidates by Hamming distance.
     #[serde(default = "default_use_hamming_distance")]
     pub use_hamming_distance: bool,
@@ -388,6 +431,9 @@ impl Default for EngineConfig {
             analysis_batch_messages: default_analysis_batch_messages(),
             analysis_batch_candidates: default_analysis_batch_candidates(),
             analysis_batch_batches: default_analysis_batch_batches(),
+            avalanche_solver_enable: default_avalanche_solver_enable(),
+            avalanche_solver_global_log_enable: default_avalanche_solver_global_log_enable(),
+            avalanche_solver_max_bits: default_avalanche_solver_max_bits(),
             avalanche_combination_samples: default_avalanche_combination_samples(),
             avalanche_combination_size: default_avalanche_combination_size(),
             avalanche_combination_mixed_r_candidates:
@@ -409,6 +455,9 @@ impl Default for EngineConfig {
             ),
             avalanche_combination_majority_vote_print:
                 default_avalanche_combination_majority_vote_print(),
+            avalanche_report_biases: default_avalanche_report_biases(),
+            avalanche_center_threshold: default_avalanche_center_threshold(),
+            avalanche_center_threshold_best: default_avalanche_center_threshold_best(),
             avalanche_use_top_beam: default_avalanche_use_top_beam(),
             avalanche_combination_keep_all_samples_in_memory:
                 default_avalanche_combination_keep_all_samples_in_memory(),
@@ -421,6 +470,13 @@ impl Default for EngineConfig {
             avalanche_fitness_cx_candidate_limit: default_avalanche_fitness_cx_candidate_limit(),
             avalanche_fitness_use_threshold: default_avalanche_fitness_use_threshold(),
             avalanche_fitness_threshold: default_avalanche_fitness_threshold(),
+            avalanche_fitness_log_top_pct: default_avalanche_fitness_log_top_pct(),
+            avalanche_fitness_additional_random_messages:
+                default_avalanche_fitness_additional_random_messages(),
+            avalanche_fitness_streaming_prune: default_avalanche_fitness_streaming_prune(),
+            avalanche_unique_r_cx_inputs: default_avalanche_unique_r_cx_inputs(),
+            avalanche_include_max_fitness_candidates_in_order:
+                default_avalanche_include_max_fitness_candidates_in_order(),
             same_r_batch: default_same_r_batch(),
             ciphertext_modify: default_ciphertext_modify(),
             oracle_accuracy_threshold: default_oracle_accuracy_threshold(),
@@ -433,6 +489,7 @@ impl Default for EngineConfig {
             sqlite_worker_count: default_sqlite_worker_count(),
             sqlite_db_folder: default_sqlite_db_folder(),
             sqlite_avalanche_page_size: default_sqlite_avalanche_page_size(),
+            sqlite_in_memory: default_sqlite_in_memory(),
             use_hamming_distance: default_use_hamming_distance(),
             mirror_invert_candidates: default_mirror_invert_candidates(),
             override_best_r: None,
@@ -814,6 +871,45 @@ where
     raw.parse::<BigDecimal>().map_err(DeError::custom)
 }
 
+/// Deserializes a non-empty `usize` array from either a scalar or an array.
+///
+/// # Parameters
+/// - `deserializer`: Serde deserializer provided by the caller.
+///
+/// # Returns
+/// - `Result<Vec<usize>, D::Error>`: Parsed array, wrapping scalars into one-item vectors.
+///
+/// # Expected Output
+/// - Returns a parse error if the input is not a `usize` or `usize` array.
+fn deserialize_nonempty_usize_array_or_scalar<'de, D>(
+    deserializer: D,
+) -> Result<Vec<usize>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    use serde::de::Error as DeError;
+
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum UsizeArrayOrScalar {
+        Scalar(usize),
+        Array(Vec<usize>),
+    }
+
+    let values = match UsizeArrayOrScalar::deserialize(deserializer)? {
+        UsizeArrayOrScalar::Scalar(value) => vec![value],
+        UsizeArrayOrScalar::Array(values) => values,
+    };
+
+    if values.is_empty() {
+        return Err(DeError::custom(
+            "expected at least one recursive tier value, got an empty array",
+        ));
+    }
+
+    Ok(values)
+}
+
 /// Default flag for RSA key generation.
 ///
 /// # Parameters
@@ -1192,6 +1288,48 @@ fn default_analysis_batch_batches() -> u64 {
     1
 }
 
+/// Default enable flag for the cross-batch Avalanche solver.
+///
+/// # Parameters
+/// - None.
+///
+/// # Returns
+/// - `bool`: `false` so the solver only runs when explicitly enabled in JSON config.
+///
+/// # Expected Output
+/// - Returns a constant default value; no side effects.
+fn default_avalanche_solver_enable() -> bool {
+    false
+}
+
+/// Default enable flag for logging the global final-tier Avalanche majority vote.
+///
+/// # Parameters
+/// - None.
+///
+/// # Returns
+/// - `bool`: `true` so runs log the aggregate final-tier majority vote by default.
+///
+/// # Expected Output
+/// - Returns a constant default value; no side effects.
+fn default_avalanche_solver_global_log_enable() -> bool {
+    true
+}
+
+/// Default maximum flip count for each Avalanche solver brute-force search.
+///
+/// # Parameters
+/// - None.
+///
+/// # Returns
+/// - `usize`: Default maximum number of differing bit positions the solver may brute-force.
+///
+/// # Expected Output
+/// - Returns a constant default value; no side effects.
+fn default_avalanche_solver_max_bits() -> usize {
+    8
+}
+
 /// Default number of avalanche combination samples to evaluate per batch.
 ///
 /// # Parameters
@@ -1268,12 +1406,12 @@ fn default_avalanche_combination_recursion_depth() -> usize {
 /// - None.
 ///
 /// # Returns
-/// - `usize`: Number of prior-tier samples grouped into each subsequent recursive call.
+/// - `Vec<usize>`: Default per-tier group sizes, starting with one entry for the first recursive tier.
 ///
 /// # Expected Output
 /// - Returns a constant default value; no side effects.
-fn default_avalanche_combination_recursive_group_size() -> usize {
-    8
+fn default_avalanche_combination_recursive_group_size() -> Vec<usize> {
+    vec![8]
 }
 
 /// Default recursive resample count for sampled Avalanche tiers.
@@ -1282,12 +1420,12 @@ fn default_avalanche_combination_recursive_group_size() -> usize {
 /// - None.
 ///
 /// # Returns
-/// - `usize`: `0` so recursive tiers preserve legacy one-pass regrouping unless explicitly enabled.
+/// - `Vec<usize>`: Default per-tier resample counts, starting with one entry for the first recursive tier.
 ///
 /// # Expected Output
 /// - Returns a constant default value; no side effects.
-fn default_avalanche_combination_recursive_resample_count() -> usize {
-    0
+fn default_avalanche_combination_recursive_resample_count() -> Vec<usize> {
+    vec![0]
 }
 
 /// Default flag for pruning sampled-avalanche inputs by Hamming-distance percentiles.
@@ -1385,6 +1523,48 @@ fn default_avalanche_combination_sample_smoothing() -> bool {
 /// # Expected Output
 /// - Returns a constant default value; no side effects.
 fn default_avalanche_combination_majority_vote_print() -> bool {
+    true
+}
+
+/// Default flag for writing filtered final-tier Avalanche bias reports into the session log.
+///
+/// # Parameters
+/// - None.
+///
+/// # Returns
+/// - `bool`: `false` so runs avoid extra bias-report payloads unless explicitly enabled.
+///
+/// # Expected Output
+/// - Returns the default reporting flag; no stdout/stderr output.
+fn default_avalanche_report_biases() -> bool {
+    false
+}
+
+/// Default half-width around `0.5` retained in final-tier Avalanche bias reports.
+///
+/// # Parameters
+/// - None.
+///
+/// # Returns
+/// - `f64`: `0.01`, meaning reported probabilities must lie in `[0.49, 0.51]`.
+///
+/// # Expected Output
+/// - Returns the default center threshold; no stdout/stderr output.
+fn default_avalanche_center_threshold() -> f64 {
+    0.01
+}
+
+/// Default mode for final-tier Avalanche center-bias session reporting.
+///
+/// # Parameters
+/// - None.
+///
+/// # Returns
+/// - `bool`: `true` so center-bias reports default to the single best overall Avalanche result.
+///
+/// # Expected Output
+/// - Returns the default best-only reporting mode; no stdout/stderr output.
+fn default_avalanche_center_threshold_best() -> bool {
     true
 }
 
@@ -1526,6 +1706,76 @@ fn default_avalanche_fitness_use_threshold() -> bool {
 /// - Returns a constant default value; no side effects.
 fn default_avalanche_fitness_threshold() -> f64 {
     0.580
+}
+
+/// Default top-percentage of thresholded Avalanche fitness entries printed to the batch log.
+///
+/// # Parameters
+/// - None.
+///
+/// # Returns
+/// - `f64`: Default fraction of retained fitness-ranked candidates included in batch logging.
+///
+/// # Expected Output
+/// - Returns a constant default value; no side effects.
+fn default_avalanche_fitness_log_top_pct() -> f64 {
+    0.30
+}
+
+/// Default number of additional random messages used to test padding fitness per candidate.
+///
+/// # Parameters
+/// - None.
+///
+/// # Returns
+/// - `usize`: Default number of extra random-message fitness checks.
+///
+/// # Expected Output
+/// - Returns a constant default value; no side effects.
+fn default_avalanche_fitness_additional_random_messages() -> usize {
+    0
+}
+
+/// Default flag for streaming Avalanche fitness pruning during batch scoring.
+///
+/// # Parameters
+/// - None.
+///
+/// # Returns
+/// - `bool`: Default enable state for incremental fitness-ranked pruning.
+///
+/// # Expected Output
+/// - Returns a constant default value; no side effects.
+fn default_avalanche_fitness_streaming_prune() -> bool {
+    false
+}
+
+/// Default flag for enforcing globally unique `r` and `x` Avalanche inputs.
+///
+/// # Parameters
+/// - None.
+///
+/// # Returns
+/// - `bool`: Default uniqueness-enforcement setting.
+///
+/// # Expected Output
+/// - Returns a constant default value; no side effects.
+fn default_avalanche_unique_r_cx_inputs() -> bool {
+    false
+}
+
+/// Default flag for seeding sampled Avalanche with the top retained candidates in rank order.
+///
+/// # Parameters
+/// - None.
+///
+/// # Returns
+/// - `bool`: Default ordered-seed enable state.
+///
+/// # Expected Output
+/// - Returns a constant default value; no side effects.
+fn default_avalanche_include_max_fitness_candidates_in_order() -> bool {
+    true
 }
 
 /// Default flag for using the same r candidate across a batch.
@@ -1694,6 +1944,20 @@ fn default_sqlite_db_folder() -> String {
 /// - Returns a constant default value; no side effects.
 fn default_sqlite_avalanche_page_size() -> usize {
     4_096
+}
+
+/// Default flag for keeping the Avalanche cache SQLite database in memory.
+///
+/// # Parameters
+/// - None.
+///
+/// # Returns
+/// - `bool`: Default SQLite cache storage mode.
+///
+/// # Expected Output
+/// - Returns a constant default value; no side effects.
+fn default_sqlite_in_memory() -> bool {
+    false
 }
 
 /// Default toggle for Hamming-distance sorting in avalanche candidate ordering.
@@ -1941,7 +2205,14 @@ mod tests {
 
         assert!(engine.avalanche_use_top_beam);
         assert!(engine.avalanche_statistics_collection);
-        assert_eq!(engine.avalanche_combination_recursive_resample_count, 0);
+        assert!(!engine.avalanche_report_biases);
+        assert_eq!(engine.avalanche_center_threshold, 0.01);
+        assert!(engine.avalanche_center_threshold_best);
+        assert_eq!(engine.avalanche_combination_recursive_group_size, vec![8]);
+        assert_eq!(
+            engine.avalanche_combination_recursive_resample_count,
+            vec![0]
+        );
         assert!(!engine.avalanche_combination_hamming_distance_prune);
         assert_eq!(
             engine.avalanche_combination_hamming_distance_keep_percentile,
@@ -1951,14 +2222,22 @@ mod tests {
             engine.avalanche_combination_hamming_distance_outlier_preference_pct,
             0.0
         );
+        assert!(!engine.avalanche_solver_enable);
+        assert_eq!(engine.avalanche_solver_max_bits, 8);
         assert!(engine.avalanche_fitness_use_threshold);
         assert!((engine.avalanche_fitness_threshold - 0.580).abs() < f64::EPSILON);
+        assert!((engine.avalanche_fitness_log_top_pct - 0.30).abs() < f64::EPSILON);
+        assert_eq!(engine.avalanche_fitness_additional_random_messages, 0);
+        assert!(!engine.avalanche_fitness_streaming_prune);
+        assert!(!engine.avalanche_unique_r_cx_inputs);
+        assert!(engine.avalanche_include_max_fitness_candidates_in_order);
         assert_eq!(engine.sqlite_soft_heap, 10 * 1024 * 1024 * 1024);
         assert_eq!(engine.sqlite_hard_heap, 10 * 1024 * 1024 * 1024);
         assert_eq!(engine.sqlite_mmap_size, 10 * 1024 * 1024 * 1024);
         assert_eq!(engine.sqlite_worker_count, 16);
         assert_eq!(engine.sqlite_db_folder, "/tmp");
         assert_eq!(engine.sqlite_avalanche_page_size, 4_096);
+        assert!(!engine.sqlite_in_memory);
     }
 
     #[test]
@@ -2085,6 +2364,161 @@ mod tests {
         assert_eq!(config.rsa_keypair.p, None);
         assert_eq!(config.rsa_keypair.q, None);
         assert_eq!(config.rsa_keypair.private_keyfile, "keys/private.yaml");
+
+        let _ = fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn test_load_config_accepts_scalar_recursive_tier_values() {
+        let temp_dir = temp_path("recursive_scalar_values");
+        fs::create_dir_all(&temp_dir).expect("create temp config dir");
+        fs::write(
+            temp_dir.join("config.json"),
+            concat!(
+                "{\n",
+                "  \"engine\": {\n",
+                "    \"avalanche_combination_recursive_group_size\": 16,\n",
+                "    \"avalanche_combination_recursive_resample_count\": 2048\n",
+                "  }\n",
+                "}\n",
+            ),
+        )
+        .expect("write config");
+
+        let config = load_config(temp_dir.join("config.json").to_str().expect("utf8 path"))
+            .expect("load config");
+
+        assert_eq!(
+            config.engine.avalanche_combination_recursive_group_size,
+            vec![16]
+        );
+        assert_eq!(
+            config.engine.avalanche_combination_recursive_resample_count,
+            vec![2048]
+        );
+
+        let _ = fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn test_load_config_accepts_recursive_tier_arrays() {
+        let temp_dir = temp_path("recursive_array_values");
+        fs::create_dir_all(&temp_dir).expect("create temp config dir");
+        fs::write(
+            temp_dir.join("config.json"),
+            concat!(
+                "{\n",
+                "  \"engine\": {\n",
+                "    \"avalanche_combination_recursive_group_size\": [16, 8],\n",
+                "    \"avalanche_combination_recursive_resample_count\": [2048, 0]\n",
+                "  }\n",
+                "}\n",
+            ),
+        )
+        .expect("write config");
+
+        let config = load_config(temp_dir.join("config.json").to_str().expect("utf8 path"))
+            .expect("load config");
+
+        assert_eq!(
+            config.engine.avalanche_combination_recursive_group_size,
+            vec![16, 8]
+        );
+        assert_eq!(
+            config.engine.avalanche_combination_recursive_resample_count,
+            vec![2048, 0]
+        );
+
+        let _ = fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn test_load_config_accepts_fitness_log_top_percentage() {
+        let temp_dir = temp_path("fitness_log_top_percentage");
+        fs::create_dir_all(&temp_dir).expect("create temp config dir");
+        fs::write(
+            temp_dir.join("config.json"),
+            concat!(
+                "{\n",
+                "  \"engine\": {\n",
+                "    \"avalanche_fitness_log_top_pct\": 0.45\n",
+                "  }\n",
+                "}\n",
+            ),
+        )
+        .expect("write config");
+
+        let config = load_config(temp_dir.join("config.json").to_str().expect("utf8 path"))
+            .expect("load config");
+
+        assert!((config.engine.avalanche_fitness_log_top_pct - 0.45).abs() < f64::EPSILON);
+
+        let _ = fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn test_load_config_accepts_streaming_prune_unique_inputs_and_in_memory_sqlite() {
+        let temp_dir = temp_path("stream_prune_unique_sqlite");
+        fs::create_dir_all(&temp_dir).expect("create temp config dir");
+        fs::write(
+            temp_dir.join("config.json"),
+            concat!(
+                "{\n",
+                "  \"engine\": {\n",
+                "    \"avalanche_fitness_additional_random_messages\": 3,\n",
+                "    \"avalanche_fitness_streaming_prune\": true,\n",
+                "    \"avalanche_unique_r_cx_inputs\": true,\n",
+                "    \"avalanche_include_max_fitness_candidates_in_order\": false,\n",
+                "    \"sqlite_in_memory\": true\n",
+                "  }\n",
+                "}\n",
+            ),
+        )
+        .expect("write config");
+
+        let config = load_config(temp_dir.join("config.json").to_str().expect("utf8 path"))
+            .expect("load config");
+
+        assert_eq!(
+            config.engine.avalanche_fitness_additional_random_messages,
+            3
+        );
+        assert!(config.engine.avalanche_fitness_streaming_prune);
+        assert!(config.engine.avalanche_unique_r_cx_inputs);
+        assert!(
+            !config
+                .engine
+                .avalanche_include_max_fitness_candidates_in_order
+        );
+        assert!(config.engine.sqlite_in_memory);
+
+        let _ = fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn test_load_config_accepts_avalanche_solver_settings() {
+        let temp_dir = temp_path("avalanche_solver_settings");
+        fs::create_dir_all(&temp_dir).expect("create temp config dir");
+        fs::write(
+            temp_dir.join("config.json"),
+            concat!(
+                "{\n",
+                "  \"engine\": {\n",
+                "    \"avalanche_solver_enable\": true,\n",
+                "    \"avalanche_solver_global_log_enable\": false,\n",
+                "    \"avalanche_solver_max_bits\": 5\n",
+                "  }\n",
+                "}\n",
+            ),
+        )
+        .expect("write config");
+
+        let config = load_config(temp_dir.join("config.json").to_str().expect("utf8 path"))
+            .expect("load config");
+
+        assert!(config.engine.avalanche_solver_enable);
+        assert!(!config.engine.avalanche_solver_global_log_enable);
+        assert_eq!(config.engine.avalanche_solver_max_bits, 5);
 
         let _ = fs::remove_dir_all(&temp_dir);
     }

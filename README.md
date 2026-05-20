@@ -5,6 +5,11 @@ Proof of concept by Nicholas LaRoche <nlaroche@cryptifier.dev>.
 
 ![Example output from `analysis`](95pct.png)
 
+# Resource Requirements
+- Use a ```c8a.12xlarge``` AWS instance with 48 AMD EPYC cores, 80,000 provisioned IOPS and 1,000 MB/s bandwidth for optimal performance.
+- Choose a disk size of at least 100 GB to accommodate the caching database and session artifacts.
+- Keep statistics logging disabled unless you want to track per-run scoring details in the database, which can significantly increase runtime and disk usage.
+
 # Theory
 - Use regular RSA encryption using a large modulus `N = pq` where `p` and `q` are large private primes.
 - Use homomorphic base switching to go from mod `N` to mod `N^0.850` where `N^0.850` is an easily factored modulus with at least three factors.
@@ -18,6 +23,8 @@ cargo build --bin analysis
 cargo build --bin demo
 cargo build --bin kgen
 ```
+
+- Disk I/O and CPU performance should be maximized by choosing an appropriate AWS Instance Type. For example, a ```c8a.12xlarge``` instance with provisioned IOPS and bandwidth is ideal for running each batch. Without this, most of the time spent running the ```analysis``` code will be spent writing to the caching database.
 
 # Tool Usage
 ## Main test path
@@ -59,10 +66,12 @@ cargo run --bin analysis -- --config config/rsa_config_small_batch.json
 - `--avalanche-combination-size <u64>`: Number of scored items taken in each sampled combination. Default `50`.
 - `--avalanche-combination-pool-size <u64>`: Legacy compatibility override recorded in session metadata; runtime sampling now uses the full batch-sized pool.
 - `--avalanche-combination-recursion-depth <u64>`: Number of Avalanche tiers to execute, including the initial sampled-input tier. Default `1`.
-- `--avalanche-combination-recursive-group-size <u64>`: Number of prior-tier sample outputs grouped into each recursive Avalanche call. Default `8`.
+- `--avalanche-combination-recursive-group-size <u64>`: Override the per-tier recursive group-size array with one value applied to every recursive tier. Config default `[8]`.
+- `--avalanche-combination-recursive-resample-count <u64>`: Override the per-tier recursive resample-count array with one value applied to every recursive tier. Config default `[0]`.
 - `--avalanche-combination-majority-vote <bool>`: Use per-bit majority-vote probabilities from each sampled combination. Default `true`.
 - `--avalanche-combination-sample-smoothing <bool>`: Apply Jeffreys smoothing to sampled majority-vote probabilities before beam search. Default `false`.
 - `--avalanche-combination-majority-vote-print <bool>`: Print a separate sampled-combination majority-vote summary for the selected sample. Default `true`.
+- `--avalanche-solver-global-log-enable <bool>`: Print a separate global majority vote across all retained final-tier Avalanche outputs when the batches target one message. Default `true`.
 - `--avalanche-use-top-beam <bool>`: Carry forward the prior tier's top beam-search bits between recursive Avalanche tiers instead of the prior tier's majority-vote bits. Default `true`.
 - `analysis` accepts either `rsa-private-key-v1` or `rsa-public-key-v1` in `rsa_keypair.keyfile`.
 - When the configured keyfile is public, `analysis` skips the normal RSA round trip. Set `rsa_keypair.private_keyfile` to a matching private YAML if you want a verification peek; otherwise the public-key run is selected by top beam score.
@@ -89,6 +98,8 @@ cargo run --bin demo -- --decrypt --ciphertext 0x1234
 cargo run --bin kgen
 cargo run --bin kgen -- --size-mode modulus --modulus-bits 144 --output config/keys/private_key.yaml --public-output config/keys/public_key.yaml
 cargo run --bin kgen -- --input-private-key config/keys/private_key.yaml --public-output config/keys/public_key.yaml --force
+cargo run --bin kgen -- --input-pgp-public-key public.asc --public-output config/keys/public_key.yaml --force
+cargo run --bin kgen -- --input-pgp-file message.asc --pgp-output config/keys/pgp_message.yaml --force
 ```
 
 - `--size-mode <prime|modulus>`: Choose whether generation is driven by prime size or modulus size. Default `prime`.
@@ -98,6 +109,9 @@ cargo run --bin kgen -- --input-private-key config/keys/private_key.yaml --publi
 - `-o, --output <PATH>`: Private-key YAML output path for generated keys. Default `config/keys/private_key.yaml`.
 - `--public-output <PATH>`: Optional public-key YAML output path for the generated or imported private key.
 - `--input-private-key <PATH>`: Existing `rsa-private-key-v1` YAML file to convert into `rsa-public-key-v1`, similar to extracting a public key from a private PEM with `openssl`.
+- `--input-pgp-public-key <PATH>`: Existing OpenPGP public-key file to convert into `rsa-public-key-v1`. Optionally combine with `--pgp-output` to also save the unpacked packet structure.
+- `--input-pgp-file <PATH>`: Existing OpenPGP encrypted or packetized file to unpack into `pgp-file-v1` YAML.
+- `--pgp-output <PATH>`: YAML output path for the unpacked `pgp-file-v1` OpenPGP packet representation.
 - `--force`: Overwrite an existing output file.
 - `--seed <u64>`: Optional deterministic RNG seed for reproducible key generation.
 - `--crypto-rng`: Use cryptographic RNGs instead of the standard seeded generator.

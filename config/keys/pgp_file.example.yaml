@@ -1,0 +1,31 @@
+format: pgp-file-v1
+container: OpenPGP
+source_kind: ascii_armor
+source_bytes_hex: "<hex bytes of the original .asc or .gpg file>"
+decoded_bytes_hex: "<hex bytes of the decoded OpenPGP packet stream>"
+armor:
+  block_type: PGP MESSAGE
+  begin_line: "-----BEGIN PGP MESSAGE-----"
+  end_line: "-----END PGP MESSAGE-----"
+  headers:
+    - name: Version
+      value: "<armor header value>"
+  checksum:
+    encoded: "<radix64 crc24 text>"
+    crc24_hex: "<3-byte crc24 as hex>"
+    matches_payload: true
+packet_count: 1
+packets:
+  - packet_index: 1
+    packet_offset: 0
+    packet_tag: 18
+    packet_name: Symmetrically Encrypted Integrity Protected Data
+    header_format: new
+    header_bytes_hex: "<packet header bytes hex>"
+    body_bytes_hex: "<packet body bytes hex>"
+    packet_bytes_hex: "<full packet bytes hex>"
+    body_length: 9
+    encrypted_data:
+      kind: symmetrically_encrypted_integrity_protected_data
+      version: 1
+      payload_hex: "<encrypted payload hex>"

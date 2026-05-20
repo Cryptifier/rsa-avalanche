@@ -50,6 +50,36 @@ GREEN=$'\033[0;32m'
 YELLOW=$'\033[0;33m'
 BLUE=$'\033[0;34m'
 RESET=$'\033[0m'
+AVALANCHE_SOLVER_SUCCESS_MARKER="AVALANCHE SOLVER FOUND MESSAGE"
+
+solver_enabled_for_config() {
+  local config_path=$1
+  if [[ ! -f "${config_path}" ]]; then
+    echo 0
+    return
+  fi
+  if command -v python3 >/dev/null 2>&1; then
+    python3 - "${config_path}" <<'PY'
+import pathlib
+import re
+import sys
+
+path = pathlib.Path(sys.argv[1])
+text = path.read_text()
+text = re.sub(r"/\*.*?\*/", "", text, flags=re.S)
+text = re.sub(r"//.*", "", text)
+print("1" if re.search(r'"avalanche_solver_enable"\s*:\s*true\b', text) else "0")
+PY
+  else
+    if grep -Eq '"avalanche_solver_enable"[[:space:]]*:[[:space:]]*true' "${config_path}"; then
+      echo 1
+    else
+      echo 0
+    fi
+  fi
+}
+
+SOLVER_ENABLED=$(solver_enabled_for_config "${CONFIG}")
 
 if [[ "${RESUME}" != "1" ]]; then
   : > "${ANALYSIS_LOG}"
@@ -87,6 +117,11 @@ total_ns=0
 
 echo "Running ${RUNS} iterations with config ${CONFIG}"
 echo "Detected architecture ${arch_name}; cargo run args: ${CARGO_RUN_ARGS[*]} (acceleration feature: ${ACCEL_FEATURE})"
+if [[ "${SOLVER_ENABLED}" == "1" ]]; then
+  echo "Avalanche solver marker check: enabled"
+else
+  echo "Avalanche solver marker check: disabled"
+fi
 mkdir -p "${LOG_DIR}"
 run_stamp=$(date +"%Y%m%d_%H%M%S")
 
@@ -116,11 +151,27 @@ for i in $(seq 1 "${RUNS}"); do
   beam_run_max_match_pct=$(echo "${beam_run_max_line}" | sed -n 's/.*match \([0-9.]*\)%.*/\1/p')
   majority_vote_line=$(grep -F -m1 "Avalanche majority vote run max:" "${run_output}" || true)
   majority_vote_match_pct=$(echo "${majority_vote_line}" | sed -n 's/.*match \([0-9.]*\)%.*/\1/p')
+  global_majority_vote_line=$(grep -F -m1 "Avalanche global majority vote:" "${run_output}" || true)
+  global_majority_vote_match_pct=$(echo "${global_majority_vote_line}" | sed -n 's/.*match \([0-9.]*\)%.*/\1/p')
   cx_total_line=$(grep -F -m1 "Avalanche c^x evaluated total:" "${run_output}" || true)
   cx_candidates_total=$(echo "${cx_total_line}" | sed -n 's/.*: \([0-9][0-9]*\)$/\1/p')
   avalanche_total_line=$(grep -m1 "Avalanche evaluated candidates total:" "${run_output}" || true)
   avalanche_candidates_total=$(echo "${avalanche_total_line}" | sed -n 's/.*: \([0-9][0-9]*\)$/\1/p')
   verdict=$(grep -m1 "Sufficiency verdict" "${run_output}" | sed -n 's/.*: //p' || true)
+  solver_status="DISABLED"
+  solver_color="${YELLOW}"
+  if [[ "${SOLVER_ENABLED}" == "1" ]]; then
+    if grep -F -q "${AVALANCHE_SOLVER_SUCCESS_MARKER}" "${run_output}"; then
+      solver_status="SUCCESS"
+      solver_color="${GREEN}"
+      verdict="PASS"
+    else
+      solver_status="FAIL"
+      solver_color="${RED}"
+      verdict="FAIL"
+      echo "${RED}Avalanche solver failure: ${AVALANCHE_SOLVER_SUCCESS_MARKER} not found in run output.${RESET}"
+    fi
+  fi
 
   if [[ -n "${cx_match_pct}" ]]; then
     cx_match_count=$((cx_match_count + 1))
@@ -180,15 +231,65 @@ for i in $(seq 1 "${RUNS}"); do
     majority_match_color="${YELLOW}"
   fi
 
+  if [[ -n "${global_majority_vote_match_pct}" ]]; then
+    if awk -v v="${global_majority_vote_match_pct}" 'BEGIN { exit (v >= 50.0) ? 0 : 1 }'; then
+      global_majority_match_color="${GREEN}"
+    else
+      global_majority_match_color="${RED}"
+    fi
+  else
+    global_majority_match_color="${YELLOW}"
+  fi
+
   verdict_color="${GREEN}"
   if [[ "${verdict}" != *PASS* ]]; then
     verdict_color="${RED}"
   fi
 
   if [[ ${status} -eq 0 ]]; then
-    echo "Run ${i} summary: c^x max match ${match_color}${cx_match_pct:-N/A}%${RESET}, beam run max ${beam_match_color}${beam_run_max_match_pct:-N/A}%${RESET}, majority vote match ${majority_match_color}${majority_vote_match_pct:-N/A}%${RESET}, c^x candidates ${cx_candidates_total:-N/A}, avalanche candidates ${avalanche_candidates_total:-N/A}, verdict ${verdict_color}${verdict:-UNKNOWN}${RESET}, duration ${duration_s}s"
+    echo "Run ${i} summary: c^x max match ${match_color}${cx_match_pct:-N/A}%${RESET}, beam run max ${beam_match_color}${beam_run_max_match_pct:-N/A}%${RESET}, majority vote match ${majority_match_color}${majority_vote_match_pct:-N/A}%${RESET}, global majority vote match ${global_majority_match_color}${global_majority_vote_match_pct:-N/A}%${RESET}, solver ${solver_color}${solver_status}${RESET}, c^x candidates ${cx_candidates_total:-N/A}, avalanche candidates ${avalanche_candidates_total:-N/A}, verdict ${verdict_color}${verdict:-UNKNOWN}${RESET}, duration ${duration_s}s"
   else
-    echo "Run ${i} summary: ${RED}FAILED (exit ${status})${RESET}, c^x max match ${match_color}${cx_match_pct:-N/A}%${RESET}, beam run max ${beam_match_color}${beam_run_max_match_pct:-N/A}%${RESET}, majority vote match ${majority_match_color}${majority_vote_match_pct:-N/A}%${RESET}, c^x candidates ${cx_candidates_total:-N/A}, avalanche candidates ${avalanche_candidates_total:-N/A}, verdict ${verdict_color}${verdict:-UNKNOWN}${RESET}, duration ${duration_s}s"
+    echo "Run ${i} summary: ${RED}FAILED (exit ${status})${RESET}, c^x max match ${match_color}${cx_match_pct:-N/A}%${RESET}, beam run max ${beam_match_color}${beam_run_max_match_pct:-N/A}%${RESET}, majority vote match ${majority_match_color}${majority_vote_match_pct:-N/A}%${RESET}, global majority vote match ${global_majority_match_color}${global_majority_vote_match_pct:-N/A}%${RESET}, solver ${solver_color}${solver_status}${RESET}, c^x candidates ${cx_candidates_total:-N/A}, avalanche candidates ${avalanche_candidates_total:-N/A}, verdict ${verdict_color}${verdict:-UNKNOWN}${RESET}, duration ${duration_s}s"
+  fi
+  if [[ -n "${beam_run_max_line}" ]]; then
+    echo "${beam_run_max_line}"
+  fi
+  if [[ -n "${majority_vote_line}" ]]; then
+    echo "${majority_vote_line}"
+  fi
+  if [[ -n "${global_majority_vote_line}" ]]; then
+    echo "${global_majority_vote_line}"
+  fi
+  beam_comparison_block=$(awk '
+    /Avalanche beam colored hex/ {print; capture=1; next}
+    capture {print; if (/^Hex match key:/) exit}
+  ' "${run_output}")
+  majority_comparison_block=$(awk '
+    /Avalanche majority vote colored hex/ {print; capture=1; next}
+    capture {print; if (/^Hex match key:/) exit}
+  ' "${run_output}")
+  global_majority_comparison_block=$(awk '
+    /Avalanche global majority vote colored hex/ {print; capture=1; next}
+    capture {print; if (/^Hex match key:/) exit}
+  ' "${run_output}")
+  if [[ -n "${beam_comparison_block}" || -n "${majority_comparison_block}" || -n "${global_majority_comparison_block}" ]]; then
+    if [[ -n "${beam_comparison_block}" ]]; then
+      echo "${beam_comparison_block}"
+    else
+      echo "Avalanche beam colored comparison: N/A"
+    fi
+    echo "-----"
+    if [[ -n "${majority_comparison_block}" ]]; then
+      echo "${majority_comparison_block}"
+    else
+      echo "Avalanche majority vote colored comparison: N/A"
+    fi
+    echo "-----"
+    if [[ -n "${global_majority_comparison_block}" ]]; then
+      echo "${global_majority_comparison_block}"
+    else
+      echo "Avalanche global majority vote colored comparison: N/A"
+    fi
   fi
   echo "Session JSON: ${session_path}"
   if [[ -n "${beam_run_max_line}" ]]; then
@@ -254,6 +355,7 @@ echo "===== SUMMARY ====="
 echo "c^x max match % stats: mean ${cx_match_mean}, std dev ${cx_match_stddev}, min ${cx_match_min}, max ${cx_match_max}, n ${cx_match_count}"
 echo "c^x evaluated candidates: total ${cx_candidates_sum}, average ${cx_candidates_avg}, n ${cx_candidates_count}"
 echo "Avalanche evaluated candidates: total ${avalanche_candidates_sum}, average ${avalanche_candidates_avg}, n ${avalanche_candidates_count}"
+echo "Avalanche solver marker check: $( [[ "${SOLVER_ENABLED}" == "1" ]] && echo enabled || echo disabled )"
 echo "Verdicts: PASS ${pass_count}, FAIL ${fail_count}"
 echo "Average duration per run: ${avg_time_s}s"
 if [[ -n "${session_path:-}" ]]; then

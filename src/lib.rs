@@ -17,9 +17,11 @@ pub mod methods;
 pub mod polynomial_fields;
 pub mod polynomials;
 pub use polynomials as poly;
+pub mod pgp;
 pub mod r_candidates;
 pub mod rng;
 pub mod search;
+pub mod solver;
 pub mod windows;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod zmq_status;

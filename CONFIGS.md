@@ -10,7 +10,10 @@ This file collects the configuration material that used to live in `README.md`.
 # Key YAML
 - `kgen` writes RSA private keys as YAML under `config/keys`.
 - `kgen --public-output ...` writes matching RSA public keys as `rsa-public-key-v1` YAML.
+- `kgen --input-pgp-public-key ... --public-output ...` imports RSA public keys from OpenPGP files into the same `rsa-public-key-v1` YAML format.
+- `kgen --input-pgp-file ... --pgp-output ...` writes unpacked OpenPGP packet contents as `pgp-file-v1` YAML.
 - Non-secret example schemas live at `config/keys/private_key.example.yaml` and `config/keys/public_key.example.yaml`.
+- A non-secret `pgp-file-v1` schema example lives at `config/keys/pgp_file.example.yaml`.
 - The tracked repository ignores the default generated key path `config/keys/private_key.yaml`.
 - Tracked examples include both private and public YAMLs for the small-batch keys under `config/keys/`.
 
@@ -60,13 +63,14 @@ Notes:
 | `engine.analysis_batch_messages` | u64 | `1` | Number of ciphertext/message variants scored per batch before Avalanche sampling. |
 | `engine.analysis_batch_candidates` | u64 | `0` | Number of `r` candidates scored in each batch. |
 | `engine.analysis_batch_batches` | u64 | `1` | Number of batch-analysis runs. |
+| `engine.avalanche_solver_global_log_enable` | bool | `true` | Print a global majority vote across all retained final-tier Avalanche outputs when the batches target one message. |
 | `engine.avalanche_combination_samples` | u64 | `100` | Number of sampled combinations evaluated by Avalanche per batch. |
 | `engine.avalanche_combination_size` | usize | `50` | Legacy compatibility field retained from the older scored-item sampler. |
 | `engine.avalanche_combination_mixed_r_candidates` | usize | `1` | Number of distinct `r` candidates mixed into each Avalanche sample; each selected `r` contributes all of its scored `c^x` inputs. |
 | `engine.avalanche_combination_pool_size` | usize | `100` | Legacy compatibility field; runtime sampling now uses the full batch-sized pool. |
 | `engine.avalanche_combination_recursion_depth` | usize | `1` | Number of Avalanche tiers to execute, including the initial sampled-input tier. |
-| `engine.avalanche_combination_recursive_group_size` | usize | `8` | Number of prior-tier sample outputs grouped into each recursive Avalanche call. |
-| `engine.avalanche_combination_recursive_resample_count` | usize | `0` | Number of recursive samples to produce per subsequent Avalanche tier; `0` keeps one-pass regrouping. |
+| `engine.avalanche_combination_recursive_group_size` | array(usize) | `[8]` | Per-recursive-tier group sizes; when recursion exceeds the array length, the last entry is reused. |
+| `engine.avalanche_combination_recursive_resample_count` | array(usize) | `[0]` | Per-recursive-tier resample counts; `0` keeps one-pass regrouping, and the last entry is reused for deeper tiers. |
 | `engine.avalanche_combination_majority_vote` | bool | `true` | Use per-bit majority-vote probabilities from each sampled combination. |
 | `engine.avalanche_combination_sample_smoothing` | bool | `false` | Apply Jeffreys smoothing to sampled majority-vote probabilities before beam search. |
 | `engine.avalanche_combination_majority_vote_print` | bool | `true` | Print a separate sampled-combination majority-vote summary for the selected sample. |
@@ -122,7 +126,7 @@ Notes:
 | `engine.message.bits` | u32 | `128` | Random message bit length. |
 | `engine.message.fixed_message` | string | `HeloWrld1234` | Fixed message when `is_random` is `false`. |
 
-For `config/rsa_config_small_batch.json`, sampled Avalanche now draws every combination from the full scored batch-sized pool rather than truncating to a separate top-pool limit. `engine.avalanche_combination_mixed_r_candidates` controls how many distinct `r` candidates are allowed into a sampled Avalanche input set, and each chosen `r` contributes all of its configured `c^x` message variants. `engine.avalanche_combination_recursion_depth`, `engine.avalanche_combination_recursive_group_size`, and `engine.avalanche_combination_recursive_resample_count` enable tiered Avalanche runs where prior-tier Avalanche outputs are either grouped once or resampled to a target count for subsequent recursive calls. When `engine.avalanche_combination_majority_vote` is enabled, which is the default, the beam probabilities come from per-bit majority-vote frequencies across each sampled combination. `engine.avalanche_use_top_beam` controls which finalized prior-tier bit vector is carried into the next recursive tier: `true` reuses the top beam-search candidate and `false` reuses the prior tier's majority-vote bits. Enable `engine.avalanche_combination_sample_smoothing` or `--avalanche-combination-sample-smoothing true` to apply Jeffreys smoothing to those frequencies before beam search. `engine.avalanche_combination_majority_vote_print` controls the separate console summary for the sampled-combination majority vote and defaults to `true`. Set `engine.avalanche_statistics_collection` to `false` to skip recursive tier statistics and other heavy Avalanche analytics payloads while keeping the selected Avalanche result and summary metrics.
+For `config/rsa_config_small_batch.json`, sampled Avalanche now draws every combination from the full scored batch-sized pool rather than truncating to a separate top-pool limit. `engine.avalanche_combination_mixed_r_candidates` controls how many distinct `r` candidates are allowed into a sampled Avalanche input set, and each chosen `r` contributes all of its configured `c^x` message variants. `engine.avalanche_combination_recursion_depth`, `engine.avalanche_combination_recursive_group_size`, and `engine.avalanche_combination_recursive_resample_count` enable tiered Avalanche runs where prior-tier Avalanche outputs are either grouped once or resampled to a target count for subsequent recursive calls. The two `avalanche_combination_recursive_*` settings are arrays keyed by recursive level, and deeper recursion tiers reuse the last configured array entry. When `engine.avalanche_combination_majority_vote` is enabled, which is the default, the beam probabilities come from per-bit majority-vote frequencies across each sampled combination. `engine.avalanche_use_top_beam` controls which finalized prior-tier bit vector is carried into the next recursive tier: `true` reuses the top beam-search candidate and `false` reuses the prior tier's majority-vote bits. Enable `engine.avalanche_combination_sample_smoothing` or `--avalanche-combination-sample-smoothing true` to apply Jeffreys smoothing to those frequencies before beam search. `engine.avalanche_combination_majority_vote_print` controls the separate console summary for the sampled-combination majority vote and defaults to `true`. `engine.avalanche_solver_global_log_enable` controls an additional overall majority vote computed from every retained final-tier output across the run when all batches target the same original message, and it also defaults to `true`. Set `engine.avalanche_statistics_collection` to `false` to skip recursive tier statistics and other heavy Avalanche analytics payloads while keeping the selected Avalanche result and summary metrics.
 
 # Configuration (`demo` verification inputs)
 These optional keys are used by `demo` when `--ciphertext` is not provided.

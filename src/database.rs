@@ -6,6 +6,7 @@ use diesel::dsl::count_star;
 use diesel::prelude::*;
 use diesel::r2d2::{ConnectionManager, CustomizeConnection, Error as R2D2Error, Pool};
 use diesel::sql_query;
+use diesel::sql_types::Text;
 use num_bigint::BigUint;
 use std::{
     collections::HashMap,
@@ -16,10 +17,12 @@ use std::{
 };
 
 use crate::analytics::{
-    AvalancheCombinationBeamResult, AvalancheTierSampleStat, AvalancheTierStatistics,
+    AvalancheCenterBiasEntry, AvalancheCombinationBeamResult, AvalancheTierSampleStat,
+    AvalancheTierStatistics,
 };
 use crate::avalanche::AvalancheNode;
 use crate::config::EngineConfig;
+use crate::fitness::RankedScoredAvalancheInput;
 use crate::helpers::PackedBits;
 use crate::methods::{
     ScoredAvalancheInput, ScoredAvalancheInputDetail, SelectedAvalancheSample, recursive_tier_bits,
@@ -36,6 +39,10 @@ diesel::table! {
         r_text -> Text,
         x_text -> Text,
         score_match_pct -> Double,
+        contents_have_been_inverted -> Bool,
+        fitness_score -> BigInt,
+        fitness_total_score -> BigInt,
+        fitness_message_count -> BigInt,
         message_bits -> Binary,
         message_bit_len -> Integer,
         target_exponent_text -> Nullable<Text>,
@@ -64,6 +71,7 @@ diesel::table! {
         recursive_bits -> Binary,
         recursive_bits_bit_len -> Integer,
         beam_results_json -> Text,
+        center_biases_json -> Text,
     }
 }
 
@@ -78,6 +86,10 @@ struct NewCachedAvalancheInput {
     r_text: String,
     x_text: String,
     score_match_pct: f64,
+    contents_have_been_inverted: bool,
+    fitness_score: i64,
+    fitness_total_score: i64,
+    fitness_message_count: i64,
     message_bits: Vec<u8>,
     message_bit_len: i32,
     target_exponent_text: Option<String>,
@@ -94,6 +106,10 @@ pub(crate) struct CachedAvalancheInputRow {
     pub(crate) r_text: String,
     pub(crate) x_text: String,
     pub(crate) score_match_pct: f64,
+    pub(crate) contents_have_been_inverted: bool,
+    pub(crate) fitness_score: i64,
+    pub(crate) fitness_total_score: i64,
+    pub(crate) fitness_message_count: i64,
     pub(crate) message_bits: Vec<u8>,
     pub(crate) message_bit_len: i32,
     pub(crate) target_exponent_text: Option<String>,
@@ -121,6 +137,7 @@ struct NewCachedAvalancheSample {
     recursive_bits: Vec<u8>,
     recursive_bits_bit_len: i32,
     beam_results_json: String,
+    center_biases_json: String,
 }
 
 #[derive(Debug, Queryable, Selectable)]
@@ -143,6 +160,7 @@ pub(crate) struct CachedAvalancheSampleRow {
     pub(crate) recursive_bits: Vec<u8>,
     pub(crate) recursive_bits_bit_len: i32,
     pub(crate) beam_results_json: String,
+    pub(crate) center_biases_json: String,
 }
 
 #[derive(Debug, Clone)]
@@ -155,6 +173,12 @@ struct AvalancheSqliteSettings {
     soft_heap_limit_bytes: i64,
     hard_heap_limit_bytes: i64,
     mmap_size_bytes: i64,
+}
+
+#[derive(Debug, QueryableByName)]
+struct SqliteTableInfoRow {
+    #[diesel(sql_type = Text)]
+    name: String,
 }
 
 #[derive(Debug, Default, Clone, Copy)]
@@ -297,6 +321,36 @@ pub fn resolve_avalanche_cache_db_path(seed: Option<u64>, db_folder: &str) -> Pa
         .join(format!("rsa_avalanche_{}.db", seed.unwrap_or(0)))
 }
 
+/// Resolves the SQLite connection target used for the temporary Avalanche cache.
+///
+/// # Parameters
+/// - `seed`: Optional deterministic analysis seed used to key the cache identifier.
+/// - `engine`: Engine configuration describing the cache storage mode.
+///
+/// # Returns
+/// - `(String, PathBuf, Option<PathBuf>)`: `(connection_target, display_path, cleanup_path)`.
+///
+/// # Expected Output
+/// - Returns either a shared in-memory SQLite URI or an on-disk path plus the optional cleanup
+///   path; no stdout/stderr output.
+fn resolve_avalanche_cache_connection_target(
+    seed: Option<u64>,
+    engine: &EngineConfig,
+) -> (String, PathBuf, Option<PathBuf>) {
+    if engine.sqlite_in_memory {
+        let name = format!(
+            "file:rsa_avalanche_{}?mode=memory&cache=shared",
+            seed.unwrap_or(0)
+        );
+        let display_path = PathBuf::from(&name);
+        (name, display_path, None)
+    } else {
+        let path = resolve_avalanche_cache_db_path(seed, &engine.sqlite_db_folder);
+        let connection_target = path.to_string_lossy().to_string();
+        (connection_target, path.clone(), Some(path))
+    }
+}
+
 /// Creates the parent directory tree for the Avalanche cache database path.
 ///
 /// # Parameters
@@ -325,7 +379,10 @@ fn ensure_avalanche_cache_db_parent_dir(path: &Path) -> Result<(), Box<dyn Error
 ///
 /// # Expected Output
 /// - Deletes the cache file when present; no stdout/stderr output.
-pub fn cleanup_avalanche_cache_db(seed: Option<u64>, db_folder: &str) {
+pub fn cleanup_avalanche_cache_db(seed: Option<u64>, db_folder: &str, in_memory: bool) {
+    if in_memory {
+        return;
+    }
     let path = resolve_avalanche_cache_db_path(seed, db_folder);
     if path.exists() {
         let _ = fs::remove_file(path);
@@ -344,8 +401,39 @@ pub fn cleanup_avalanche_cache_db(seed: Option<u64>, db_folder: &str) {
 /// - Owns a SQLite connection pool and deletes the backing file on drop.
 pub(crate) struct AvalancheCacheGuard {
     pub(crate) path: PathBuf,
+    cleanup_path: Option<PathBuf>,
     pool: Option<AvalancheSqlitePool>,
     page_rows: i64,
+}
+
+/// Adds one column to a SQLite table when the schema is missing it.
+///
+/// # Parameters
+/// - `connection`: SQLite connection to mutate.
+/// - `table_name`: Table whose schema should be checked.
+/// - `column_name`: Column that must exist.
+/// - `column_definition`: Full SQLite column definition used for `ALTER TABLE`.
+///
+/// # Returns
+/// - `Result<(), Box<dyn Error>>`: `Ok(())` when the column exists or is added successfully.
+///
+/// # Expected Output
+/// - Reads SQLite table metadata and may mutate the table schema; no stdout/stderr output.
+fn ensure_sqlite_column(
+    connection: &mut SqliteConnection,
+    table_name: &str,
+    column_name: &str,
+    column_definition: &str,
+) -> Result<(), Box<dyn Error>> {
+    let pragma = format!("PRAGMA table_info({table_name})");
+    let rows = sql_query(pragma).load::<SqliteTableInfoRow>(connection)?;
+    if rows.iter().any(|row| row.name == column_name) {
+        return Ok(());
+    }
+
+    let alter = format!("ALTER TABLE {table_name} ADD COLUMN {column_definition}");
+    sql_query(alter).execute(connection)?;
+    Ok(())
 }
 
 impl AvalancheCacheGuard {
@@ -361,16 +449,18 @@ impl AvalancheCacheGuard {
     /// # Expected Output
     /// - Creates the SQLite database under the configured folder, creating parent directories as needed.
     pub(crate) fn new(seed: Option<u64>, engine: &EngineConfig) -> Result<Self, Box<dyn Error>> {
-        let path = resolve_avalanche_cache_db_path(seed, &engine.sqlite_db_folder);
-        ensure_avalanche_cache_db_parent_dir(&path)?;
-        if path.exists() {
-            let _ = fs::remove_file(&path);
+        let (connection_target, path, cleanup_path) =
+            resolve_avalanche_cache_connection_target(seed, engine);
+        if let Some(cleanup_path) = cleanup_path.as_ref() {
+            ensure_avalanche_cache_db_parent_dir(cleanup_path)?;
+            if cleanup_path.exists() {
+                let _ = fs::remove_file(cleanup_path);
+            }
         }
         let page_rows = i64::try_from(engine.sqlite_avalanche_page_size.max(1))
             .map_err(|_| "engine.sqlite_avalanche_page_size exceeds i64 range")?;
         let settings = resolve_avalanche_sqlite_settings(engine)?;
-        let manager =
-            ConnectionManager::<SqliteConnection>::new(path.to_string_lossy().to_string());
+        let manager = ConnectionManager::<SqliteConnection>::new(connection_target);
         let pool = Pool::builder()
             .max_size(engine.sqlite_worker_count)
             .connection_customizer(Box::new(AvalancheSqliteConnectionCustomizer { settings }))
@@ -385,6 +475,10 @@ impl AvalancheCacheGuard {
                 r_text TEXT NOT NULL,
                 x_text TEXT NOT NULL,
                 score_match_pct DOUBLE NOT NULL,
+                contents_have_been_inverted BOOLEAN NOT NULL DEFAULT 0,
+                fitness_score BIGINT NOT NULL DEFAULT 0,
+                fitness_total_score BIGINT NOT NULL DEFAULT 0,
+                fitness_message_count BIGINT NOT NULL DEFAULT 1,
                 message_bits BLOB NOT NULL,
                 message_bit_len INTEGER NOT NULL,
                 target_exponent_text TEXT NULL,
@@ -393,6 +487,30 @@ impl AvalancheCacheGuard {
             )",
         )
         .execute(&mut connection)?;
+        ensure_sqlite_column(
+            &mut connection,
+            "avalanche_cache_inputs",
+            "contents_have_been_inverted",
+            "contents_have_been_inverted BOOLEAN NOT NULL DEFAULT 0",
+        )?;
+        ensure_sqlite_column(
+            &mut connection,
+            "avalanche_cache_inputs",
+            "fitness_score",
+            "fitness_score BIGINT NOT NULL DEFAULT 0",
+        )?;
+        ensure_sqlite_column(
+            &mut connection,
+            "avalanche_cache_inputs",
+            "fitness_total_score",
+            "fitness_total_score BIGINT NOT NULL DEFAULT 0",
+        )?;
+        ensure_sqlite_column(
+            &mut connection,
+            "avalanche_cache_inputs",
+            "fitness_message_count",
+            "fitness_message_count BIGINT NOT NULL DEFAULT 1",
+        )?;
         sql_query(
             "CREATE INDEX IF NOT EXISTS avalanche_cache_inputs_batch_idx
                 ON avalanche_cache_inputs (batch_number, batch_candidate_index, message_index)",
@@ -422,10 +540,17 @@ impl AvalancheCacheGuard {
                 majority_vote_bits_bit_len INTEGER NOT NULL,
                 recursive_bits BLOB NOT NULL,
                 recursive_bits_bit_len INTEGER NOT NULL,
-                beam_results_json TEXT NOT NULL
+                beam_results_json TEXT NOT NULL,
+                center_biases_json TEXT NOT NULL DEFAULT '[]'
             )",
         )
         .execute(&mut connection)?;
+        ensure_sqlite_column(
+            &mut connection,
+            "avalanche_cache_samples",
+            "center_biases_json",
+            "center_biases_json TEXT NOT NULL DEFAULT '[]'",
+        )?;
         sql_query(
             "CREATE INDEX IF NOT EXISTS avalanche_cache_samples_batch_tier_idx
                 ON avalanche_cache_samples (batch_number, tier_index, sample_index)",
@@ -433,6 +558,7 @@ impl AvalancheCacheGuard {
         .execute(&mut connection)?;
         Ok(Self {
             path,
+            cleanup_path,
             pool: Some(pool),
             page_rows,
         })
@@ -513,7 +639,9 @@ impl AvalancheCacheGuard {
 impl Drop for AvalancheCacheGuard {
     fn drop(&mut self) {
         let _ = self.pool.take();
-        let _ = fs::remove_file(&self.path);
+        if let Some(path) = self.cleanup_path.as_ref() {
+            let _ = fs::remove_file(path);
+        }
     }
 }
 
@@ -554,29 +682,39 @@ pub(crate) fn approximate_scored_avalanche_input_bytes(input: &ScoredAvalancheIn
 /// - Returns an owned insert payload; no stdout/stderr output.
 fn serialize_scored_avalanche_input_for_cache(
     batch_number: usize,
-    input: &ScoredAvalancheInput,
+    input: &RankedScoredAvalancheInput,
 ) -> Result<NewCachedAvalancheInput, Box<dyn Error>> {
     Ok(NewCachedAvalancheInput {
         batch_number: i32::try_from(batch_number).map_err(|_| "batch number exceeds i32 range")?,
-        batch_candidate_index: i32::try_from(input.batch_candidate_index)
+        batch_candidate_index: i32::try_from(input.input.batch_candidate_index)
             .map_err(|_| "batch candidate index exceeds i32 range")?,
-        message_index: i32::try_from(input.message_index)
+        message_index: i32::try_from(input.input.message_index)
             .map_err(|_| "message index exceeds i32 range")?,
-        r_text: input.r.to_string(),
-        x_text: input.x.to_string(),
-        score_match_pct: input.score_match_pct,
-        message_bits: input.message_bits.bytes_le().to_vec(),
-        message_bit_len: i32::try_from(input.message_bits.len())
+        r_text: input.input.r.to_string(),
+        x_text: input.input.x.to_string(),
+        score_match_pct: input.input.score_match_pct,
+        contents_have_been_inverted: input.input.contents_have_been_inverted,
+        fitness_score: i64::try_from(input.fitness.fitness_score)
+            .map_err(|_| "fitness score exceeds i64 range")?,
+        fitness_total_score: i64::try_from(input.fitness.fitness_total_score)
+            .map_err(|_| "fitness total score exceeds i64 range")?,
+        fitness_message_count: i64::try_from(input.fitness.fitness_message_count)
+            .map_err(|_| "fitness message count exceeds i64 range")?,
+        message_bits: input.input.message_bits.bytes_le().to_vec(),
+        message_bit_len: i32::try_from(input.input.message_bits.len())
             .map_err(|_| "message bit length exceeds i32 range")?,
         target_exponent_text: input
+            .input
             .detail
             .as_ref()
             .map(|detail| detail.target_exponent.normalized().to_string()),
         hbc_ciphertext_r_text: input
+            .input
             .detail
             .as_ref()
             .map(|detail| detail.hbc_ciphertext_r.to_string()),
         candidate_decryption_text: input
+            .input
             .detail
             .as_ref()
             .map(|detail| detail.candidate_decryption.to_string()),
@@ -626,6 +764,7 @@ fn deserialize_scored_avalanche_input_row(
         r: row.r_text.parse::<BigUint>()?,
         x: row.x_text.parse::<BigUint>()?,
         score_match_pct: row.score_match_pct,
+        contents_have_been_inverted: row.contents_have_been_inverted,
         message_bits: PackedBits::from_bytes_le(
             &row.message_bits,
             usize::try_from(row.message_bit_len)
@@ -650,7 +789,7 @@ fn deserialize_scored_avalanche_input_row(
 pub(crate) fn insert_cached_scored_inputs(
     cache: &AvalancheCacheGuard,
     batch_number: usize,
-    inputs: &[ScoredAvalancheInput],
+    inputs: &[RankedScoredAvalancheInput],
 ) -> Result<(), Box<dyn Error>> {
     if inputs.is_empty() {
         return Ok(());
@@ -839,6 +978,7 @@ fn serialize_selected_sample_for_cache(
         recursive_bits_bit_len: i32::try_from(recursive_bits.len())
             .map_err(|_| "recursive bit length exceeds i32 range")?,
         beam_results_json: serde_json::to_string(&sample.beam_results)?,
+        center_biases_json: serde_json::to_string(&sample.center_biases)?,
     })
 }
 
@@ -981,6 +1121,8 @@ pub(crate) fn deserialize_selected_avalanche_sample_row(
 ) -> Result<SelectedAvalancheSample, Box<dyn Error>> {
     let beam_results =
         serde_json::from_str::<Vec<AvalancheCombinationBeamResult>>(&row.beam_results_json)?;
+    let center_biases =
+        serde_json::from_str::<Vec<AvalancheCenterBiasEntry>>(&row.center_biases_json)?;
     Ok(SelectedAvalancheSample {
         sample_index: usize::try_from(row.sample_index)
             .map_err(|_| "cached sample index exceeds usize range")?,
@@ -1007,6 +1149,7 @@ pub(crate) fn deserialize_selected_avalanche_sample_row(
         top_beam_score: row.top_beam_score,
         top_beam_match_pct: row.top_beam_match_pct,
         best_match_pct: row.best_match_pct,
+        center_biases,
         node: AvalancheNode::from_packed_bits(
             PackedBits::from_bytes_le(
                 &row.recursive_bits,

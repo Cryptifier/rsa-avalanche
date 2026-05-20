@@ -55,15 +55,25 @@
     "analysis_batch_messages": 8,
     "analysis_batch_candidates": 128,
     "analysis_batch_batches": 1,
+    "avalanche_solver_enable": false, // Compare final-tier outputs across every 2-batch cartesian product and brute-force differing bit positions.
+    "avalanche_solver_global_log_enable": true, // Compute and print the global majority vote across all retained final-tier Avalanche outputs.
+    "avalanche_solver_max_bits": 8, // Maximum number of differing bit positions the cross-batch solver may brute-force per sample pair.
     "sqlite_soft_heap": 10737418240,
     "sqlite_hard_heap": 10737418240,
     "sqlite_mmap_size": 10737418240,
     "sqlite_worker_count": 64,
     "sqlite_db_folder": "/tmp",
     "sqlite_avalanche_page_size": 256,
+    // SQLite cache storage mode:
+    // - false: use the on-disk SQLite database in sqlite_db_folder.
+    // - true: keep the cache in shared memory and avoid syncing it to disk.
+    "sqlite_in_memory": false,
     "avalanche_beam_top_k": 4,
     "avalanche_use_top_beam": true,
     "avalanche_probability_spread_exponent": 0.80,
+    "avalanche_report_biases": false,
+    "avalanche_center_threshold": 0.01,
+    "avalanche_center_threshold_best": true,
     "avalanche_fitness_scoring_pass": true,
     "avalanche_fitness_shift_bytes": 4,
     "avalanche_fitness_bit_width": 32,
@@ -71,13 +81,32 @@
     "avalanche_fitness_cx_candidate_limit": 4,
     "avalanche_fitness_use_threshold": true,
     "avalanche_fitness_threshold": 0.580,
+    "avalanche_fitness_log_top_pct": 0.30,
+    // Additional random-message fitness checks:
+    // - 0: score each c^x/r candidate only on the batch's main message.
+    // - >0: also test that many extra random messages, rank by the worst padding-bit fitness,
+    //   and use the mean padding-bit fitness as a tiebreaker for retained Avalanche inputs.
+    "avalanche_fitness_additional_random_messages": 2,
+    // Streaming fitness pruning:
+    // - true: keep only the current best retained r/c^x pool as fitness scores are computed.
+    // - false: keep all scored inputs until the later batch-level fitness pass runs.
+    "avalanche_fitness_streaming_prune": true,
+    // Global Avalanche input uniqueness:
+    // - true: retain only a globally unique set with no repeated r or x candidates.
+    // - false: allow multiple scored inputs to reuse the same r or x values.
+    "avalanche_unique_r_cx_inputs": true,
+    // Ordered max-fitness Avalanche seed:
+    // - true: include one deterministic Avalanche input built from the highest-ranked retained
+    //   candidates in order before randomized sampling fills the remaining sample plans.
+    // - false: rely only on randomized retained-input sampling.
+    "avalanche_include_max_fitness_candidates_in_order": true,
     "avalanche_combination_mixed_r_candidates": 8,
     "avalanche_combination_samples": 64,
     "avalanche_combination_size": 8,
     "avalanche_combination_pool_size": 256,
     "avalanche_combination_recursion_depth": 1,
-    "avalanche_combination_recursive_group_size": 8,
-    "avalanche_combination_recursive_resample_count": 0,
+    "avalanche_combination_recursive_group_size": [8],
+    "avalanche_combination_recursive_resample_count": [0],
     "avalanche_combination_hamming_distance_prune": false,
     "avalanche_combination_hamming_distance_keep_percentile": 100.0,
     "avalanche_combination_hamming_distance_outlier_preference_pct": 0.0,

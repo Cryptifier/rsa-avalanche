@@ -98,11 +98,11 @@ struct Args {
     #[arg(long = "avalanche-combination-recursion-depth", value_parser = clap::value_parser!(u64).range(1..))]
     avalanche_combination_recursion_depth: Option<u64>,
 
-    /// Number of prior-tier samples grouped into each recursive Avalanche call
+    /// Override the per-tier recursive group-size array with one value reused across recursive tiers
     #[arg(long = "avalanche-combination-recursive-group-size", value_parser = clap::value_parser!(u64).range(1..))]
     avalanche_combination_recursive_group_size: Option<u64>,
 
-    /// Number of recursive samples to produce per subsequent Avalanche tier; 0 preserves one-pass regrouping
+    /// Override the per-tier recursive resample-count array with one value reused across recursive tiers
     #[arg(long = "avalanche-combination-recursive-resample-count", value_parser = clap::value_parser!(u64))]
     avalanche_combination_recursive_resample_count: Option<u64>,
 
@@ -129,6 +129,10 @@ struct Args {
     /// Whether sampled avalanche prints a separate majority-vote summary for the selected sample
     #[arg(long = "avalanche-combination-majority-vote-print")]
     avalanche_combination_majority_vote_print: Option<bool>,
+
+    /// Whether Avalanche logs a global majority vote across all final-tier outputs
+    #[arg(long = "avalanche-solver-global-log-enable")]
+    avalanche_solver_global_log_enable: Option<bool>,
 
     /// Whether recursive Avalanche tiers carry forward the top beam-search bits instead of majority-vote bits
     #[arg(long = "avalanche-use-top-beam")]
@@ -197,14 +201,16 @@ fn main() -> Result<(), Box<dyn Error>> {
             .map_err(|_| "avalanche combination recursion depth exceeds usize range")?;
     }
     if let Some(group_size) = args.avalanche_combination_recursive_group_size {
-        config.engine.avalanche_combination_recursive_group_size = usize::try_from(group_size)
-            .map_err(|_| "avalanche combination recursive group size exceeds usize range")?;
+        config.engine.avalanche_combination_recursive_group_size = vec![
+            usize::try_from(group_size)
+                .map_err(|_| "avalanche combination recursive group size exceeds usize range")?,
+        ];
     }
     if let Some(resample_count) = args.avalanche_combination_recursive_resample_count {
-        config.engine.avalanche_combination_recursive_resample_count = usize::try_from(
-            resample_count,
-        )
-        .map_err(|_| "avalanche combination recursive resample count exceeds usize range")?;
+        config.engine.avalanche_combination_recursive_resample_count =
+            vec![usize::try_from(resample_count).map_err(
+                |_| "avalanche combination recursive resample count exceeds usize range",
+            )?];
     }
     if let Some(prune_hamming_distance) = args.avalanche_combination_hamming_distance_prune {
         config.engine.avalanche_combination_hamming_distance_prune = prune_hamming_distance;
@@ -229,6 +235,9 @@ fn main() -> Result<(), Box<dyn Error>> {
     }
     if let Some(majority_vote_print) = args.avalanche_combination_majority_vote_print {
         config.engine.avalanche_combination_majority_vote_print = majority_vote_print;
+    }
+    if let Some(global_log_enable) = args.avalanche_solver_global_log_enable {
+        config.engine.avalanche_solver_global_log_enable = global_log_enable;
     }
     if let Some(use_top_beam) = args.avalanche_use_top_beam {
         config.engine.avalanche_use_top_beam = use_top_beam;
@@ -270,6 +279,9 @@ fn main() -> Result<(), Box<dyn Error>> {
         avalanche_beam_top_k: config.engine.avalanche_beam_top_k,
         avalanche_probability_spread_exponent: config.engine.avalanche_probability_spread_exponent,
         avalanche_combination_samples: config.engine.avalanche_combination_samples,
+        avalanche_solver_enable: config.engine.avalanche_solver_enable,
+        avalanche_solver_global_log_enable: config.engine.avalanche_solver_global_log_enable,
+        avalanche_solver_max_bits: config.engine.avalanche_solver_max_bits,
         avalanche_combination_size: config.engine.avalanche_combination_size,
         avalanche_combination_mixed_r_candidates: config
             .engine
@@ -278,10 +290,12 @@ fn main() -> Result<(), Box<dyn Error>> {
         avalanche_combination_recursion_depth: config.engine.avalanche_combination_recursion_depth,
         avalanche_combination_recursive_group_size: config
             .engine
-            .avalanche_combination_recursive_group_size,
+            .avalanche_combination_recursive_group_size
+            .clone(),
         avalanche_combination_recursive_resample_count: config
             .engine
-            .avalanche_combination_recursive_resample_count,
+            .avalanche_combination_recursive_resample_count
+            .clone(),
         avalanche_combination_hamming_distance_prune: config
             .engine
             .avalanche_combination_hamming_distance_prune,
@@ -298,6 +312,9 @@ fn main() -> Result<(), Box<dyn Error>> {
         avalanche_combination_majority_vote_print: config
             .engine
             .avalanche_combination_majority_vote_print,
+        avalanche_report_biases: config.engine.avalanche_report_biases,
+        avalanche_center_threshold: config.engine.avalanche_center_threshold,
+        avalanche_center_threshold_best: config.engine.avalanche_center_threshold_best,
         avalanche_use_top_beam: config.engine.avalanche_use_top_beam,
         avalanche_combination_keep_all_samples_in_memory: config
             .engine
@@ -309,6 +326,15 @@ fn main() -> Result<(), Box<dyn Error>> {
         avalanche_fitness_bit_width: config.engine.avalanche_fitness_bit_width,
         avalanche_fitness_r_candidate_limit: config.engine.avalanche_fitness_r_candidate_limit,
         avalanche_fitness_cx_candidate_limit: config.engine.avalanche_fitness_cx_candidate_limit,
+        avalanche_fitness_additional_random_messages: config
+            .engine
+            .avalanche_fitness_additional_random_messages,
+        avalanche_fitness_streaming_prune: config.engine.avalanche_fitness_streaming_prune,
+        avalanche_unique_r_cx_inputs: config.engine.avalanche_unique_r_cx_inputs,
+        avalanche_include_max_fitness_candidates_in_order: config
+            .engine
+            .avalanche_include_max_fitness_candidates_in_order,
+        sqlite_in_memory: config.engine.sqlite_in_memory,
         bits_decrypt: args.bits_decrypt,
         r_candidate_target_exponent: args
             .r_candidate_target_exponent
@@ -323,6 +349,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let analytics_for_handler = Arc::clone(&analytics);
     let avalanche_cache_seed = args.seed;
     let avalanche_cache_db_folder = config.engine.sqlite_db_folder.clone();
+    let avalanche_cache_in_memory = config.engine.sqlite_in_memory;
     ctrlc::set_handler(move || {
         if let Ok(mut guard) = analytics_for_handler.lock() {
             guard.finish(Some("interrupted".to_string()));
@@ -331,7 +358,11 @@ fn main() -> Result<(), Box<dyn Error>> {
                 eprintln!("Failed to write {}: {}", output_path, err);
             }
         }
-        cleanup_avalanche_cache_db(avalanche_cache_seed, &avalanche_cache_db_folder);
+        cleanup_avalanche_cache_db(
+            avalanche_cache_seed,
+            &avalanche_cache_db_folder,
+            avalanche_cache_in_memory,
+        );
         std::process::exit(130);
     })?;
 
