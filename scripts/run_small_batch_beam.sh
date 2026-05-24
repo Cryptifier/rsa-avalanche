@@ -189,6 +189,7 @@ for i in $(seq 1 "${RUNS}"); do
   majority_vote_match_pct=$(echo "${majority_vote_line}" | extract_first_match_pct)
   global_majority_vote_line=$(grep -F -m1 "Avalanche global majority vote:" "${run_output}" || true)
   global_majority_vote_match_pct=$(echo "${global_majority_vote_line}" | extract_first_match_pct)
+  majority_vote_summary_lines=$(grep -E '^Avalanche majority vote histogram:|^Avalanche majority vote batch stats:' "${run_output}" || true)
   beam_run_max_line=$(grep -F -m1 "Avalanche beam run max:" "${run_output}" || true)
   beam_run_max_match_pct=$(echo "${beam_run_max_line}" | extract_first_match_pct)
   batch_match_percentages=$(grep -F -m1 "Avalanche batch top match percentages:" "${run_output}" | sed -n 's/.*\[\(.*\)\]/\1/p' || true)
@@ -321,6 +322,9 @@ for i in $(seq 1 "${RUNS}"); do
   fi
   if [[ -n "${global_majority_vote_line}" ]]; then
     echo "${global_majority_vote_line}"
+  fi
+  if [[ -n "${majority_vote_summary_lines}" ]]; then
+    echo "${majority_vote_summary_lines}"
   fi
   beam_comparison_block=$(awk '
     /Avalanche beam colored hex/ {print; capture=1; next}

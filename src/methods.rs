@@ -6,8 +6,8 @@ use std::{
     collections::{HashMap, HashSet},
     error::Error,
     sync::{
-        atomic::{AtomicU64, Ordering},
         Arc, Mutex,
+        atomic::{AtomicU64, Ordering},
     },
     time::{Duration, Instant},
 };
@@ -31,31 +31,40 @@ const GREEN: RGBColor = (46, 139, 87);
 const BLUE: RGBColor = (30, 144, 255);
 #[cfg(not(feature = "plots"))]
 const BLACK: RGBColor = (0, 0, 0);
+const ANSI_RED: &str = "\u{1b}[31m";
+const ANSI_YELLOW: &str = "\u{1b}[33m";
+const ANSI_GREEN: &str = "\u{1b}[32m";
+const ANSI_RESET: &str = "\u{1b}[0m";
+const MAJORITY_VOTE_HISTOGRAM_BIN_COUNT: usize = 20;
+const MAJORITY_VOTE_HISTOGRAM_BAR_WIDTH: usize = 60;
 
 use crate::analytics::{
-    generate_r_candidates_with_analytics, AvalancheBestCenterBiasReport, AvalancheCenterBiasEntry,
-    AvalancheCombinationBeamResult, AvalancheCombinationSample, AvalancheCombinationSampleInput,
-    AvalancheFinalTierBiasReport, AvalancheTierSampleStat, AvalancheTierStatistics,
-    RCandidateAccuracyBatch, RCandidateTraceBatch, RCandidateTraceEntry, SessionAnalytics,
+    AvalancheBestCenterBiasReport, AvalancheCenterBiasEntry, AvalancheCombinationBeamResult,
+    AvalancheCombinationSample, AvalancheCombinationSampleInput, AvalancheFinalTierBiasReport,
+    AvalancheTierSampleStat, AvalancheTierStatistics, RCandidateAccuracyBatch,
+    RCandidateTraceBatch, RCandidateTraceEntry, SessionAnalytics,
+    generate_r_candidates_with_analytics,
 };
 use crate::avalanche::{
-    mirror_inverted_candidates, search_avalanche_tree_with_progress,
-    search_avalanche_tree_with_scores_progress, sort_candidates_by_hamming_distance,
-    AvalancheBuilder, AvalancheInput, AvalancheNode,
+    AvalancheBuilder, AvalancheInput, AvalancheNode, mirror_inverted_candidates,
+    search_avalanche_tree_with_progress, search_avalanche_tree_with_scores_progress,
+    sort_candidates_by_hamming_distance,
 };
 use crate::combiner::majority_vote_with_distribution;
 use crate::config::{
-    load_rsa_key_material_from_config_keyfile, Config, EngineConfig, RsaKeyFileFormat,
+    Config, EngineConfig, RsaKeyFileFormat, load_rsa_key_material_from_config_keyfile,
 };
 use crate::database::{
-    approximate_scored_avalanche_input_bytes, build_cached_avalanche_tier_statistics,
-    count_cached_scored_inputs, count_cached_selected_samples,
-    deserialize_selected_avalanche_sample_row, insert_cached_scored_inputs,
-    insert_cached_selected_samples, load_cached_recursive_sample_summaries,
-    load_cached_scored_inputs_by_ids, load_cached_selected_sample_rows_by_ids,
-    load_cached_selected_sample_rows_page, AvalancheCacheGuard,
+    AvalancheCacheGuard, approximate_scored_avalanche_input_bytes,
+    build_cached_avalanche_tier_statistics, count_cached_scored_inputs,
+    count_cached_selected_samples, deserialize_selected_avalanche_sample_row,
+    insert_cached_scored_inputs, insert_cached_selected_samples,
+    load_cached_recursive_sample_summaries, load_cached_scored_inputs_by_ids,
+    load_cached_selected_sample_rows_by_ids, load_cached_selected_sample_rows_page,
 };
 use crate::fitness::{
+    AvalancheFitnessScore, CachedScoredInputSummary, HammingDistancePrunedPool,
+    RankedScoredAvalancheInput, StreamingScoredAvalancheFitnessPool,
     apply_cached_scored_avalanche_fitness_pass, apply_ranked_scored_avalanche_fitness_pass,
     build_candidate_message_transform, build_scored_avalanche_fitness_pass,
     enforce_global_unique_cached_scored_inputs, enforce_global_unique_scored_inputs,
@@ -69,21 +78,20 @@ use crate::fitness::{
     resolve_avalanche_fitness_shift_bits, resolve_plaintext_message_bit_width,
     single_message_avalanche_fitness_score, transform_message_for_candidate_scoring,
     validate_avalanche_fitness_log_top_pct, validate_avalanche_fitness_threshold,
-    validate_message_width_under_modulus, AvalancheFitnessScore, CachedScoredInputSummary,
-    HammingDistancePrunedPool, RankedScoredAvalancheInput, StreamingScoredAvalancheFitnessPool,
+    validate_message_width_under_modulus,
 };
 use crate::helpers::{
-    format_beam_float, matching_bit_counts_bytes_le, normalize_avalanche_biases,
-    spread_normalized_avalanche_biases, stored_beam_value_is_one, PackedBits,
+    PackedBits, format_beam_float, matching_bit_counts_bytes_le, normalize_avalanche_biases,
+    spread_normalized_avalanche_biases, stored_beam_value_is_one,
 };
 use crate::math::{
     bit_length, choose_exponent, compute_totient, mod_inverse, random_biguint_bits,
     random_prime_with_bits, shannon_entropy_bit, to_hex,
 };
-use crate::r_candidates::{resolve_retargeted_r_candidates_path, RCandidate, RCandidateSettings};
+use crate::r_candidates::{RCandidate, RCandidateSettings, resolve_retargeted_r_candidates_path};
 use crate::rng::{RngChoice, RngMode};
 use crate::search::{beam_search_top_k, beam_search_top_k_with_progress, viterbi_decode};
-use crate::solver::{run_avalanche_solver, AvalancheSolverBatch, AvalancheSolverSample};
+use crate::solver::{AvalancheSolverBatch, AvalancheSolverSample, run_avalanche_solver};
 use num_bigint::BigUint;
 use num_integer::Integer;
 use num_traits::{One, Zero};
@@ -98,11 +106,11 @@ use crate::fitness::apply_scored_avalanche_fitness_pass;
 #[cfg(test)]
 use crate::fitness::select_scored_inputs_for_mixed_r_candidates;
 #[cfg(test)]
+use diesel::QueryableByName;
+#[cfg(test)]
 use diesel::prelude::*;
 #[cfg(test)]
 use diesel::sql_query;
-#[cfg(test)]
-use diesel::QueryableByName;
 
 /// Input arguments for the RSA demo and analysis pipeline.
 pub struct DemoArgs {
@@ -955,6 +963,166 @@ fn compute_stats(values: &[f64]) -> Option<StatSummary> {
         max,
         count,
     })
+}
+
+/// Computes the median of a slice of `f64` values.
+///
+/// # Parameters
+/// - `values`: Input values to summarize.
+///
+/// # Returns
+/// - `Option<f64>`: Median value, or `None` if `values` is empty.
+///
+/// # Expected Output
+/// - Returns `None` on empty input; no side effects.
+fn median_f64(values: &[f64]) -> Option<f64> {
+    if values.is_empty() {
+        return None;
+    }
+
+    let mut sorted = values.to_vec();
+    sorted.sort_by(|left, right| left.total_cmp(right));
+    let mid = sorted.len() / 2;
+    if sorted.len() % 2 == 0 {
+        Some((sorted[mid - 1] + sorted[mid]) / 2.0)
+    } else {
+        Some(sorted[mid])
+    }
+}
+
+/// Selects the ANSI color for a match percentage using low/mid/high tertiles.
+///
+/// # Parameters
+/// - `match_pct`: Match percentage in the inclusive range `[0, 100]`.
+///
+/// # Returns
+/// - `&'static str`: ANSI escape prefix for the selected tertile color.
+///
+/// # Expected Output
+/// - Returns an ANSI color code string; no side effects.
+fn majority_vote_summary_color(match_pct: f64) -> &'static str {
+    if match_pct < (100.0 / 3.0) {
+        ANSI_RED
+    } else if match_pct < (200.0 / 3.0) {
+        ANSI_YELLOW
+    } else {
+        ANSI_GREEN
+    }
+}
+
+/// Formats a percentage using low/mid/high tertile ANSI coloring.
+///
+/// # Parameters
+/// - `match_pct`: Percentage value to display.
+///
+/// # Returns
+/// - `String`: Colorized percentage text including the trailing percent sign.
+///
+/// # Expected Output
+/// - Returns formatted ANSI text; no side effects.
+fn colorize_majority_vote_summary_pct(match_pct: f64) -> String {
+    format!(
+        "{}{}%{}",
+        majority_vote_summary_color(match_pct),
+        format_beam_float(match_pct, BEAM_PCT_DECIMALS),
+        ANSI_RESET
+    )
+}
+
+/// Builds the run-summary histogram lines for batch majority-vote match percentages.
+///
+/// # Parameters
+/// - `match_pcts`: Per-batch majority-vote match percentages for the current analysis run.
+///
+/// # Returns
+/// - `Vec<String>`: One formatted histogram row per bin, or a single `N/A` line when empty.
+///
+/// # Expected Output
+/// - Returns display-ready lines; no direct stdout/stderr output.
+fn format_majority_vote_accuracy_histogram_lines(match_pcts: &[f64]) -> Vec<String> {
+    if match_pcts.is_empty() {
+        return vec![
+            "Avalanche majority vote histogram: N/A (no batches recorded majority-vote accuracy)"
+                .to_string(),
+        ];
+    }
+
+    let bin_width = 100.0 / MAJORITY_VOTE_HISTOGRAM_BIN_COUNT as f64;
+    let mut counts = vec![0usize; MAJORITY_VOTE_HISTOGRAM_BIN_COUNT];
+    for match_pct in match_pcts {
+        let clamped = match_pct.clamp(0.0, 100.0);
+        let mut bin_index = (clamped / bin_width).floor() as usize;
+        if bin_index >= MAJORITY_VOTE_HISTOGRAM_BIN_COUNT {
+            bin_index = MAJORITY_VOTE_HISTOGRAM_BIN_COUNT - 1;
+        }
+        counts[bin_index] += 1;
+    }
+
+    let max_count = counts.iter().copied().max().unwrap_or(0);
+    counts
+        .into_iter()
+        .enumerate()
+        .map(|(index, count)| {
+            let start = index as f64 * bin_width;
+            let end = ((index + 1) as f64 * bin_width).min(100.0);
+            let color = majority_vote_summary_color((start + end) / 2.0);
+            let filled_width = if count == 0 || max_count == 0 {
+                0
+            } else {
+                ((count * MAJORITY_VOTE_HISTOGRAM_BAR_WIDTH) + max_count - 1) / max_count
+            };
+            let filled = "#".repeat(filled_width);
+            let empty = " ".repeat(MAJORITY_VOTE_HISTOGRAM_BAR_WIDTH - filled_width);
+            let bar = if filled.is_empty() {
+                empty
+            } else {
+                format!("{color}{filled}{ANSI_RESET}{empty}")
+            };
+            let upper_bracket = if index + 1 == MAJORITY_VOTE_HISTOGRAM_BIN_COUNT {
+                ']'
+            } else {
+                ')'
+            };
+            format!(
+                "Avalanche majority vote histogram: [{start:>5.1}, {end:>5.1}{upper_bracket} |{bar}| count {color}{count:>3}{ANSI_RESET}"
+            )
+        })
+        .collect()
+}
+
+/// Builds cumulative per-batch mean and median lines for majority-vote accuracy.
+///
+/// # Parameters
+/// - `match_pcts`: Per-batch majority-vote match percentages for the current analysis run.
+///
+/// # Returns
+/// - `Vec<String>`: One formatted cumulative summary line per batch, or a single `N/A` line when empty.
+///
+/// # Expected Output
+/// - Returns display-ready lines; no direct stdout/stderr output.
+fn format_majority_vote_batch_summary_lines(match_pcts: &[f64]) -> Vec<String> {
+    if match_pcts.is_empty() {
+        return vec![
+            "Avalanche majority vote batch stats: N/A (no batches recorded majority-vote accuracy)"
+                .to_string(),
+        ];
+    }
+
+    let mut lines = Vec::with_capacity(match_pcts.len());
+    let mut prefix = Vec::with_capacity(match_pcts.len());
+    for (index, match_pct) in match_pcts.iter().copied().enumerate() {
+        prefix.push(match_pct);
+        let mean = mean_f64(&prefix);
+        let median = median_f64(&prefix).unwrap_or(0.0);
+        lines.push(format!(
+            "Avalanche majority vote batch stats: batch {:>2} latest {} cumulative mean {} cumulative median {}",
+            index + 1,
+            colorize_majority_vote_summary_pct(match_pct),
+            colorize_majority_vote_summary_pct(mean),
+            colorize_majority_vote_summary_pct(median),
+        ));
+    }
+    lines
 }
 
 /// Builds per-candidate bit similarity entries for a fixed message.
@@ -2778,20 +2946,16 @@ fn pad_left_hex(value: &str, width: usize) -> String {
 /// # Expected Output
 /// - Returns a colorized string; no side effects.
 fn colorize_hex_matches(value: &str, reference: &str) -> String {
-    const GREEN: &str = "\u{1b}[32m";
-    const RED: &str = "\u{1b}[31m";
-    const RESET: &str = "\u{1b}[0m";
-
     let mut out = String::new();
     for (a, b) in value.chars().zip(reference.chars()) {
         if a == b {
-            out.push_str(GREEN);
+            out.push_str(ANSI_GREEN);
             out.push(a);
-            out.push_str(RESET);
+            out.push_str(ANSI_RESET);
         } else {
-            out.push_str(RED);
+            out.push_str(ANSI_RED);
             out.push(a);
-            out.push_str(RESET);
+            out.push_str(ANSI_RESET);
         }
     }
     out
@@ -7658,6 +7822,7 @@ fn run_r_candidate_accuracy_batches(
     let mut cx_run_max: Option<CxMatchCandidate> = None;
     let mut total_cx_evaluated_candidates = 0usize;
     let mut batch_top_match_percentages = Vec::new();
+    let mut batch_majority_vote_match_percentages = Vec::new();
     let mut avalanche_solver_batches =
         if engine.avalanche_solver_enable || engine.avalanche_solver_global_log_enable {
             Some(Vec::with_capacity(batch_count))
@@ -8036,6 +8201,7 @@ fn run_r_candidate_accuracy_batches(
             majority_vote_match_pct = Some(selected_sample.majority_vote_match_pct);
             majority_vote_ones_match_pct = Some(selected_sample.majority_vote_ones_match_pct);
             batch_top_match_percentages.push(selected_sample.best_match_pct);
+            batch_majority_vote_match_percentages.push(selected_sample.majority_vote_match_pct);
 
             let message_bits = payload_message_bits(engine, &message);
             if let Some(top_beam) = selected_sample.beam_results.first() {
@@ -8330,6 +8496,22 @@ fn run_r_candidate_accuracy_batches(
                 "Avalanche evaluated candidates total: {}",
                 total_avalanche_evaluated_candidates
             );
+            println!(
+                "Avalanche majority vote histogram: {} bins, {}% per bin, max width {}",
+                MAJORITY_VOTE_HISTOGRAM_BIN_COUNT,
+                format_beam_float(100.0 / MAJORITY_VOTE_HISTOGRAM_BIN_COUNT as f64, 1),
+                MAJORITY_VOTE_HISTOGRAM_BAR_WIDTH
+            );
+            for line in format_majority_vote_accuracy_histogram_lines(
+                &batch_majority_vote_match_percentages,
+            ) {
+                println!("{line}");
+            }
+            for line in
+                format_majority_vote_batch_summary_lines(&batch_majority_vote_match_percentages)
+            {
+                println!("{line}");
+            }
         }
 
         with_analytics(analytics, |a| {
@@ -8562,6 +8744,11 @@ fn run_r_candidate_accuracy_batches(
                 "avalanche_batch_top_match_percentages",
                 json!(batch_top_match_percentages),
             );
+            a.set_feature_stat(
+                "r_candidate_accuracy",
+                "avalanche_batch_majority_vote_match_percentages",
+                json!(batch_majority_vote_match_percentages),
+            );
             if engine.avalanche_report_biases && engine.avalanche_center_threshold_best {
                 a.set_feature_stat(
                     "r_candidate_accuracy",
@@ -8581,6 +8768,11 @@ fn run_r_candidate_accuracy_batches(
                 "r_candidate_accuracy",
                 "avalanche_batch_top_match_percentages",
                 json!(batch_top_match_percentages),
+            );
+            a.set_feature_stat(
+                "r_candidate_accuracy",
+                "avalanche_batch_majority_vote_match_percentages",
+                json!(batch_majority_vote_match_percentages),
             );
         });
     }
@@ -8713,6 +8905,33 @@ mod tests {
         std::env::temp_dir().join(format!("rsademo_avalanche_{label}_{nanos}"))
     }
 
+    /// Removes ANSI escape codes from a console-formatted string for assertions.
+    ///
+    /// # Parameters
+    /// - `value`: Text that may contain ANSI escape sequences.
+    ///
+    /// # Returns
+    /// - `String`: Plain-text copy with escape sequences removed.
+    ///
+    /// # Expected Output
+    /// - Returns a cleaned string; no stdout/stderr output.
+    fn strip_ansi(value: &str) -> String {
+        let mut plain = String::with_capacity(value.len());
+        let mut chars = value.chars().peekable();
+        while let Some(ch) = chars.next() {
+            if ch == '\u{1b}' {
+                for next in chars.by_ref() {
+                    if next == 'm' {
+                        break;
+                    }
+                }
+            } else {
+                plain.push(ch);
+            }
+        }
+        plain
+    }
+
     #[test]
     fn test_analysis_detect_ramp() {
         // Sample dataset: mean is 10, ramp should be 11, 12, 13
@@ -8725,6 +8944,43 @@ mod tests {
         // Check that at least one ramp is detected and signal strength is correct
         assert!(!ramps.is_empty());
         assert!(strength > 0);
+    }
+
+    #[test]
+    fn test_format_majority_vote_accuracy_histogram_lines_cover_expected_bins() {
+        let lines = format_majority_vote_accuracy_histogram_lines(&[0.0, 4.9, 5.0, 99.9, 100.0]);
+        assert_eq!(lines.len(), MAJORITY_VOTE_HISTOGRAM_BIN_COUNT);
+        assert!(lines[0].contains(ANSI_RED));
+        assert!(lines[10].contains(ANSI_YELLOW));
+        assert!(lines[MAJORITY_VOTE_HISTOGRAM_BIN_COUNT - 1].contains(ANSI_GREEN));
+
+        let stripped = lines
+            .iter()
+            .map(|line| strip_ansi(line))
+            .collect::<Vec<_>>();
+        assert!(stripped[0].contains("[  0.0,   5.0)"));
+        assert!(stripped[0].contains("count   2"));
+        assert!(stripped[1].contains("[  5.0,  10.0)"));
+        assert!(stripped[1].contains("count   1"));
+        assert!(stripped[MAJORITY_VOTE_HISTOGRAM_BIN_COUNT - 1].contains("[ 95.0, 100.0]"));
+        assert!(stripped[MAJORITY_VOTE_HISTOGRAM_BIN_COUNT - 1].contains("count   2"));
+    }
+
+    #[test]
+    fn test_format_majority_vote_batch_summary_lines_are_cumulative() {
+        let lines = format_majority_vote_batch_summary_lines(&[10.0, 90.0, 30.0]);
+        assert_eq!(lines.len(), 3);
+        assert!(lines[0].contains(ANSI_RED));
+        assert!(lines[1].contains(ANSI_YELLOW));
+        assert!(lines[2].contains(ANSI_RED));
+
+        let stripped = lines
+            .iter()
+            .map(|line| strip_ansi(line))
+            .collect::<Vec<_>>();
+        assert!(stripped[0].contains("batch  1 latest 10.00000000% cumulative mean 10.00000000% cumulative median 10.00000000%"));
+        assert!(stripped[1].contains("batch  2 latest 90.00000000% cumulative mean 50.00000000% cumulative median 50.00000000%"));
+        assert!(stripped[2].contains("batch  3 latest 30.00000000% cumulative mean 43.33333333% cumulative median 30.00000000%"));
     }
 
     #[test]
@@ -8764,9 +9020,11 @@ mod tests {
                 BigUint::from(9u8)
             ]
         );
-        assert!(variants
-            .iter()
-            .all(|variant| mod_inverse(&variant.e_x, &candidate_phi).is_some()));
+        assert!(
+            variants
+                .iter()
+                .all(|variant| mod_inverse(&variant.e_x, &candidate_phi).is_some())
+        );
     }
 
     #[test]
@@ -9602,9 +9860,11 @@ mod tests {
         )
         .expect_err("invalid percentile should be rejected");
 
-        assert!(error
-            .to_string()
-            .contains("avalanche_combination_hamming_distance_keep_percentile"));
+        assert!(
+            error
+                .to_string()
+                .contains("avalanche_combination_hamming_distance_keep_percentile")
+        );
     }
 
     #[test]
@@ -9640,9 +9900,11 @@ mod tests {
         )
         .expect_err("invalid outlier preference percentage should be rejected");
 
-        assert!(error
-            .to_string()
-            .contains("avalanche_combination_hamming_distance_outlier_preference_pct"));
+        assert!(
+            error
+                .to_string()
+                .contains("avalanche_combination_hamming_distance_outlier_preference_pct")
+        );
     }
 
     #[test]
@@ -10144,10 +10406,12 @@ mod tests {
         .expect("recursive sampled avalanche with retained samples should succeed");
 
         assert_eq!(result.retained_samples.len(), 4);
-        assert!(result
-            .retained_samples
-            .iter()
-            .all(|sample| sample.inputs.is_empty()));
+        assert!(
+            result
+                .retained_samples
+                .iter()
+                .all(|sample| sample.inputs.is_empty())
+        );
         assert_eq!(result.final_tier_samples.len(), 2);
     }
 
@@ -10527,9 +10791,11 @@ mod tests {
 
         assert_eq!(sample_plans.len(), 4);
         assert!(sample_plans.iter().all(|plan| plan.len() == 2));
-        assert!(sample_plans
-            .iter()
-            .all(|plan| { plan.iter().copied().collect::<HashSet<_>>().len() == plan.len() }));
+        assert!(
+            sample_plans
+                .iter()
+                .all(|plan| { plan.iter().copied().collect::<HashSet<_>>().len() == plan.len() })
+        );
         assert_eq!(unique_signatures.len(), sample_plans.len());
         assert!(flattened.len() > unique_inputs.len());
     }
@@ -10587,9 +10853,11 @@ mod tests {
 
         assert_eq!(sample_plans.len(), 4);
         assert!(sample_plans.iter().all(|plan| plan.len() == 2));
-        assert!(sample_plans
-            .iter()
-            .all(|plan| { plan.iter().copied().collect::<HashSet<_>>().len() == plan.len() }));
+        assert!(
+            sample_plans
+                .iter()
+                .all(|plan| { plan.iter().copied().collect::<HashSet<_>>().len() == plan.len() })
+        );
         assert!(sample_plans.iter().all(|plan| {
             plan.iter()
                 .map(|(batch_candidate_index, _)| *batch_candidate_index)
@@ -10906,10 +11174,12 @@ mod tests {
 
         let cache =
             AvalancheCacheGuard::new(Some(10_004), &engine).expect("cache should initialize");
-        assert!(cache
-            .path
-            .to_string_lossy()
-            .contains("mode=memory&cache=shared"));
+        assert!(
+            cache
+                .path
+                .to_string_lossy()
+                .contains("mode=memory&cache=shared")
+        );
         assert!(!cache.path.exists());
 
         let mut connection = cache.pool().expect("pool should exist").get().unwrap();
@@ -10963,8 +11233,8 @@ mod tests {
     }
 
     #[test]
-    fn test_run_sampled_avalanche_beam_search_cached_errors_when_fitness_threshold_removes_all_candidates(
-    ) {
+    fn test_run_sampled_avalanche_beam_search_cached_errors_when_fitness_threshold_removes_all_candidates()
+     {
         let mut config = Config::default();
         config.engine.avalanche_random_chacha20_inputs = true;
         config.engine.avalanche_combination_samples = 1;
