@@ -152,7 +152,7 @@ pub struct EngineConfig {
     /// Whether the final-tier Avalanche solver should compare batch-pair sample products for whole-message recovery.
     #[serde(default = "default_avalanche_solver_enable")]
     pub avalanche_solver_enable: bool,
-    /// Whether Avalanche runs should log the global majority vote across every final-tier output.
+    /// Whether Avalanche runs should log one batch-global majority per batch and a final majority across those batch-global results.
     #[serde(default = "default_avalanche_solver_global_log_enable")]
     pub avalanche_solver_global_log_enable: bool,
     /// Maximum number of differing sample bits the Avalanche solver may brute-force per batch-pair sample comparison.

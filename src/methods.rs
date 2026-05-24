@@ -4142,12 +4142,23 @@ struct MajorityVoteMaxCandidate {
 }
 
 #[derive(Clone, Debug)]
+struct BatchGlobalMajorityVoteCandidate {
+    batch_number: usize,
+    majority_vote_bits: Vec<bool>,
+    majority_vote_match_pct: f64,
+    majority_vote_ones_match_pct: f64,
+    message_bits: Vec<bool>,
+    sample_count: usize,
+}
+
+#[derive(Clone, Debug)]
 struct GlobalMajorityVoteCandidate {
     majority_vote_bits: Vec<bool>,
     majority_vote_match_pct: f64,
     majority_vote_ones_match_pct: f64,
     message_bits: Vec<bool>,
     batch_count: usize,
+    contributing_batch_count: usize,
     sample_count: usize,
 }
 
@@ -4338,20 +4349,79 @@ fn build_avalanche_solver_batch(
     }
 }
 
-/// Computes the global majority vote across every final-tier Avalanche output.
+/// Computes one global majority vote for a single analysis batch.
+///
+/// # Parameters
+/// - `engine`: Engine configuration providing the combiner tie breaker and enable flag.
+/// - `batch`: Final-tier Avalanche outputs for one analysis batch.
+///
+/// # Returns
+/// - `Result<Option<BatchGlobalMajorityVoteCandidate>, String>`: Per-batch aggregate majority-vote result, or `None` when no final-tier outputs were retained.
+///
+/// # Expected Output
+/// - Returns the per-batch aggregate payload without printing.
+fn build_batch_global_majority_vote_candidate(
+    engine: &EngineConfig,
+    batch: &AvalancheSolverBatch,
+) -> Result<Option<BatchGlobalMajorityVoteCandidate>, String> {
+    if !engine.avalanche_solver_global_log_enable {
+        return Ok(None);
+    }
+
+    for sample in &batch.samples {
+        if sample.majority_vote_bits.len() != batch.message_bits.len() {
+            return Err(format!(
+                "avalanche global majority vote sample width mismatch: batch {} tier {} sample {} has {} majority-vote bits but message has {} bits",
+                sample.batch_number,
+                sample.tier_index,
+                sample.sample_index,
+                sample.majority_vote_bits.len(),
+                batch.message_bits.len()
+            ));
+        }
+    }
+    if batch.samples.is_empty() {
+        return Ok(None);
+    }
+
+    let sample_bits = batch
+        .samples
+        .iter()
+        .map(|sample| sample.majority_vote_bits.clone())
+        .collect::<Vec<_>>();
+    let majority_distribution =
+        majority_vote_with_distribution(&sample_bits, engine.combiner_tie_breaker)
+            .map_err(|err| err.to_string())?;
+    let majority_vote_bits = majority_distribution.majority_bits;
+    let (majority_vote_match_pct, majority_vote_ones_match_pct) =
+        compute_bit_match_percentages(&majority_vote_bits, &batch.message_bits);
+
+    Ok(Some(BatchGlobalMajorityVoteCandidate {
+        batch_number: batch.batch_number,
+        majority_vote_bits,
+        majority_vote_match_pct,
+        majority_vote_ones_match_pct,
+        message_bits: batch.message_bits.clone(),
+        sample_count: batch.samples.len(),
+    }))
+}
+
+/// Computes the global majority vote across every per-batch global majority result.
 ///
 /// # Parameters
 /// - `engine`: Engine configuration providing the combiner tie breaker and enable flag.
 /// - `batches`: Final-tier Avalanche outputs grouped by analysis batch.
+/// - `batch_majorities`: Per-batch global majority-vote results aligned to `batches`.
 ///
 /// # Returns
-/// - `Result<Option<GlobalMajorityVoteCandidate>, String>`: Aggregate majority-vote result, or `None` when no comparable samples were available.
+/// - `Result<Option<GlobalMajorityVoteCandidate>, String>`: Aggregate majority-vote result, or `None` when no comparable batch-global majorities were available.
 ///
 /// # Expected Output
 /// - Prints skip diagnostics when batches target different messages; otherwise returns the aggregate majority-vote payload without printing.
 fn build_global_majority_vote_candidate(
     engine: &EngineConfig,
     batches: &[AvalancheSolverBatch],
+    batch_majorities: &[Option<BatchGlobalMajorityVoteCandidate>],
 ) -> Result<Option<GlobalMajorityVoteCandidate>, String> {
     if !engine.avalanche_solver_global_log_enable {
         return Ok(None);
@@ -4363,49 +4433,36 @@ fn build_global_majority_vote_candidate(
         return Ok(None);
     }
 
-    let mut sample_count = 0usize;
-    for batch in batches {
-        for sample in &batch.samples {
-            if sample.majority_vote_bits.len() != batch.message_bits.len() {
-                return Err(format!(
-                    "avalanche global majority vote sample width mismatch: batch {} tier {} sample {} has {} majority-vote bits but message has {} bits",
-                    sample.batch_number,
-                    sample.tier_index,
-                    sample.sample_index,
-                    sample.majority_vote_bits.len(),
-                    batch.message_bits.len()
-                ));
-            }
-            sample_count += 1;
-        }
-    }
-    if sample_count == 0 {
+    let retained_batch_majorities = batch_majorities
+        .iter()
+        .filter_map(|candidate| candidate.as_ref())
+        .collect::<Vec<_>>();
+    let sample_count = retained_batch_majorities
+        .iter()
+        .map(|candidate| candidate.sample_count)
+        .sum::<usize>();
+    if retained_batch_majorities.is_empty() {
         println!("Avalanche global majority vote: N/A (no final-tier outputs were retained)");
         return Ok(None);
     }
 
-    let reference_message_bits = &batches[0].message_bits;
-    if batches
+    let reference_message_bits = &retained_batch_majorities[0].message_bits;
+    if retained_batch_majorities
         .iter()
         .skip(1)
-        .any(|batch| batch.message_bits != *reference_message_bits)
+        .any(|candidate| candidate.message_bits != *reference_message_bits)
     {
         println!(
-            "Avalanche global majority vote: skipped because {} batch(es) targeted different original messages across {} final-tier outputs",
-            batches.len(),
+            "Avalanche global majority vote: skipped because {} batch global majority vote(s) targeted different original messages across {} retained final-tier outputs",
+            retained_batch_majorities.len(),
             sample_count
         );
         return Ok(None);
     }
 
-    let sample_bits = batches
+    let sample_bits = retained_batch_majorities
         .iter()
-        .flat_map(|batch| {
-            batch
-                .samples
-                .iter()
-                .map(|sample| sample.majority_vote_bits.clone())
-        })
+        .map(|candidate| candidate.majority_vote_bits.clone())
         .collect::<Vec<_>>();
     let majority_distribution =
         majority_vote_with_distribution(&sample_bits, engine.combiner_tie_breaker)
@@ -4420,6 +4477,7 @@ fn build_global_majority_vote_candidate(
         majority_vote_ones_match_pct,
         message_bits: reference_message_bits.clone(),
         batch_count: batches.len(),
+        contributing_batch_count: retained_batch_majorities.len(),
         sample_count,
     }))
 }
@@ -8575,14 +8633,55 @@ fn run_r_candidate_accuracy_batches(
         }
     }
 
+    let batch_global_majority_votes = if let Some(ref solver_batches) = avalanche_solver_batches {
+        solver_batches
+            .iter()
+            .map(|batch| build_batch_global_majority_vote_candidate(engine, batch))
+            .collect::<Result<Vec<_>, _>>()?
+    } else {
+        Vec::new()
+    };
+    if engine.avalanche_solver_global_log_enable {
+        if let Some(ref solver_batches) = avalanche_solver_batches {
+            if solver_batches.len() > 1 {
+                for (batch, batch_global_majority_vote) in solver_batches
+                    .iter()
+                    .zip(batch_global_majority_votes.iter())
+                {
+                    if let Some(batch_global_majority_vote) = batch_global_majority_vote {
+                        println!(
+                            "Avalanche batch global majority vote: batch {} final-tier outputs {} match {}% ones-match {}% hex {}",
+                            batch_global_majority_vote.batch_number,
+                            batch_global_majority_vote.sample_count,
+                            format_beam_float(
+                                batch_global_majority_vote.majority_vote_match_pct,
+                                BEAM_PCT_DECIMALS
+                            ),
+                            format_beam_float(
+                                batch_global_majority_vote.majority_vote_ones_match_pct,
+                                BEAM_PCT_DECIMALS
+                            ),
+                            format_bits_hex_le(&batch_global_majority_vote.majority_vote_bits)
+                        );
+                    } else {
+                        println!(
+                            "Avalanche batch global majority vote: batch {} N/A (no final-tier outputs were retained)",
+                            batch.batch_number
+                        );
+                    }
+                }
+            }
+        }
+    }
     let global_majority_vote = if let Some(ref solver_batches) = avalanche_solver_batches {
-        build_global_majority_vote_candidate(engine, solver_batches)?
+        build_global_majority_vote_candidate(engine, solver_batches, &batch_global_majority_votes)?
     } else {
         None
     };
     if let Some(ref global_majority_vote) = global_majority_vote {
         println!(
-            "Avalanche global majority vote: batches {} final-tier outputs {} match {}% ones-match {}% hex {}",
+            "Avalanche global majority vote: contributing batch-majorities {} of {} batches final-tier outputs {} match {}% ones-match {}% hex {}",
+            global_majority_vote.contributing_batch_count,
             global_majority_vote.batch_count,
             global_majority_vote.sample_count,
             format_beam_float(
@@ -8596,8 +8695,10 @@ fn run_r_candidate_accuracy_batches(
             format_bits_hex_le(&global_majority_vote.majority_vote_bits)
         );
         println!(
-            "Avalanche global majority vote colored hex ({} final-tier outputs across {} batch(es), lsb0 order):",
-            global_majority_vote.sample_count, global_majority_vote.batch_count
+            "Avalanche global majority vote colored hex ({} batch-global majorities from {} final-tier outputs across {} batch(es), lsb0 order):",
+            global_majority_vote.contributing_batch_count,
+            global_majority_vote.sample_count,
+            global_majority_vote.batch_count
         );
         print_colored_hex_comparison(
             "Original message",
@@ -8694,11 +8795,51 @@ fn run_r_candidate_accuracy_batches(
             "avalanche_global_majority_found",
             json!(global_majority_vote.is_some()),
         );
+        a.set_feature_stat(
+            "r_candidate_accuracy",
+            "avalanche_batch_global_majority_votes",
+            json!(
+                batch_global_majority_votes
+                    .iter()
+                    .filter_map(|candidate| candidate.as_ref())
+                    .map(|candidate| json!({
+                        "batch_number": candidate.batch_number,
+                        "sample_count": candidate.sample_count,
+                        "match_pct": candidate.majority_vote_match_pct,
+                        "ones_match_pct": candidate.majority_vote_ones_match_pct,
+                        "hex": format_bits_hex_le(&candidate.majority_vote_bits),
+                    }))
+                    .collect::<Vec<_>>()
+            ),
+        );
+        a.set_feature_stat(
+            "r_candidate_accuracy",
+            "avalanche_batch_global_majority_missing_batches",
+            json!(
+                avalanche_solver_batches
+                    .as_ref()
+                    .map(|solver_batches| {
+                        solver_batches
+                            .iter()
+                            .zip(batch_global_majority_votes.iter())
+                            .filter_map(|(batch, candidate)| {
+                                candidate.is_none().then_some(batch.batch_number)
+                            })
+                            .collect::<Vec<_>>()
+                    })
+                    .unwrap_or_default()
+            ),
+        );
         if let Some(ref global_majority_vote) = global_majority_vote {
             a.set_feature_stat(
                 "r_candidate_accuracy",
                 "avalanche_global_majority_batch_count",
                 json!(global_majority_vote.batch_count),
+            );
+            a.set_feature_stat(
+                "r_candidate_accuracy",
+                "avalanche_global_majority_contributing_batch_count",
+                json!(global_majority_vote.contributing_batch_count),
             );
             a.set_feature_stat(
                 "r_candidate_accuracy",
@@ -11420,7 +11561,7 @@ mod tests {
     }
 
     #[test]
-    fn test_build_global_majority_vote_candidate_aggregates_final_tier_outputs() {
+    fn test_build_global_majority_vote_candidate_aggregates_batch_global_majorities() {
         let mut engine = EngineConfig::default();
         engine.avalanche_solver_global_log_enable = true;
         engine.combiner_tie_breaker = true;
@@ -11459,15 +11600,82 @@ mod tests {
             },
         ];
 
-        let candidate = build_global_majority_vote_candidate(&engine, &batches)
+        let batch_majorities = batches
+            .iter()
+            .map(|batch| build_batch_global_majority_vote_candidate(&engine, batch))
+            .collect::<Result<Vec<_>, _>>()
+            .expect("batch global majority votes should succeed");
+        let candidate = build_global_majority_vote_candidate(&engine, &batches, &batch_majorities)
             .expect("global majority vote should succeed")
             .expect("global majority vote should be present");
 
         assert_eq!(candidate.batch_count, 2);
+        assert_eq!(candidate.contributing_batch_count, 2);
         assert_eq!(candidate.sample_count, 3);
-        assert_eq!(candidate.majority_vote_bits, vec![true, false, true]);
-        assert_eq!(candidate.majority_vote_match_pct, 100.0);
-        assert_eq!(candidate.majority_vote_ones_match_pct, 100.0);
+        assert_eq!(candidate.majority_vote_bits, vec![true, true, true]);
+        assert_eq!(candidate.majority_vote_match_pct, 66.66666666666666);
+        assert_eq!(candidate.majority_vote_ones_match_pct, 66.66666666666666);
+    }
+
+    #[test]
+    fn test_build_global_majority_vote_candidate_weights_batches_equally() {
+        let mut engine = EngineConfig::default();
+        engine.avalanche_solver_global_log_enable = true;
+        engine.combiner_tie_breaker = true;
+
+        let batches = vec![
+            AvalancheSolverBatch {
+                batch_number: 1,
+                message_bits: vec![true, true],
+                samples: vec![
+                    AvalancheSolverSample {
+                        batch_number: 1,
+                        tier_index: 1,
+                        sample_index: 1,
+                        bits: vec![false, false],
+                        majority_vote_bits: vec![false, false],
+                    },
+                    AvalancheSolverSample {
+                        batch_number: 1,
+                        tier_index: 1,
+                        sample_index: 2,
+                        bits: vec![false, false],
+                        majority_vote_bits: vec![false, false],
+                    },
+                    AvalancheSolverSample {
+                        batch_number: 1,
+                        tier_index: 1,
+                        sample_index: 3,
+                        bits: vec![false, false],
+                        majority_vote_bits: vec![false, false],
+                    },
+                ],
+            },
+            AvalancheSolverBatch {
+                batch_number: 2,
+                message_bits: vec![true, true],
+                samples: vec![AvalancheSolverSample {
+                    batch_number: 2,
+                    tier_index: 1,
+                    sample_index: 1,
+                    bits: vec![true, true],
+                    majority_vote_bits: vec![true, true],
+                }],
+            },
+        ];
+
+        let batch_majorities = batches
+            .iter()
+            .map(|batch| build_batch_global_majority_vote_candidate(&engine, batch))
+            .collect::<Result<Vec<_>, _>>()
+            .expect("batch global majority votes should succeed");
+        let candidate = build_global_majority_vote_candidate(&engine, &batches, &batch_majorities)
+            .expect("global majority vote should succeed")
+            .expect("global majority vote should be present");
+
+        assert_eq!(candidate.contributing_batch_count, 2);
+        assert_eq!(candidate.sample_count, 4);
+        assert_eq!(candidate.majority_vote_bits, vec![true, true]);
     }
 
     #[test]
@@ -11500,7 +11708,12 @@ mod tests {
             },
         ];
 
-        let candidate = build_global_majority_vote_candidate(&engine, &batches)
+        let batch_majorities = batches
+            .iter()
+            .map(|batch| build_batch_global_majority_vote_candidate(&engine, batch))
+            .collect::<Result<Vec<_>, _>>()
+            .expect("batch global majority votes should succeed");
+        let candidate = build_global_majority_vote_candidate(&engine, &batches, &batch_majorities)
             .expect("mixed-message global majority vote should skip cleanly");
 
         assert!(candidate.is_none());

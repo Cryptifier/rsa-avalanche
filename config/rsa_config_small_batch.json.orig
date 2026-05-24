@@ -85,7 +85,7 @@
     "analysis_batch_candidates": 20000, // Number of r candidates scored in each batch before sampling combinations.
     "analysis_batch_batches": 1, // Number of scored batches to run for the small-batch beam workflow.
     "avalanche_solver_enable": false, // Compare final-tier outputs across every 2-batch cartesian product and brute-force differing bit positions.
-    "avalanche_solver_global_log_enable": true, // Compute and print the global majority vote across all retained final-tier Avalanche outputs.
+    "avalanche_solver_global_log_enable": true, // Compute and print one batch-global majority vote per batch, then a final majority across those batch-global results.
     "avalanche_solver_max_bits": 8, // Maximum number of differing bit positions the cross-batch solver may brute-force per sample pair.
     "sqlite_soft_heap": 10737418240,
     "sqlite_hard_heap": 10737418240,

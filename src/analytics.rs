@@ -60,7 +60,7 @@ pub struct AnalyticsCliArgs {
     pub avalanche_combination_samples: u64,
     /// Whether the cross-batch Avalanche solver is enabled.
     pub avalanche_solver_enable: bool,
-    /// Whether Avalanche logs the global majority vote across all final-tier outputs.
+    /// Whether Avalanche logs per-batch global majorities plus a final majority across those batch-global results.
     pub avalanche_solver_global_log_enable: bool,
     /// Maximum number of differing bit positions the cross-batch Avalanche solver may brute-force.
     pub avalanche_solver_max_bits: usize,

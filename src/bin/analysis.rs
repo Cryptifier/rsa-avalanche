@@ -130,7 +130,7 @@ struct Args {
     #[arg(long = "avalanche-combination-majority-vote-print")]
     avalanche_combination_majority_vote_print: Option<bool>,
 
-    /// Whether Avalanche logs a global majority vote across all final-tier outputs
+    /// Whether Avalanche logs per-batch global majorities plus a final majority across those batch-global results
     #[arg(long = "avalanche-solver-global-log-enable")]
     avalanche_solver_global_log_enable: Option<bool>,
 

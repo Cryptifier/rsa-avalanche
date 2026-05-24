@@ -73,7 +73,7 @@ cargo run --bin analysis -- --config config/rsa_config_small_batch.json
 - `--avalanche-combination-majority-vote <bool>`: Use per-bit majority-vote probabilities from each sampled combination. Default `true`.
 - `--avalanche-combination-sample-smoothing <bool>`: Apply Jeffreys smoothing to sampled majority-vote probabilities before beam search. Default `false`.
 - `--avalanche-combination-majority-vote-print <bool>`: Print a separate sampled-combination majority-vote summary for the selected sample. Default `true`.
-- `--avalanche-solver-global-log-enable <bool>`: Print a separate global majority vote across all retained final-tier Avalanche outputs when the batches target one message. Default `true`.
+- `--avalanche-solver-global-log-enable <bool>`: Print one batch-global majority vote per batch, then a final majority across those batch-global results when the batches target one message. Default `true`.
 - `--avalanche-use-top-beam <bool>`: Carry forward the prior tier's top beam-search bits between recursive Avalanche tiers instead of the prior tier's majority-vote bits. Default `true`.
 - `analysis` accepts either `rsa-private-key-v1` or `rsa-public-key-v1` in `rsa_keypair.keyfile`.
 - When the configured keyfile is public, `analysis` skips the normal RSA round trip. Set `rsa_keypair.private_keyfile` to a matching private YAML if you want a verification peek; otherwise the public-key run is selected by top beam score.
