@@ -88,6 +88,8 @@ pub struct AnalyticsCliArgs {
     pub avalanche_combination_sample_smoothing: bool,
     /// Whether sampled avalanche prints a separate majority-vote summary for the selected sample.
     pub avalanche_combination_majority_vote_print: bool,
+    /// Whether majority-vote console output includes differing-bit bias details.
+    pub avalanche_statistics_show_majority_vote_biases: bool,
     /// Whether final-tier sampled Avalanche reports near-center beam probabilities in the session log.
     pub avalanche_report_biases: bool,
     /// Maximum absolute distance from `0.5` retained in final-tier sampled Avalanche bias reports.
@@ -164,6 +166,7 @@ pub(crate) struct AnalyticsCliInfo {
     avalanche_combination_majority_vote: bool,
     avalanche_combination_sample_smoothing: bool,
     avalanche_combination_majority_vote_print: bool,
+    avalanche_statistics_show_majority_vote_biases: bool,
     avalanche_report_biases: bool,
     avalanche_center_threshold: f64,
     avalanche_center_threshold_best: bool,
@@ -661,6 +664,8 @@ impl SessionAnalytics {
             avalanche_combination_sample_smoothing: args.avalanche_combination_sample_smoothing,
             avalanche_combination_majority_vote_print: args
                 .avalanche_combination_majority_vote_print,
+            avalanche_statistics_show_majority_vote_biases: args
+                .avalanche_statistics_show_majority_vote_biases,
             avalanche_report_biases: args.avalanche_report_biases,
             avalanche_center_threshold: args.avalanche_center_threshold,
             avalanche_center_threshold_best: args.avalanche_center_threshold_best,

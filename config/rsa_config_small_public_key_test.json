@@ -113,6 +113,7 @@
     "avalanche_combination_majority_vote": true,
     "avalanche_combination_sample_smoothing": true,
     "avalanche_combination_majority_vote_print": true,
+    "avalanche_statistics_show_majority_vote_biases": true, // Print differing majority-vote bit locations with absolute bias and relative bias percentage.
     "avalanche_statistics_collection": false,
     "same_r_batch": false,
     "ciphertext_modify": true,

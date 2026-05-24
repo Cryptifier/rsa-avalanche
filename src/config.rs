@@ -203,6 +203,9 @@ pub struct EngineConfig {
     /// Whether sampled avalanche prints a separate majority-vote summary for the selected sample.
     #[serde(default = "default_avalanche_combination_majority_vote_print")]
     pub avalanche_combination_majority_vote_print: bool,
+    /// Whether majority-vote console output should include differing bit locations and bias details.
+    #[serde(default = "default_avalanche_statistics_show_majority_vote_biases")]
+    pub avalanche_statistics_show_majority_vote_biases: bool,
     /// Whether final-tier sampled Avalanche reports near-center beam probabilities in the session log.
     #[serde(default = "default_avalanche_report_biases")]
     pub avalanche_report_biases: bool,
@@ -455,6 +458,8 @@ impl Default for EngineConfig {
             ),
             avalanche_combination_majority_vote_print:
                 default_avalanche_combination_majority_vote_print(),
+            avalanche_statistics_show_majority_vote_biases:
+                default_avalanche_statistics_show_majority_vote_biases(),
             avalanche_report_biases: default_avalanche_report_biases(),
             avalanche_center_threshold: default_avalanche_center_threshold(),
             avalanche_center_threshold_best: default_avalanche_center_threshold_best(),
@@ -1526,6 +1531,20 @@ fn default_avalanche_combination_majority_vote_print() -> bool {
     true
 }
 
+/// Default flag for printing differing-bit majority-vote bias details.
+///
+/// # Parameters
+/// - None.
+///
+/// # Returns
+/// - `bool`: `true` so majority-vote console output includes differing-bit bias diagnostics by default.
+///
+/// # Expected Output
+/// - Returns a constant default value; no side effects.
+fn default_avalanche_statistics_show_majority_vote_biases() -> bool {
+    true
+}
+
 /// Default flag for writing filtered final-tier Avalanche bias reports into the session log.
 ///
 /// # Parameters
@@ -2231,6 +2250,7 @@ mod tests {
         assert!(!engine.avalanche_fitness_streaming_prune);
         assert!(!engine.avalanche_unique_r_cx_inputs);
         assert!(engine.avalanche_include_max_fitness_candidates_in_order);
+        assert!(engine.avalanche_statistics_show_majority_vote_biases);
         assert_eq!(engine.sqlite_soft_heap, 10 * 1024 * 1024 * 1024);
         assert_eq!(engine.sqlite_hard_heap, 10 * 1024 * 1024 * 1024);
         assert_eq!(engine.sqlite_mmap_size, 10 * 1024 * 1024 * 1024);
