@@ -4,7 +4,8 @@
   "rsa_keypair": {
     "generate": false,
     "e": 65537,
-    "keyfile": "keys/small_batch_current_keypair.yaml",
+    //"keyfile": "keys/small_batch_current_keypair.yaml",
+    "keyfile": "keys/private_key_2048.yaml",
     "private_keyfile": ""
   },
   "polynomial_fields": {
@@ -54,8 +55,8 @@
     "r_candidate_small_prime_factors": 3,
     "r_candidate_bit_length": 510,
     "r_candidate_random_power_window": true,
-    "r_candidate_target_exponent_minimum": 1.40, // Lower bound for sampled retarget exponents.
-    "r_candidate_target_exponent": 1.50, // Upper bound for sampled retarget exponents.
+    "r_candidate_target_exponent_minimum": 1.05, // Lower bound for sampled retarget exponents.
+    "r_candidate_target_exponent": 1.10, // Upper bound for sampled retarget exponents.
     "r_candidate_retarget_partition_count": 2,
     "r_candidate_retarget_minimum_exponent": 0.15,
     // Beam search keeps a short candidate list and interprets per-bit
