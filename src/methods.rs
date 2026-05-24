@@ -1029,10 +1029,10 @@ fn colorize_majority_vote_summary_pct(match_pct: f64) -> String {
     )
 }
 
-/// Builds the run-summary histogram lines for batch majority-vote match percentages.
+/// Builds the run-summary histogram lines for final-tier majority-vote match percentages.
 ///
 /// # Parameters
-/// - `match_pcts`: Per-batch majority-vote match percentages for the current analysis run.
+/// - `match_pcts`: Majority-vote match percentages for all retained final-tier samples in the current analysis run.
 ///
 /// # Returns
 /// - `Vec<String>`: One formatted histogram row per bin, or a single `N/A` line when empty.
@@ -1042,8 +1042,7 @@ fn colorize_majority_vote_summary_pct(match_pct: f64) -> String {
 fn format_majority_vote_accuracy_histogram_lines(match_pcts: &[f64]) -> Vec<String> {
     if match_pcts.is_empty() {
         return vec![
-            "Avalanche majority vote histogram: N/A (no batches recorded majority-vote accuracy)"
-                .to_string(),
+            "Avalanche majority vote histogram: N/A (no final-tier samples recorded majority-vote accuracy)".to_string(),
         ];
     }
 
@@ -1090,34 +1089,39 @@ fn format_majority_vote_accuracy_histogram_lines(match_pcts: &[f64]) -> Vec<Stri
         .collect()
 }
 
-/// Builds cumulative per-batch mean and median lines for majority-vote accuracy.
+/// Builds per-batch mean and median lines for final-tier majority-vote accuracy.
 ///
 /// # Parameters
-/// - `match_pcts`: Per-batch majority-vote match percentages for the current analysis run.
+/// - `batch_match_pcts`: Final-tier majority-vote match percentages grouped by analysis batch.
 ///
 /// # Returns
-/// - `Vec<String>`: One formatted cumulative summary line per batch, or a single `N/A` line when empty.
+/// - `Vec<String>`: One formatted summary line per batch, or a single `N/A` line when empty.
 ///
 /// # Expected Output
 /// - Returns display-ready lines; no direct stdout/stderr output.
-fn format_majority_vote_batch_summary_lines(match_pcts: &[f64]) -> Vec<String> {
-    if match_pcts.is_empty() {
+fn format_majority_vote_batch_summary_lines(batch_match_pcts: &[Vec<f64>]) -> Vec<String> {
+    if batch_match_pcts.is_empty() {
         return vec![
-            "Avalanche majority vote batch stats: N/A (no batches recorded majority-vote accuracy)"
+            "Avalanche majority vote batch stats: N/A (no batches recorded final-tier majority-vote accuracy)"
                 .to_string(),
         ];
     }
 
-    let mut lines = Vec::with_capacity(match_pcts.len());
-    let mut prefix = Vec::with_capacity(match_pcts.len());
-    for (index, match_pct) in match_pcts.iter().copied().enumerate() {
-        prefix.push(match_pct);
-        let mean = mean_f64(&prefix);
-        let median = median_f64(&prefix).unwrap_or(0.0);
+    let mut lines = Vec::with_capacity(batch_match_pcts.len());
+    for (index, batch_match_pcts) in batch_match_pcts.iter().enumerate() {
+        if batch_match_pcts.is_empty() {
+            lines.push(format!(
+                "Avalanche majority vote batch stats: batch {:>2} samples   0 mean N/A median N/A",
+                index + 1,
+            ));
+            continue;
+        }
+        let mean = mean_f64(batch_match_pcts);
+        let median = median_f64(batch_match_pcts).unwrap_or(0.0);
         lines.push(format!(
-            "Avalanche majority vote batch stats: batch {:>2} latest {} cumulative mean {} cumulative median {}",
+            "Avalanche majority vote batch stats: batch {:>2} samples {:>3} mean {} median {}",
             index + 1,
-            colorize_majority_vote_summary_pct(match_pct),
+            batch_match_pcts.len(),
             colorize_majority_vote_summary_pct(mean),
             colorize_majority_vote_summary_pct(median),
         ));
@@ -7822,6 +7826,7 @@ fn run_r_candidate_accuracy_batches(
     let mut cx_run_max: Option<CxMatchCandidate> = None;
     let mut total_cx_evaluated_candidates = 0usize;
     let mut batch_top_match_percentages = Vec::new();
+    let mut final_tier_majority_vote_match_percentages = Vec::new();
     let mut batch_majority_vote_match_percentages = Vec::new();
     let mut avalanche_solver_batches =
         if engine.avalanche_solver_enable || engine.avalanche_solver_global_log_enable {
@@ -8181,6 +8186,18 @@ fn run_r_candidate_accuracy_batches(
         let mut batch_selected_sample_index = None;
         let mut batch_selected_sample_average_score_pct = None;
         total_avalanche_evaluated_candidates += sampled_avalanche_result.evaluated_candidates;
+        let batch_final_tier_majority_vote_match_percentages = sampled_avalanche_result
+            .final_tier_samples
+            .iter()
+            .map(|sample| sample.majority_vote_match_pct)
+            .collect::<Vec<_>>();
+        final_tier_majority_vote_match_percentages.extend(
+            batch_final_tier_majority_vote_match_percentages
+                .iter()
+                .copied(),
+        );
+        batch_majority_vote_match_percentages
+            .push(batch_final_tier_majority_vote_match_percentages);
         if let Some(selected_sample) = sampled_avalanche_result.selected_sample.as_ref() {
             batch_selected_sample_index = Some(selected_sample.sample_index);
             batch_selected_sample_average_score_pct = Some(selected_sample.average_score_pct);
@@ -8201,7 +8218,6 @@ fn run_r_candidate_accuracy_batches(
             majority_vote_match_pct = Some(selected_sample.majority_vote_match_pct);
             majority_vote_ones_match_pct = Some(selected_sample.majority_vote_ones_match_pct);
             batch_top_match_percentages.push(selected_sample.best_match_pct);
-            batch_majority_vote_match_percentages.push(selected_sample.majority_vote_match_pct);
 
             let message_bits = payload_message_bits(engine, &message);
             if let Some(top_beam) = selected_sample.beam_results.first() {
@@ -8503,7 +8519,7 @@ fn run_r_candidate_accuracy_batches(
                 MAJORITY_VOTE_HISTOGRAM_BAR_WIDTH
             );
             for line in format_majority_vote_accuracy_histogram_lines(
-                &batch_majority_vote_match_percentages,
+                &final_tier_majority_vote_match_percentages,
             ) {
                 println!("{line}");
             }
@@ -8746,6 +8762,11 @@ fn run_r_candidate_accuracy_batches(
             );
             a.set_feature_stat(
                 "r_candidate_accuracy",
+                "avalanche_final_tier_majority_vote_match_percentages",
+                json!(final_tier_majority_vote_match_percentages),
+            );
+            a.set_feature_stat(
+                "r_candidate_accuracy",
                 "avalanche_batch_majority_vote_match_percentages",
                 json!(batch_majority_vote_match_percentages),
             );
@@ -8768,6 +8789,11 @@ fn run_r_candidate_accuracy_batches(
                 "r_candidate_accuracy",
                 "avalanche_batch_top_match_percentages",
                 json!(batch_top_match_percentages),
+            );
+            a.set_feature_stat(
+                "r_candidate_accuracy",
+                "avalanche_final_tier_majority_vote_match_percentages",
+                json!(final_tier_majority_vote_match_percentages),
             );
             a.set_feature_stat(
                 "r_candidate_accuracy",
@@ -8967,20 +8993,20 @@ mod tests {
     }
 
     #[test]
-    fn test_format_majority_vote_batch_summary_lines_are_cumulative() {
-        let lines = format_majority_vote_batch_summary_lines(&[10.0, 90.0, 30.0]);
+    fn test_format_majority_vote_batch_summary_lines_use_per_batch_samples() {
+        let lines =
+            format_majority_vote_batch_summary_lines(&[vec![10.0, 20.0], vec![90.0], vec![]]);
         assert_eq!(lines.len(), 3);
         assert!(lines[0].contains(ANSI_RED));
-        assert!(lines[1].contains(ANSI_YELLOW));
-        assert!(lines[2].contains(ANSI_RED));
+        assert!(lines[1].contains(ANSI_GREEN));
 
         let stripped = lines
             .iter()
             .map(|line| strip_ansi(line))
             .collect::<Vec<_>>();
-        assert!(stripped[0].contains("batch  1 latest 10.00000000% cumulative mean 10.00000000% cumulative median 10.00000000%"));
-        assert!(stripped[1].contains("batch  2 latest 90.00000000% cumulative mean 50.00000000% cumulative median 50.00000000%"));
-        assert!(stripped[2].contains("batch  3 latest 30.00000000% cumulative mean 43.33333333% cumulative median 30.00000000%"));
+        assert!(stripped[0].contains("batch  1 samples   2 mean 15.00000000% median 15.00000000%"));
+        assert!(stripped[1].contains("batch  2 samples   1 mean 90.00000000% median 90.00000000%"));
+        assert!(stripped[2].contains("batch  3 samples   0 mean N/A median N/A"));
     }
 
     #[test]
