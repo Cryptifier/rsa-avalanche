@@ -6,8 +6,8 @@ use std::{
     collections::{HashMap, HashSet},
     error::Error,
     sync::{
-        Arc, Mutex,
         atomic::{AtomicU64, Ordering},
+        Arc, Mutex,
     },
     time::{Duration, Instant},
 };
@@ -33,32 +33,29 @@ const BLUE: RGBColor = (30, 144, 255);
 const BLACK: RGBColor = (0, 0, 0);
 
 use crate::analytics::{
-    AvalancheBestCenterBiasReport, AvalancheCenterBiasEntry, AvalancheCombinationBeamResult,
-    AvalancheCombinationSample, AvalancheCombinationSampleInput, AvalancheFinalTierBiasReport,
-    AvalancheTierSampleStat, AvalancheTierStatistics, RCandidateAccuracyBatch,
-    RCandidateTraceBatch, RCandidateTraceEntry, SessionAnalytics,
-    generate_r_candidates_with_analytics,
+    generate_r_candidates_with_analytics, AvalancheBestCenterBiasReport, AvalancheCenterBiasEntry,
+    AvalancheCombinationBeamResult, AvalancheCombinationSample, AvalancheCombinationSampleInput,
+    AvalancheFinalTierBiasReport, AvalancheTierSampleStat, AvalancheTierStatistics,
+    RCandidateAccuracyBatch, RCandidateTraceBatch, RCandidateTraceEntry, SessionAnalytics,
 };
 use crate::avalanche::{
-    AvalancheBuilder, AvalancheInput, AvalancheNode, mirror_inverted_candidates,
-    search_avalanche_tree_with_progress, search_avalanche_tree_with_scores_progress,
-    sort_candidates_by_hamming_distance,
+    mirror_inverted_candidates, search_avalanche_tree_with_progress,
+    search_avalanche_tree_with_scores_progress, sort_candidates_by_hamming_distance,
+    AvalancheBuilder, AvalancheInput, AvalancheNode,
 };
 use crate::combiner::majority_vote_with_distribution;
 use crate::config::{
-    Config, EngineConfig, RsaKeyFileFormat, load_rsa_key_material_from_config_keyfile,
+    load_rsa_key_material_from_config_keyfile, Config, EngineConfig, RsaKeyFileFormat,
 };
 use crate::database::{
-    AvalancheCacheGuard, approximate_scored_avalanche_input_bytes,
-    build_cached_avalanche_tier_statistics, count_cached_scored_inputs,
-    count_cached_selected_samples, deserialize_selected_avalanche_sample_row,
-    insert_cached_scored_inputs, insert_cached_selected_samples,
-    load_cached_recursive_sample_summaries, load_cached_scored_inputs_by_ids,
-    load_cached_selected_sample_rows_by_ids, load_cached_selected_sample_rows_page,
+    approximate_scored_avalanche_input_bytes, build_cached_avalanche_tier_statistics,
+    count_cached_scored_inputs, count_cached_selected_samples,
+    deserialize_selected_avalanche_sample_row, insert_cached_scored_inputs,
+    insert_cached_selected_samples, load_cached_recursive_sample_summaries,
+    load_cached_scored_inputs_by_ids, load_cached_selected_sample_rows_by_ids,
+    load_cached_selected_sample_rows_page, AvalancheCacheGuard,
 };
 use crate::fitness::{
-    AvalancheFitnessScore, CachedScoredInputSummary, HammingDistancePrunedPool,
-    RankedScoredAvalancheInput, StreamingScoredAvalancheFitnessPool,
     apply_cached_scored_avalanche_fitness_pass, apply_ranked_scored_avalanche_fitness_pass,
     build_candidate_message_transform, build_scored_avalanche_fitness_pass,
     enforce_global_unique_cached_scored_inputs, enforce_global_unique_scored_inputs,
@@ -72,20 +69,21 @@ use crate::fitness::{
     resolve_avalanche_fitness_shift_bits, resolve_plaintext_message_bit_width,
     single_message_avalanche_fitness_score, transform_message_for_candidate_scoring,
     validate_avalanche_fitness_log_top_pct, validate_avalanche_fitness_threshold,
-    validate_message_width_under_modulus,
+    validate_message_width_under_modulus, AvalancheFitnessScore, CachedScoredInputSummary,
+    HammingDistancePrunedPool, RankedScoredAvalancheInput, StreamingScoredAvalancheFitnessPool,
 };
 use crate::helpers::{
-    PackedBits, format_beam_float, matching_bit_counts_bytes_le, normalize_avalanche_biases,
-    spread_normalized_avalanche_biases, stored_beam_value_is_one,
+    format_beam_float, matching_bit_counts_bytes_le, normalize_avalanche_biases,
+    spread_normalized_avalanche_biases, stored_beam_value_is_one, PackedBits,
 };
 use crate::math::{
     bit_length, choose_exponent, compute_totient, mod_inverse, random_biguint_bits,
     random_prime_with_bits, shannon_entropy_bit, to_hex,
 };
-use crate::r_candidates::{RCandidate, RCandidateSettings, resolve_retargeted_r_candidates_path};
+use crate::r_candidates::{resolve_retargeted_r_candidates_path, RCandidate, RCandidateSettings};
 use crate::rng::{RngChoice, RngMode};
 use crate::search::{beam_search_top_k, beam_search_top_k_with_progress, viterbi_decode};
-use crate::solver::{AvalancheSolverBatch, AvalancheSolverSample, run_avalanche_solver};
+use crate::solver::{run_avalanche_solver, AvalancheSolverBatch, AvalancheSolverSample};
 use num_bigint::BigUint;
 use num_integer::Integer;
 use num_traits::{One, Zero};
@@ -100,11 +98,11 @@ use crate::fitness::apply_scored_avalanche_fitness_pass;
 #[cfg(test)]
 use crate::fitness::select_scored_inputs_for_mixed_r_candidates;
 #[cfg(test)]
-use diesel::QueryableByName;
-#[cfg(test)]
 use diesel::prelude::*;
 #[cfg(test)]
 use diesel::sql_query;
+#[cfg(test)]
+use diesel::QueryableByName;
 
 /// Input arguments for the RSA demo and analysis pipeline.
 pub struct DemoArgs {
@@ -3986,12 +3984,13 @@ struct GlobalMajorityVoteCandidate {
 }
 
 #[derive(Clone, Debug, PartialEq)]
-struct MajorityVoteBiasDifference {
+struct MajorityVoteBiasEntry {
     bit_index_lsb0: usize,
     expected_bit: bool,
     majority_vote_bit: bool,
     absolute_bias: f64,
     relative_bias_pct: f64,
+    differs_from_message: bool,
 }
 
 /// Determines whether a beam-search candidate should replace the current run maximum.
@@ -4480,7 +4479,7 @@ fn extract_payload_probabilities_for_accuracy(
     probabilities[shift_bits..payload_end].to_vec()
 }
 
-/// Builds differing-bit majority-vote bias diagnostics from payload-aligned output.
+/// Builds majority-vote bias diagnostics from payload-aligned output.
 ///
 /// # Parameters
 /// - `message_bits`: Payload-aligned original message bits in lsb0 order.
@@ -4488,15 +4487,15 @@ fn extract_payload_probabilities_for_accuracy(
 /// - `majority_vote_probability_one`: Payload-aligned probability of predicting bit `1`.
 ///
 /// # Returns
-/// - `Result<Vec<MajorityVoteBiasDifference>, String>`: Differing-bit diagnostics in lsb0 order.
+/// - `Result<Vec<MajorityVoteBiasEntry>, String>`: Per-bit bias diagnostics in lsb0 order.
 ///
 /// # Expected Output
-/// - Returns diagnostics for differing bits or an error on inconsistent vector widths.
-fn build_majority_vote_bias_differences(
+/// - Returns diagnostics for every payload bit or an error on inconsistent vector widths.
+fn build_majority_vote_bias_entries(
     message_bits: &[bool],
     majority_vote_bits: &[bool],
     majority_vote_probability_one: &[f64],
-) -> Result<Vec<MajorityVoteBiasDifference>, String> {
+) -> Result<Vec<MajorityVoteBiasEntry>, String> {
     if majority_vote_bits.len() != message_bits.len() {
         return Err(format!(
             "majority-vote display width mismatch: majority bits {} message bits {}",
@@ -4517,51 +4516,95 @@ fn build_majority_vote_bias_differences(
         .zip(majority_vote_bits.iter())
         .zip(majority_vote_probability_one.iter())
         .enumerate()
-        .filter_map(|(bit_index_lsb0, ((expected_bit, majority_vote_bit), probability_one))| {
-            if expected_bit == majority_vote_bit {
-                return None;
-            }
-            let absolute_bias = (probability_one - 0.5).abs();
-            Some(MajorityVoteBiasDifference {
-                bit_index_lsb0,
-                expected_bit: *expected_bit,
-                majority_vote_bit: *majority_vote_bit,
-                absolute_bias,
-                relative_bias_pct: absolute_bias * 200.0,
-            })
-        })
+        .filter_map(
+            |(bit_index_lsb0, ((expected_bit, majority_vote_bit), probability_one))| {
+                let absolute_bias = (probability_one - 0.5).abs();
+                Some(MajorityVoteBiasEntry {
+                    bit_index_lsb0,
+                    expected_bit: *expected_bit,
+                    majority_vote_bit: *majority_vote_bit,
+                    absolute_bias,
+                    relative_bias_pct: absolute_bias * 200.0,
+                    differs_from_message: expected_bit != majority_vote_bit,
+                })
+            },
+        )
         .collect())
 }
 
-/// Prints differing-bit majority-vote bias diagnostics for one displayed sample.
+/// Returns the differing-bit subset of a majority-vote bias report.
+///
+/// # Parameters
+/// - `entries`: Per-bit majority-vote bias diagnostics in lsb0 order.
+///
+/// # Returns
+/// - `Vec<MajorityVoteBiasEntry>`: Only the bits where majority vote differs from the message.
+///
+/// # Expected Output
+/// - Returns a filtered vector without printing or mutating state.
+fn differing_majority_vote_bias_entries(
+    entries: &[MajorityVoteBiasEntry],
+) -> Vec<MajorityVoteBiasEntry> {
+    entries
+        .iter()
+        .filter(|entry| entry.differs_from_message)
+        .cloned()
+        .collect()
+}
+
+/// Returns the matching-bit subset of a majority-vote bias report sorted by relative bias.
+///
+/// # Parameters
+/// - `entries`: Per-bit majority-vote bias diagnostics in lsb0 order.
+///
+/// # Returns
+/// - `Vec<MajorityVoteBiasEntry>`: Matching bits sorted by descending relative bias then bit index.
+///
+/// # Expected Output
+/// - Returns a sorted filtered vector without printing or mutating state.
+fn remaining_majority_vote_bias_entries_sorted(
+    entries: &[MajorityVoteBiasEntry],
+) -> Vec<MajorityVoteBiasEntry> {
+    let mut remaining = entries
+        .iter()
+        .filter(|entry| !entry.differs_from_message)
+        .cloned()
+        .collect::<Vec<_>>();
+    remaining.sort_by(|left, right| {
+        right
+            .relative_bias_pct
+            .total_cmp(&left.relative_bias_pct)
+            .then_with(|| left.bit_index_lsb0.cmp(&right.bit_index_lsb0))
+    });
+    remaining
+}
+
+/// Prints majority-vote bias diagnostics for one displayed sample.
 ///
 /// # Parameters
 /// - `label`: Human-readable label describing the surrounding majority-vote output.
-/// - `differences`: Differing-bit bias diagnostics in lsb0 order.
+/// - `entries`: Majority-vote bias diagnostics to print.
 ///
 /// # Returns
 /// - `()`
 ///
 /// # Expected Output
-/// - Prints one heading plus zero or more differing-bit bias lines to stdout.
-fn print_majority_vote_bias_differences(
-    label: &str,
-    differences: &[MajorityVoteBiasDifference],
-) {
-    if differences.is_empty() {
-        println!("{label}: no differing bits");
+/// - Prints one heading plus zero or more majority-vote bias lines to stdout.
+fn print_majority_vote_bias_entries(label: &str, entries: &[MajorityVoteBiasEntry]) {
+    if entries.is_empty() {
+        println!("{label}: none");
         return;
     }
 
     println!("{label}:");
-    for difference in differences {
+    for entry in entries {
         println!(
             "  bit {} expected {} majority {} absolute-bias {:.4} relative-bias {:.4}%",
-            difference.bit_index_lsb0,
-            if difference.expected_bit { 1 } else { 0 },
-            if difference.majority_vote_bit { 1 } else { 0 },
-            difference.absolute_bias,
-            difference.relative_bias_pct
+            entry.bit_index_lsb0,
+            if entry.expected_bit { 1 } else { 0 },
+            if entry.majority_vote_bit { 1 } else { 0 },
+            entry.absolute_bias,
+            entry.relative_bias_pct
         );
     }
 }
@@ -8068,18 +8111,29 @@ fn run_r_candidate_accuracy_batches(
                     majority_hex
                 );
                 if engine.avalanche_statistics_show_majority_vote_biases {
-                    let differing_biases = build_majority_vote_bias_differences(
+                    let majority_vote_biases = build_majority_vote_bias_entries(
                         &message_bits,
                         &majority_vote_bits,
                         &majority_vote_probability_one,
                     )
                     .map_err(|err| -> Box<dyn Error> { err.into() })?;
-                    print_majority_vote_bias_differences(
+                    let differing_biases =
+                        differing_majority_vote_bias_entries(&majority_vote_biases);
+                    let remaining_biases =
+                        remaining_majority_vote_bias_entries_sorted(&majority_vote_biases);
+                    print_majority_vote_bias_entries(
                         &format!(
                             "Accuracy batch {} majority vote differing-bit biases (tier {} sample {}, lsb0 order)",
                             batch_number, selected_sample.tier_index, selected_sample.sample_index
                         ),
                         &differing_biases,
+                    );
+                    print_majority_vote_bias_entries(
+                        &format!(
+                            "Accuracy batch {} majority vote remaining-bit biases sorted by relative bias (tier {} sample {}, console only)",
+                            batch_number, selected_sample.tier_index, selected_sample.sample_index
+                        ),
+                        &remaining_biases,
                     );
                 }
             }
@@ -8215,18 +8269,29 @@ fn run_r_candidate_accuracy_batches(
                         majority_hex
                     );
                     if engine.avalanche_statistics_show_majority_vote_biases {
-                        let differing_biases = build_majority_vote_bias_differences(
+                        let majority_vote_biases = build_majority_vote_bias_entries(
                             &max.message_bits,
                             &max.majority_vote_bits,
                             &max.majority_vote_probability_one,
                         )
                         .map_err(|err| -> Box<dyn Error> { err.into() })?;
-                        print_majority_vote_bias_differences(
+                        let differing_biases =
+                            differing_majority_vote_bias_entries(&majority_vote_biases);
+                        let remaining_biases =
+                            remaining_majority_vote_bias_entries_sorted(&majority_vote_biases);
+                        print_majority_vote_bias_entries(
                             &format!(
                                 "Avalanche majority vote run max differing-bit biases (batch {} tier {} sample {}, lsb0 order)",
                                 max.batch_number, max.tier_index, max.sample_index
                             ),
                             &differing_biases,
+                        );
+                        print_majority_vote_bias_entries(
+                            &format!(
+                                "Avalanche majority vote run max remaining-bit biases sorted by relative bias (batch {} tier {} sample {}, console only)",
+                                max.batch_number, max.tier_index, max.sample_index
+                            ),
+                            &remaining_biases,
                         );
                     }
                     println!(
@@ -8699,11 +8764,9 @@ mod tests {
                 BigUint::from(9u8)
             ]
         );
-        assert!(
-            variants
-                .iter()
-                .all(|variant| mod_inverse(&variant.e_x, &candidate_phi).is_some())
-        );
+        assert!(variants
+            .iter()
+            .all(|variant| mod_inverse(&variant.e_x, &candidate_phi).is_some()));
     }
 
     #[test]
@@ -9539,11 +9602,9 @@ mod tests {
         )
         .expect_err("invalid percentile should be rejected");
 
-        assert!(
-            error
-                .to_string()
-                .contains("avalanche_combination_hamming_distance_keep_percentile")
-        );
+        assert!(error
+            .to_string()
+            .contains("avalanche_combination_hamming_distance_keep_percentile"));
     }
 
     #[test]
@@ -9579,11 +9640,9 @@ mod tests {
         )
         .expect_err("invalid outlier preference percentage should be rejected");
 
-        assert!(
-            error
-                .to_string()
-                .contains("avalanche_combination_hamming_distance_outlier_preference_pct")
-        );
+        assert!(error
+            .to_string()
+            .contains("avalanche_combination_hamming_distance_outlier_preference_pct"));
     }
 
     #[test]
@@ -10085,12 +10144,10 @@ mod tests {
         .expect("recursive sampled avalanche with retained samples should succeed");
 
         assert_eq!(result.retained_samples.len(), 4);
-        assert!(
-            result
-                .retained_samples
-                .iter()
-                .all(|sample| sample.inputs.is_empty())
-        );
+        assert!(result
+            .retained_samples
+            .iter()
+            .all(|sample| sample.inputs.is_empty()));
         assert_eq!(result.final_tier_samples.len(), 2);
     }
 
@@ -10199,6 +10256,72 @@ mod tests {
         assert!((entries[0].signed_distance_from_half + 0.02).abs() < f64::EPSILON);
         assert_eq!(entries[1].bit_index_lsb0, 1);
         assert_eq!(entries[2].bit_index_lsb0, 3);
+    }
+
+    #[test]
+    fn test_build_majority_vote_bias_entries_preserves_all_bits_and_difference_flags() {
+        let entries = build_majority_vote_bias_entries(
+            &[true, false, true],
+            &[true, true, false],
+            &[0.75, 0.9, 0.4],
+        )
+        .expect("majority-vote bias entries should build");
+
+        assert_eq!(entries.len(), 3);
+        assert!(!entries[0].differs_from_message);
+        assert!((entries[0].absolute_bias - 0.25).abs() < f64::EPSILON);
+        assert!(entries[1].differs_from_message);
+        assert!((entries[1].relative_bias_pct - 80.0).abs() < f64::EPSILON);
+        assert!(entries[2].differs_from_message);
+        assert!((entries[2].absolute_bias - 0.1).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn test_remaining_majority_vote_bias_entries_sorted_orders_matching_bits_by_relative_bias() {
+        let entries = vec![
+            MajorityVoteBiasEntry {
+                bit_index_lsb0: 5,
+                expected_bit: true,
+                majority_vote_bit: true,
+                absolute_bias: 0.10,
+                relative_bias_pct: 20.0,
+                differs_from_message: false,
+            },
+            MajorityVoteBiasEntry {
+                bit_index_lsb0: 2,
+                expected_bit: false,
+                majority_vote_bit: true,
+                absolute_bias: 0.40,
+                relative_bias_pct: 80.0,
+                differs_from_message: true,
+            },
+            MajorityVoteBiasEntry {
+                bit_index_lsb0: 1,
+                expected_bit: false,
+                majority_vote_bit: false,
+                absolute_bias: 0.25,
+                relative_bias_pct: 50.0,
+                differs_from_message: false,
+            },
+            MajorityVoteBiasEntry {
+                bit_index_lsb0: 3,
+                expected_bit: true,
+                majority_vote_bit: true,
+                absolute_bias: 0.25,
+                relative_bias_pct: 50.0,
+                differs_from_message: false,
+            },
+        ];
+
+        let remaining = remaining_majority_vote_bias_entries_sorted(&entries);
+        let differing = differing_majority_vote_bias_entries(&entries);
+
+        assert_eq!(remaining.len(), 3);
+        assert_eq!(remaining[0].bit_index_lsb0, 1);
+        assert_eq!(remaining[1].bit_index_lsb0, 3);
+        assert_eq!(remaining[2].bit_index_lsb0, 5);
+        assert_eq!(differing.len(), 1);
+        assert_eq!(differing[0].bit_index_lsb0, 2);
     }
 
     #[test]
@@ -10404,11 +10527,9 @@ mod tests {
 
         assert_eq!(sample_plans.len(), 4);
         assert!(sample_plans.iter().all(|plan| plan.len() == 2));
-        assert!(
-            sample_plans
-                .iter()
-                .all(|plan| { plan.iter().copied().collect::<HashSet<_>>().len() == plan.len() })
-        );
+        assert!(sample_plans
+            .iter()
+            .all(|plan| { plan.iter().copied().collect::<HashSet<_>>().len() == plan.len() }));
         assert_eq!(unique_signatures.len(), sample_plans.len());
         assert!(flattened.len() > unique_inputs.len());
     }
@@ -10466,11 +10587,9 @@ mod tests {
 
         assert_eq!(sample_plans.len(), 4);
         assert!(sample_plans.iter().all(|plan| plan.len() == 2));
-        assert!(
-            sample_plans
-                .iter()
-                .all(|plan| { plan.iter().copied().collect::<HashSet<_>>().len() == plan.len() })
-        );
+        assert!(sample_plans
+            .iter()
+            .all(|plan| { plan.iter().copied().collect::<HashSet<_>>().len() == plan.len() }));
         assert!(sample_plans.iter().all(|plan| {
             plan.iter()
                 .map(|(batch_candidate_index, _)| *batch_candidate_index)
@@ -10787,12 +10906,10 @@ mod tests {
 
         let cache =
             AvalancheCacheGuard::new(Some(10_004), &engine).expect("cache should initialize");
-        assert!(
-            cache
-                .path
-                .to_string_lossy()
-                .contains("mode=memory&cache=shared")
-        );
+        assert!(cache
+            .path
+            .to_string_lossy()
+            .contains("mode=memory&cache=shared"));
         assert!(!cache.path.exists());
 
         let mut connection = cache.pool().expect("pool should exist").get().unwrap();
@@ -10846,8 +10963,8 @@ mod tests {
     }
 
     #[test]
-    fn test_run_sampled_avalanche_beam_search_cached_errors_when_fitness_threshold_removes_all_candidates()
-     {
+    fn test_run_sampled_avalanche_beam_search_cached_errors_when_fitness_threshold_removes_all_candidates(
+    ) {
         let mut config = Config::default();
         config.engine.avalanche_random_chacha20_inputs = true;
         config.engine.avalanche_combination_samples = 1;
