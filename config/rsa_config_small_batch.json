@@ -74,7 +74,6 @@
     "analysis_batch_candidates": 500, // Number of r candidates scored in each batch before sampling combinations.
     "analysis_batch_batches": 1, // Number of scored batches to run for the small-batch beam workflow.
     "avalanche_solver_enable": false, // Compare final-tier outputs across every 2-batch cartesian product and brute-force differing bit positions.
-    "avalanche_solver_global_log_enable": true, // Compute and print the global majority vote across all retained final-tier Avalanche outputs.
     "avalanche_solver_max_bits": 8, // Maximum number of differing bit positions the cross-batch solver may brute-force per sample pair.
     "sqlite_soft_heap": 10737418240,
     "sqlite_hard_heap": 10737418240,
@@ -89,7 +88,7 @@
     // Search parameters.
     "avalanche_beam_top_k": 6, // Number of top-scoring candidates to keep for beam search results.
     "avalanche_use_top_beam": true, // Carry forward the prior tier's top beam-search bits between recursive Avalanche tiers.
-    "avalanche_probability_spread_exponent": 0.45, //0.45
+    "avalanche_probability_spread_exponent": 0.55, //0.45
     // Whether to write the near-center probabilities for each candidate into the session log; these are used for debugging and analysis but not needed for the core beam search workflow.
     "avalanche_report_biases": true, // Write final-tier near-center beam probabilities into the session log.
     "avalanche_center_threshold": 0.025, // Keep only probabilities within +/- this distance from 50% after normalization and spreading.
@@ -123,13 +122,13 @@
     "avalanche_include_max_fitness_candidates_in_order": false,
     // Cap how many distinct r values can appear in one sampled avalanche input;
     // each selected r still contributes all of its sampled c^x variants.
-    "avalanche_combination_mixed_r_candidates": 64,
-    "avalanche_combination_samples": 600000, // N: number of sampled combinations evaluated by avalanche per batch.
-    "avalanche_combination_size": 120, // Number of scored items taken in each sampled combination.
+    "avalanche_combination_mixed_r_candidates": 128,
+    "avalanche_combination_samples": 300000, // N: number of sampled combinations evaluated by avalanche per batch.
+    "avalanche_combination_size": 100, // Number of scored items taken in each sampled combination.
     "avalanche_combination_pool_size": 100000, // Legacy compatibility field; runtime sampling now always uses the full batch-sized pool.
     "avalanche_combination_recursion_depth": 3, // Run one recursive Avalanche tier on top of the sampled-input tier.
     "avalanche_combination_recursive_group_size": [16, 4, 2], // Per-recursive-tier group sizes; later recursive tiers reuse the last entry.
-    "avalanche_combination_recursive_resample_count": [600000, 600000, 300000], // Per-recursive-tier resample counts; 0 preserves one-pass regrouping and later recursive tiers reuse the last entry.
+    "avalanche_combination_recursive_resample_count": [300000, 300000, 300000, 300000], // Per-recursive-tier resample counts; 0 preserves one-pass regrouping and later recursive tiers reuse the last entry.
     // Hamming-distance pruning keeps a central percentile band of scored items
     // before sampling, then optionally adds some tail outliers back in.
     "avalanche_combination_hamming_distance_prune": true,
@@ -140,6 +139,7 @@
     "avalanche_combination_majority_vote": true, // Use per-bit majority-vote probabilities from each sampled combination.
     "avalanche_combination_sample_smoothing": true, // Apply Jeffreys smoothing to the sampled majority-vote probabilities before beam search.
     "avalanche_combination_majority_vote_print": true, // Print a separate sampled-combination majority-vote summary alongside the beam output.
+    "avalanche_statistics_show_majority_vote_biases": true, // Print differing majority-vote bit locations with absolute bias and relative bias percentage.
     "avalanche_statistics_collection": false, // Collect recursive Avalanche tier statistics and other heavy analytics payloads.
     // Allow batches to mix different r values while still perturbing the
     // ciphertext for each sampled message variant.

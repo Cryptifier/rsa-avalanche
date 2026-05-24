@@ -1138,6 +1138,7 @@ pub(crate) fn deserialize_selected_avalanche_sample_row(
                 .map_err(|_| "cached majority-vote bit length exceeds usize range")?,
         )
         .to_bools(),
+        majority_vote_probability_one: Vec::new(),
         majority_vote_match_pct: row.majority_vote_match_pct,
         majority_vote_ones_match_pct: row.majority_vote_ones_match_pct,
         best_bits: PackedBits::from_bytes_le(

@@ -312,6 +312,9 @@ fn main() -> Result<(), Box<dyn Error>> {
         avalanche_combination_majority_vote_print: config
             .engine
             .avalanche_combination_majority_vote_print,
+        avalanche_statistics_show_majority_vote_biases: config
+            .engine
+            .avalanche_statistics_show_majority_vote_biases,
         avalanche_report_biases: config.engine.avalanche_report_biases,
         avalanche_center_threshold: config.engine.avalanche_center_threshold,
         avalanche_center_threshold_best: config.engine.avalanche_center_threshold_best,
