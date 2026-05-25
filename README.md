@@ -77,6 +77,8 @@ cargo run --bin analysis -- --config config/rsa_config_small_batch.json
 - `--avalanche-use-top-beam <bool>`: Carry forward the prior tier's top beam-search bits between recursive Avalanche tiers instead of the prior tier's majority-vote bits. Default `true`.
 - `analysis` accepts either `rsa-private-key-v1` or `rsa-public-key-v1` in `rsa_keypair.keyfile`.
 - When the configured keyfile is public, `analysis` skips the normal RSA round trip. Set `rsa_keypair.private_keyfile` to a matching private YAML if you want a verification peek; otherwise the public-key run is selected by top beam score.
+- Set `engine.message.use_file = true` with `engine.message.fixed_file` to load a message from disk instead of `engine.message.fixed_message`.
+- Combine `engine.message.use_file = true` with `engine.message.is_encrypted = true` to load a raw or hex ciphertext file, decrypt it with the active private key or `rsa_keypair.private_keyfile`, validate PKCS#1 v1.5 padding, and use the low `engine.message.bits` payload bits as the hidden target for Avalanche comparisons and the final global majority vote.
 
 ## `demo.rs` (WORK-IN-PROGRESS)
 `src/bin/demo.rs` is separate from the proof of concept in `analysis.rs`. Treat it as a work-in-progress utility for direct encrypt/decrypt experiments rather than the main validation path.
@@ -100,6 +102,7 @@ cargo run --bin demo -- --decrypt --ciphertext 0x1234
 cargo run --bin kgen
 cargo run --bin kgen -- --size-mode modulus --modulus-bits 144 --output config/keys/private_key.yaml --public-output config/keys/public_key.yaml
 cargo run --bin kgen -- --input-private-key config/keys/private_key.yaml --public-output config/keys/public_key.yaml --force
+cargo run --bin kgen -- --input-public-key config/keys/public_key.yaml --encrypt-output config/messages/pkcs1_message.bin --encrypt-key-bits 128 --seed 7 --force
 cargo run --bin kgen -- --input-pgp-public-key public.asc --public-output config/keys/public_key.yaml --force
 cargo run --bin kgen -- --input-pgp-file message.asc --pgp-output config/keys/pgp_message.yaml --force
 ```
@@ -111,9 +114,12 @@ cargo run --bin kgen -- --input-pgp-file message.asc --pgp-output config/keys/pg
 - `-o, --output <PATH>`: Private-key YAML output path for generated keys. Default `config/keys/private_key.yaml`.
 - `--public-output <PATH>`: Optional public-key YAML output path for the generated or imported private key.
 - `--input-private-key <PATH>`: Existing `rsa-private-key-v1` YAML file to convert into `rsa-public-key-v1`, similar to extracting a public key from a private PEM with `openssl`.
+- `--input-public-key <PATH>`: Existing `rsa-public-key-v1` YAML file to normalize or to use for PKCS#1 ciphertext generation.
 - `--input-pgp-public-key <PATH>`: Existing OpenPGP public-key file to convert into `rsa-public-key-v1`. Optionally combine with `--pgp-output` to also save the unpacked packet structure.
 - `--input-pgp-file <PATH>`: Existing OpenPGP encrypted or packetized file to unpack into `pgp-file-v1` YAML.
 - `--pgp-output <PATH>`: YAML output path for the unpacked `pgp-file-v1` OpenPGP packet representation.
+- `--encrypt-output <PATH>`: Optional raw-binary ciphertext output path for an RSA PKCS#1 v1.5 encrypted random key.
+- `--encrypt-key-bits <u32>`: Bit width of the random key embedded at the end of the PKCS#1 v1.5 block. Default `128`.
 - `--force`: Overwrite an existing output file.
 - `--seed <u64>`: Optional deterministic RNG seed for reproducible key generation.
 - `--crypto-rng`: Use cryptographic RNGs instead of the standard seeded generator.
@@ -124,4 +130,4 @@ Configuration reference material has been moved to [CONFIGS.md](CONFIGS.md).
 # Public-Key Workflows
 Public-key YAML files are supported for both `analysis` and `demo`. Point `rsa_keypair.keyfile` at an `rsa-public-key-v1` file when you want the run to operate without inline `p` or `q`.
 
-For `analysis`, the plaintext used for scoring still comes from `engine.message.*`, so speculative outputs can still be compared against the chosen/generated message without learning the factorization. If you also set `rsa_keypair.private_keyfile` to a matching `rsa-private-key-v1` file, `analysis` performs a private-key verification peek; otherwise it skips round-trip RSA and ranks the public-key run by beam score.
+For `analysis`, the plaintext used for scoring still comes from `engine.message.*`, including the payload recovered from `engine.message.fixed_file` when `engine.message.is_encrypted = true`, so speculative outputs can still be compared against the chosen/generated message without learning the factorization. If you also set `rsa_keypair.private_keyfile` to a matching `rsa-private-key-v1` file, `analysis` performs a private-key verification peek for public-key runs; otherwise it skips round-trip RSA and ranks the public-key run by beam score.

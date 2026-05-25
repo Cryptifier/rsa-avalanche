@@ -89,11 +89,20 @@ pub struct RsaKeyMaterial {
 }
 
 /// Message configuration for generating plaintexts.
-#[derive(Debug, Deserialize, Clone, Default)]
+#[derive(Debug, Deserialize, Clone)]
 pub struct MessageConfig {
     /// Fixed message to encrypt when random selection is disabled.
     #[serde(default = "default_fixed_message")]
     pub fixed_message: String,
+    /// Optional plaintext or ciphertext file used when `use_file` is enabled.
+    #[serde(default = "default_fixed_file")]
+    pub fixed_file: String,
+    /// Whether message selection should load from `fixed_file` instead of `fixed_message`.
+    #[serde(default = "default_message_use_file")]
+    pub use_file: bool,
+    /// Whether `fixed_file` contains an already-encrypted RSA ciphertext instead of plaintext bytes.
+    #[serde(default = "default_message_is_encrypted")]
+    pub is_encrypted: bool,
     /// Whether to use random messages instead of the fixed string.
     #[serde(default = "default_message_random")]
     pub is_random: bool,
@@ -410,6 +419,19 @@ impl Default for KeyConfig {
     }
 }
 
+impl Default for MessageConfig {
+    fn default() -> Self {
+        Self {
+            fixed_message: default_fixed_message(),
+            fixed_file: default_fixed_file(),
+            use_file: default_message_use_file(),
+            is_encrypted: default_message_is_encrypted(),
+            is_random: default_message_random(),
+            bits: default_message_bits(),
+        }
+    }
+}
+
 impl Default for EngineConfig {
     fn default() -> Self {
         Self {
@@ -585,16 +607,34 @@ struct RsaPrivateKeyYamlPrimes {
 ///
 /// # Expected Output
 /// - Returns a path value without touching the filesystem.
-pub fn resolve_keyfile_path(config_path: &Path, keyfile: &str) -> PathBuf {
-    let keyfile_path = Path::new(keyfile);
-    if keyfile_path.is_absolute() {
-        return keyfile_path.to_path_buf();
+pub fn resolve_config_relative_path(
+    config_path: &Path,
+    relative_or_absolute_path: &str,
+) -> PathBuf {
+    let requested_path = Path::new(relative_or_absolute_path);
+    if requested_path.is_absolute() {
+        return requested_path.to_path_buf();
     }
 
     config_path
         .parent()
         .unwrap_or_else(|| Path::new("."))
-        .join(keyfile_path)
+        .join(requested_path)
+}
+
+/// Resolves a keyfile path relative to the configuration file that references it.
+///
+/// # Parameters
+/// - `config_path`: Path to the JSON/JSON5 configuration file.
+/// - `keyfile`: Configured keyfile string, which may be relative or absolute.
+///
+/// # Returns
+/// - `PathBuf`: Resolved filesystem path to the requested keyfile.
+///
+/// # Expected Output
+/// - Returns a path value without touching the filesystem.
+pub fn resolve_keyfile_path(config_path: &Path, keyfile: &str) -> PathBuf {
+    resolve_config_relative_path(config_path, keyfile)
 }
 
 /// Parses one decimal bigint field from an RSA keyfile.
@@ -969,6 +1009,48 @@ fn default_e() -> u64 {
 /// - Returns a constant default value; no side effects.
 fn default_fixed_message() -> String {
     "afterstate".to_string()
+}
+
+/// Default fixed message file path.
+///
+/// # Parameters
+/// - None.
+///
+/// # Returns
+/// - `String`: Empty path so existing configs keep using `fixed_message`.
+///
+/// # Expected Output
+/// - Returns a constant default value; no side effects.
+fn default_fixed_file() -> String {
+    String::new()
+}
+
+/// Default flag for file-backed message selection.
+///
+/// # Parameters
+/// - None.
+///
+/// # Returns
+/// - `bool`: `false` so existing configs keep using `fixed_message`.
+///
+/// # Expected Output
+/// - Returns a constant default value; no side effects.
+fn default_message_use_file() -> bool {
+    false
+}
+
+/// Default flag for encrypted fixed-file inputs.
+///
+/// # Parameters
+/// - None.
+///
+/// # Returns
+/// - `bool`: `false` so fixed files default to plaintext bytes.
+///
+/// # Expected Output
+/// - Returns a constant default value; no side effects.
+fn default_message_is_encrypted() -> bool {
+    false
 }
 
 /// Default flag for random message selection.
@@ -2384,6 +2466,54 @@ mod tests {
         assert_eq!(config.rsa_keypair.p, None);
         assert_eq!(config.rsa_keypair.q, None);
         assert_eq!(config.rsa_keypair.private_keyfile, "keys/private.yaml");
+
+        let _ = fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn test_config_default_uses_message_defaults() {
+        let config = Config::default();
+
+        assert_eq!(config.engine.message.fixed_message, "afterstate");
+        assert_eq!(config.engine.message.fixed_file, "");
+        assert!(!config.engine.message.use_file);
+        assert!(!config.engine.message.is_encrypted);
+        assert!(!config.engine.message.is_random);
+        assert_eq!(config.engine.message.bits, 56);
+    }
+
+    #[test]
+    fn test_load_config_accepts_file_backed_message_settings() {
+        let temp_dir = temp_path("message_file_settings");
+        fs::create_dir_all(&temp_dir).expect("create temp config dir");
+        fs::write(
+            temp_dir.join("config.json"),
+            concat!(
+                "{\n",
+                "  \"engine\": {\n",
+                "    \"message\": {\n",
+                "      \"fixed_message\": \"ignored\",\n",
+                "      \"fixed_file\": \"messages/sample.bin\",\n",
+                "      \"use_file\": true,\n",
+                "      \"is_encrypted\": true,\n",
+                "      \"is_random\": false,\n",
+                "      \"bits\": 128\n",
+                "    }\n",
+                "  }\n",
+                "}\n",
+            ),
+        )
+        .expect("write config");
+
+        let config = load_config(temp_dir.join("config.json").to_str().expect("utf8 path"))
+            .expect("load config");
+
+        assert_eq!(config.engine.message.fixed_message, "ignored");
+        assert_eq!(config.engine.message.fixed_file, "messages/sample.bin");
+        assert!(config.engine.message.use_file);
+        assert!(config.engine.message.is_encrypted);
+        assert!(!config.engine.message.is_random);
+        assert_eq!(config.engine.message.bits, 128);
 
         let _ = fs::remove_dir_all(&temp_dir);
     }

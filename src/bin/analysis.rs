@@ -264,6 +264,9 @@ fn main() -> Result<(), Box<dyn Error>> {
     let analytics = Arc::new(Mutex::new(SessionAnalytics::new(AnalyticsCliArgs {
         bits: args.bits,
         message_override: args.message.clone(),
+        message_use_file: config.engine.message.use_file,
+        message_is_encrypted: config.engine.message.is_encrypted,
+        message_fixed_file: config.engine.message.fixed_file.clone(),
         public_exponent: args.public_exponent,
         seed: args.seed,
         crypto_rng: args.crypto_rng,

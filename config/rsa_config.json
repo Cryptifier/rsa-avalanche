@@ -146,11 +146,14 @@
     "same_r_batch": false,
     "ciphertext_modify": true,
     "message": {
-      // Random 64-bit plaintexts are used for scoring; fixed_message only
-      // matters when is_random is set to false.
+      // Random 64-bit plaintexts are used for scoring. The existing
+      // fixed_message remains the default fixed source unless use_file is true.
       "is_random": false,
       "bits": 128,
-      "fixed_message": "Mary had a little lamb, little lamb, little lamb."
+      "fixed_message": "Mary had a little lamb, little lamb, little lamb.",
+      "fixed_file": "", // Optional plaintext or ciphertext file loaded when use_file is true.
+      "use_file": false, // When true, fixed_file overrides fixed_message and random generation.
+      "is_encrypted": false // Treat fixed_file as an RSA ciphertext and hide the recovered plaintext in console comparisons.
     }
   }
 }

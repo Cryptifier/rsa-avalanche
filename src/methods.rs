@@ -2,17 +2,18 @@
 /// SPDX-License-Identifier: EPL-2.0
 /// Copyright (c) 2025 Nicholas LaRoche <nlaroche@cryptifier.dev>
 use bigdecimal::BigDecimal;
+#[cfg(any(test, feature = "plots"))]
+use std::path::PathBuf;
 use std::{
     collections::{HashMap, HashSet},
     error::Error,
+    fs,
     sync::{
         Arc, Mutex,
         atomic::{AtomicU64, Ordering},
     },
     time::{Duration, Instant},
 };
-#[cfg(any(test, feature = "plots"))]
-use std::{fs, path::PathBuf};
 
 #[cfg(feature = "plots")]
 use plotters::prelude::*;
@@ -34,6 +35,7 @@ const BLACK: RGBColor = (0, 0, 0);
 const ANSI_RED: &str = "\u{1b}[31m";
 const ANSI_YELLOW: &str = "\u{1b}[33m";
 const ANSI_GREEN: &str = "\u{1b}[32m";
+const ANSI_BLUE: &str = "\u{1b}[34m";
 const ANSI_RESET: &str = "\u{1b}[0m";
 const MAJORITY_VOTE_HISTOGRAM_BIN_COUNT: usize = 20;
 const MAJORITY_VOTE_HISTOGRAM_BAR_WIDTH: usize = 60;
@@ -53,6 +55,7 @@ use crate::avalanche::{
 use crate::combiner::majority_vote_with_distribution;
 use crate::config::{
     Config, EngineConfig, RsaKeyFileFormat, load_rsa_key_material_from_config_keyfile,
+    resolve_config_relative_path,
 };
 use crate::database::{
     AvalancheCacheGuard, approximate_scored_avalanche_input_bytes,
@@ -180,6 +183,239 @@ enum RoundtripVerification {
     Peek {
         d: BigUint,
     },
+}
+
+#[derive(Clone, Debug)]
+struct ResolvedMessageInput {
+    message: BigUint,
+    base_ciphertext: Option<BigUint>,
+    hide_reference_displays: bool,
+    loaded_from_file: bool,
+}
+
+/// Reads the configured fixed message file as raw bytes.
+///
+/// # Parameters
+/// - `config`: Loaded configuration used to resolve relative message paths.
+/// - `fixed_file`: Configured message file path.
+///
+/// # Returns
+/// - `Result<Vec<u8>, Box<dyn Error>>`: File contents in on-disk order.
+///
+/// # Expected Output
+/// - Reads the configured file from disk or returns an error when the path is missing or empty.
+fn read_fixed_message_file(config: &Config, fixed_file: &str) -> Result<Vec<u8>, Box<dyn Error>> {
+    let trimmed_path = fixed_file.trim();
+    if trimmed_path.is_empty() {
+        return Err(
+            "engine.message.use_file requires a non-empty engine.message.fixed_file".into(),
+        );
+    }
+    let resolved_path = if std::path::Path::new(trimmed_path).is_absolute() {
+        std::path::PathBuf::from(trimmed_path)
+    } else {
+        let config_path = config
+            .source_path
+            .as_deref()
+            .ok_or("relative engine.message.fixed_file requires a loaded config path")?;
+        resolve_config_relative_path(config_path, trimmed_path)
+    };
+    fs::read(&resolved_path).map_err(|err| {
+        format!(
+            "failed to read engine.message.fixed_file {}: {err}",
+            resolved_path.display()
+        )
+        .into()
+    })
+}
+
+/// Parses an encrypted message file as either raw ciphertext bytes or a hex-encoded payload.
+///
+/// # Parameters
+/// - `file_bytes`: Raw bytes read from `engine.message.fixed_file`.
+///
+/// # Returns
+/// - `Result<BigUint, Box<dyn Error>>`: Ciphertext value in big-endian order.
+///
+/// # Expected Output
+/// - Returns the parsed ciphertext or an error when a text-like file is not valid hex.
+fn parse_encrypted_message_file(file_bytes: &[u8]) -> Result<BigUint, Box<dyn Error>> {
+    let trimmed_bytes = file_bytes
+        .iter()
+        .copied()
+        .skip_while(|byte| byte.is_ascii_whitespace())
+        .collect::<Vec<_>>();
+    if trimmed_bytes.is_empty() {
+        return Err("engine.message.fixed_file is empty".into());
+    }
+
+    if trimmed_bytes.iter().all(|byte| {
+        byte.is_ascii_whitespace() || byte.is_ascii_hexdigit() || matches!(*byte, b'x' | b'X')
+    }) {
+        let trimmed_text = std::str::from_utf8(&trimmed_bytes)
+            .map_err(|err| format!("engine.message.fixed_file text is not valid UTF-8: {err}"))?;
+        let compact = trimmed_text
+            .chars()
+            .filter(|ch| !ch.is_ascii_whitespace())
+            .collect::<String>();
+        let hex = compact
+            .strip_prefix("0x")
+            .or_else(|| compact.strip_prefix("0X"))
+            .unwrap_or(&compact);
+        if hex.is_empty() {
+            return Err("engine.message.fixed_file hex payload is empty".into());
+        }
+        let value = BigUint::parse_bytes(hex.as_bytes(), 16)
+            .ok_or("engine.message.fixed_file contains invalid hex")?;
+        return Ok(value);
+    }
+
+    Ok(BigUint::from_bytes_be(file_bytes))
+}
+
+/// Validates that a decrypted encrypted-file message uses PKCS#1 v1.5 block formatting.
+///
+/// # Parameters
+/// - `engine`: Engine configuration providing the payload bit width.
+/// - `message`: Decrypted plaintext block recovered from the ciphertext file.
+/// - `modulus`: RSA modulus used to derive the padded block width.
+///
+/// # Returns
+/// - `Result<(), Box<dyn Error>>`: `Ok(())` when the block has valid PKCS#1 v1.5 structure.
+///
+/// # Expected Output
+/// - Returns an error when the decrypted block is too short, malformed, or shorter than the requested payload width.
+fn validate_pkcs1_v1_5_message_block(
+    engine: &EngineConfig,
+    message: &BigUint,
+    modulus: &BigUint,
+) -> Result<(), Box<dyn Error>> {
+    let modulus_len = modulus.bits().div_ceil(8).max(1) as usize;
+    let mut block = message.to_bytes_be();
+    if block.len() > modulus_len {
+        return Err("encrypted fixed_file plaintext exceeds the RSA modulus width".into());
+    }
+    if block.len() < modulus_len {
+        let mut padded = vec![0u8; modulus_len - block.len()];
+        padded.extend_from_slice(&block);
+        block = padded;
+    }
+    if block.len() < 11 {
+        return Err("encrypted fixed_file plaintext is too short for PKCS#1 v1.5".into());
+    }
+    if block[0] != 0x00 || block[1] != 0x02 {
+        return Err("encrypted fixed_file plaintext is not a PKCS#1 v1.5 encryption block".into());
+    }
+    let separator_index = block[2..]
+        .iter()
+        .position(|byte| *byte == 0x00)
+        .map(|index| index + 2)
+        .ok_or("encrypted fixed_file plaintext is missing the PKCS#1 separator byte")?;
+    if separator_index < 10 {
+        return Err("encrypted fixed_file PKCS#1 padding is shorter than 8 bytes".into());
+    }
+    if block[2..separator_index].iter().any(|byte| *byte == 0x00) {
+        return Err("encrypted fixed_file PKCS#1 padding contains zero bytes".into());
+    }
+    let payload_bytes = &block[separator_index + 1..];
+    let required_payload_bytes = resolve_plaintext_message_bit_width(engine).div_ceil(8);
+    if payload_bytes.len() < required_payload_bytes {
+        return Err(format!(
+            "encrypted fixed_file PKCS#1 payload is {} byte(s) but engine.message.bits requires at least {} byte(s)",
+            payload_bytes.len(),
+            required_payload_bytes
+        )
+        .into());
+    }
+    Ok(())
+}
+
+/// Resolves the active message source for the analysis pipeline.
+///
+/// # Parameters
+/// - `args_message`: Optional CLI plaintext override.
+/// - `config`: Loaded configuration providing message settings and relative path context.
+/// - `n`: RSA modulus used for range validation.
+/// - `verification`: Optional private verification key used to decrypt encrypted fixed files.
+/// - `rng`: Random number generator used for random message selection.
+///
+/// # Returns
+/// - `Result<ResolvedMessageInput, Box<dyn Error>>`: Resolved message plus any loaded ciphertext override.
+///
+/// # Expected Output
+/// - Returns the selected message or ciphertext-backed message without printing.
+fn resolve_message_input(
+    args_message: Option<String>,
+    config: &Config,
+    n: &BigUint,
+    verification: Option<&RoundtripVerification>,
+    rng: &mut RngChoice,
+) -> Result<ResolvedMessageInput, Box<dyn Error>> {
+    if let Some(explicit) = args_message {
+        return Ok(ResolvedMessageInput {
+            message: BigUint::from_bytes_be(explicit.as_bytes()),
+            base_ciphertext: None,
+            hide_reference_displays: false,
+            loaded_from_file: false,
+        });
+    }
+
+    if config.engine.message.use_file {
+        let file_bytes = read_fixed_message_file(config, &config.engine.message.fixed_file)?;
+        if config.engine.message.is_encrypted {
+            let ciphertext = parse_encrypted_message_file(&file_bytes)?;
+            if ciphertext.is_zero() {
+                return Err("engine.message.fixed_file ciphertext cannot be zero".into());
+            }
+            if ciphertext >= *n {
+                return Err(
+                    "engine.message.fixed_file ciphertext must be smaller than the modulus n"
+                        .into(),
+                );
+            }
+            let decrypted_message = match verification {
+                Some(RoundtripVerification::Full { d, .. }) | Some(RoundtripVerification::Peek { d }) => {
+                    ciphertext.modpow(d, n)
+                }
+                None => {
+                    return Err(
+                        "engine.message.is_encrypted requires RSA private material or rsa_keypair.private_keyfile so the ciphertext payload can be recovered"
+                            .into(),
+                    )
+                }
+            };
+            validate_pkcs1_v1_5_message_block(&config.engine, &decrypted_message, n)?;
+            return Ok(ResolvedMessageInput {
+                message: decrypted_message,
+                base_ciphertext: Some(ciphertext),
+                hide_reference_displays: true,
+                loaded_from_file: true,
+            });
+        }
+
+        return Ok(ResolvedMessageInput {
+            message: BigUint::from_bytes_be(&file_bytes),
+            base_ciphertext: None,
+            hide_reference_displays: false,
+            loaded_from_file: true,
+        });
+    }
+
+    if config.engine.message.is_random {
+        return Ok(ResolvedMessageInput {
+            message: random_message_under_n(&config.engine, n, rng)?,
+            base_ciphertext: None,
+            hide_reference_displays: false,
+            loaded_from_file: false,
+        });
+    }
+
+    Ok(ResolvedMessageInput {
+        message: BigUint::from_bytes_be(config.engine.message.fixed_message.as_bytes()),
+        base_ciphertext: None,
+        hide_reference_displays: false,
+        loaded_from_file: false,
+    })
 }
 
 /// Returns whether the active RSA key configuration uses a public keyfile without inline primes.
@@ -384,7 +620,14 @@ pub fn run_demo(
     });
 
     let message_start = Instant::now();
-    let message = select_message(args.message.clone(), &config.engine, &n, &mut rng)?;
+    let resolved_message = resolve_message_input(
+        args.message.clone(),
+        &config,
+        &n,
+        roundtrip_verification.as_ref(),
+        &mut rng,
+    )?;
+    let message = resolved_message.message.clone();
     if message.is_zero() {
         return Err("message cannot be empty".into());
     }
@@ -394,9 +637,34 @@ pub fn run_demo(
     with_analytics(analytics, |a| {
         a.record_step("message_select", message_start.elapsed());
         a.record_feature_duration("message_select", message_start.elapsed());
+        a.set_feature_stat(
+            "message_select",
+            "source",
+            json!(if resolved_message.loaded_from_file {
+                if resolved_message.hide_reference_displays {
+                    "fixed_file_encrypted"
+                } else {
+                    "fixed_file_plaintext"
+                }
+            } else if args.message.is_some() {
+                "cli_override"
+            } else if config.engine.message.is_random {
+                "random"
+            } else {
+                "fixed_message"
+            }),
+        );
+        a.set_feature_stat(
+            "message_select",
+            "reference_display_masked",
+            json!(resolved_message.hide_reference_displays),
+        );
     });
 
-    let ciphertext = message.modpow(&e, &n);
+    let ciphertext = resolved_message
+        .base_ciphertext
+        .clone()
+        .unwrap_or_else(|| message.modpow(&e, &n));
     let recovered = if let Some(verification) = roundtrip_verification.as_ref() {
         let roundtrip_start = Instant::now();
         let recovered = match verification {
@@ -435,11 +703,19 @@ pub fn run_demo(
         println!("Modulus n ({} bits): {n}", n.bits());
         println!("Public exponent e: {e}");
     }
-    println!("Plaintext (hex): {}", to_hex(&message));
+    if resolved_message.hide_reference_displays {
+        println!("Plaintext (hex): ******");
+    } else {
+        println!("Plaintext (hex): {}", to_hex(&message));
+    }
     println!("Ciphertext (hex): {}", to_hex(&ciphertext));
     if let Some(recovered) = recovered.as_ref() {
-        if public_key_mode {
+        if public_key_mode && resolved_message.hide_reference_displays {
+            println!("Peek recovered (hex): ******");
+        } else if public_key_mode {
             println!("Peek recovered (hex): {}", to_hex(recovered));
+        } else if resolved_message.hide_reference_displays {
+            println!("Recovered (hex): ******");
         } else {
             println!("Recovered (hex): {}", to_hex(recovered));
         }
@@ -465,11 +741,20 @@ pub fn run_demo(
     };
 
     if args.tests {
+        if resolved_message.hide_reference_displays {
+            return Err(
+                "analysis sufficiency tests do not support engine.message.is_encrypted with engine.message.use_file; run the batch pipeline without --tests for encrypted fixed_file inputs"
+                    .into(),
+            );
+        }
         let info_start = Instant::now();
         match run_information_sufficiency_tests(
             &ctx,
             &config,
             &message,
+            resolved_message
+                .loaded_from_file
+                .then_some(&resolved_message.message),
             &mut rng,
             args.export,
             analytics,
@@ -510,6 +795,10 @@ pub fn run_demo(
             args.shift,
             prefer_beam_score_ordering,
             avalanche_cache.as_ref(),
+            resolved_message
+                .loaded_from_file
+                .then_some(&resolved_message.message),
+            resolved_message.hide_reference_displays,
         ) {
             with_analytics(analytics, |a| {
                 a.add_feature_note("r_candidate_accuracy", &format!("failed: {}", err));
@@ -1451,11 +1740,59 @@ fn count_matching_bits_le(a: &[bool], b: &[bool]) -> (usize, usize) {
 ///
 /// # Expected Output
 /// - Returns truncated bits and a percentage score; no stdout/stderr output.
+#[cfg(test)]
 fn truncated_match_percentage(candidate: &BigUint, reference_bits: &[bool]) -> (Vec<bool>, f64) {
     let bit_width = reference_bits.len().max(1);
     let candidate_bits = biguint_to_bits_le(candidate, bit_width);
     let (_, matching_total) = count_matching_bits_le(&candidate_bits, reference_bits);
     let match_pct = matching_total as f64 / bit_width as f64 * 100.0;
+    (candidate_bits, match_pct)
+}
+
+/// Extracts payload-width bits from an encrypted fixed-file plaintext and prepends the configured
+/// fitness-shift zero slice used by Avalanche scoring.
+///
+/// # Parameters
+/// - `engine`: Engine configuration containing the payload and fitness-shift widths.
+/// - `message`: Decrypted PKCS#1 plaintext block whose low payload bits should be compared.
+///
+/// # Returns
+/// - `Vec<bool>`: Payload-aligned bits widened by the configured fitness shift in lsb0 order.
+///
+/// # Expected Output
+/// - Returns a payload-only widened bit vector without printing.
+fn encrypted_fixed_file_payload_bits(engine: &EngineConfig, message: &BigUint) -> Vec<bool> {
+    let mut widened = vec![false; resolve_avalanche_fitness_shift_bits(engine)];
+    widened.extend(payload_message_bits(engine, message));
+    widened
+}
+
+/// Computes truncated match percentage for either a direct plaintext or an encrypted fixed-file payload.
+///
+/// # Parameters
+/// - `engine`: Engine configuration containing payload sizing.
+/// - `candidate`: Candidate plaintext recovered from the current ciphertext/r pairing.
+/// - `reference_bits`: Reference bit vector whose length defines the truncation width.
+/// - `encrypted_fixed_file_mode`: Whether `candidate` should be reduced to payload bits plus the configured shift slice.
+///
+/// # Returns
+/// - `(Vec<bool>, f64)`: Candidate bits aligned to `reference_bits` and their total match percentage.
+///
+/// # Expected Output
+/// - Returns truncated bits and a percentage score; no stdout/stderr output.
+fn truncated_match_percentage_for_accuracy(
+    engine: &EngineConfig,
+    candidate: &BigUint,
+    reference_bits: &[bool],
+    encrypted_fixed_file_mode: bool,
+) -> (Vec<bool>, f64) {
+    let candidate_bits = if encrypted_fixed_file_mode {
+        encrypted_fixed_file_payload_bits(engine, candidate)
+    } else {
+        biguint_to_bits_le(candidate, reference_bits.len().max(1))
+    };
+    let (_, matching_total) = count_matching_bits_le(&candidate_bits, reference_bits);
+    let match_pct = matching_total as f64 / reference_bits.len().max(1) as f64 * 100.0;
     (candidate_bits, match_pct)
 }
 
@@ -1494,7 +1831,19 @@ fn packed_match_percentage(candidate_bits: &PackedBits, reference_bits: &PackedB
 fn resolve_fixed_message_for_tests(
     engine: &EngineConfig,
     n: &BigUint,
+    fixed_message_override: Option<&BigUint>,
 ) -> Result<Option<BigUint>, Box<dyn Error>> {
+    if let Some(message) = fixed_message_override {
+        if message.is_zero() {
+            return Err("analysis tests fixed message override cannot be empty".into());
+        }
+        if !n.is_zero() && message >= n {
+            return Err(
+                "analysis tests fixed message override must be smaller than modulus n".into(),
+            );
+        }
+        return Ok(Some(message.clone()));
+    }
     if engine.message.is_random {
         return Ok(None);
     }
@@ -1706,6 +2055,7 @@ fn run_oracle_entropy_timeline(
     engine: &EngineConfig,
     candidates: &[OracleCandidate],
     iterations: usize,
+    fixed_message_override: Option<&BigUint>,
     rng: &mut RngChoice,
     shift: bool,
 ) -> Result<OracleEntropySeries, Box<dyn Error>> {
@@ -1727,7 +2077,7 @@ fn run_oracle_entropy_timeline(
         );
     }
 
-    let fixed_message = resolve_fixed_message_for_tests(engine, &ctx.n)?;
+    let fixed_message = resolve_fixed_message_for_tests(engine, &ctx.n, fixed_message_override)?;
     let bit_width = analysis_bit_width(engine, &ctx.n, &fixed_message);
 
     let mut seeds = Vec::with_capacity(iterations);
@@ -1855,6 +2205,7 @@ fn run_match_entropy_timeline(
     iterations: usize,
     window: usize,
     stride: usize,
+    fixed_message_override: Option<&BigUint>,
     rng: &mut RngChoice,
     shift: bool,
 ) -> Result<MatchTimelineSeries, Box<dyn Error>> {
@@ -1862,7 +2213,7 @@ fn run_match_entropy_timeline(
         return Err("analysis tests iterations must be >= 1".into());
     }
 
-    let fixed_message = resolve_fixed_message_for_tests(engine, &ctx.n)?;
+    let fixed_message = resolve_fixed_message_for_tests(engine, &ctx.n, fixed_message_override)?;
     let bit_width = analysis_bit_width(engine, &ctx.n, &fixed_message);
 
     let mut seeds = Vec::with_capacity(iterations);
@@ -2775,13 +3126,14 @@ fn compute_per_bit_best_case_match(
 ///
 /// # Expected Output
 /// - Prints two hex strings with color highlighting; no file output.
-fn print_best_case_hex(message: &BigUint, best_case_bits: &[bool]) {
+fn print_best_case_hex(message: &BigUint, best_case_bits: &[bool], hide_reference_displays: bool) {
     let message_bits = biguint_to_bits_le(message, best_case_bits.len().max(1));
     print_colored_hex_comparison(
         "Original message",
         &message_bits,
         "Best-case message",
         best_case_bits,
+        hide_reference_displays,
     );
 }
 
@@ -2803,6 +3155,7 @@ fn print_colored_hex_comparison(
     reference_bits: &[bool],
     candidate_label: &str,
     candidate_bits: &[bool],
+    hide_reference_displays: bool,
 ) {
     let reference_hex = format_bits_hex_le(reference_bits);
     let candidate_hex = format_bits_hex_le(candidate_bits);
@@ -2815,8 +3168,16 @@ fn print_colored_hex_comparison(
         .len()
         .max(candidate_output_label.len());
 
-    let reference_colored = colorize_hex_matches(&reference_padded, &candidate_padded);
-    let candidate_colored = colorize_hex_matches(&candidate_padded, &reference_padded);
+    let reference_colored = if hide_reference_displays {
+        "******".to_string()
+    } else {
+        colorize_hex_matches(&reference_padded, &candidate_padded)
+    };
+    let candidate_colored = if hide_reference_displays {
+        format!("{ANSI_BLUE}{candidate_padded}{ANSI_RESET}")
+    } else {
+        colorize_hex_matches(&candidate_padded, &reference_padded)
+    };
 
     println!(
         "{:<label_width$}: {}",
@@ -2826,7 +3187,11 @@ fn print_colored_hex_comparison(
         "{:<label_width$}: {}",
         candidate_output_label, candidate_colored
     );
-    println!("Hex match key: green = match, red = mismatch");
+    if hide_reference_displays {
+        println!("Hex display key: original masked, calculated message = blue");
+    } else {
+        println!("Hex match key: green = match, red = mismatch");
+    }
 }
 
 /// Computes bit-match percentages for a candidate bit vector against a reference.
@@ -3095,6 +3460,7 @@ fn run_information_sufficiency_tests(
     ctx: &RSAContext,
     config: &Config,
     message: &BigUint,
+    fixed_message_override: Option<&BigUint>,
     rng: &mut RngChoice,
     export: bool,
     analytics: &Arc<Mutex<SessionAnalytics>>,
@@ -3148,8 +3514,15 @@ fn run_information_sufficiency_tests(
     });
 
     let (oracle_entropy_stats, oracle_accuracy_stats) = if export {
-        let oracle_series =
-            run_oracle_entropy_timeline(ctx, engine, &candidates, iterations, rng, shift)?;
+        let oracle_series = run_oracle_entropy_timeline(
+            ctx,
+            engine,
+            &candidates,
+            iterations,
+            fixed_message_override,
+            rng,
+            shift,
+        )?;
         if let Err(err) = plot_timeline_series(
             &oracle_series.entropy_mean,
             "analysis_tests",
@@ -3225,6 +3598,7 @@ fn run_information_sufficiency_tests(
         iterations,
         window,
         stride,
+        fixed_message_override,
         rng,
         shift,
     )?;
@@ -3361,7 +3735,7 @@ fn run_information_sufficiency_tests(
             stats.mean, stats.stddev, stats.min, stats.max, stats.count
         );
     }
-    print_best_case_hex(message, &best_case_bits);
+    print_best_case_hex(message, &best_case_bits, false);
 
     let (bit_similarity_entries, match_counts_per_bit, shift_levels_used) =
         build_bit_similarity_entries(
@@ -3499,35 +3873,6 @@ fn run_information_sufficiency_tests(
                 .into(),
         )
     }
-}
-
-/// Selects the plaintext message according to CLI args and configuration.
-///
-/// # Parameters
-/// - `args_message`: Optional CLI-provided message override.
-/// - `engine`: Engine configuration with message settings.
-/// - `rng`: Random number generator for random message selection.
-///
-/// # Returns
-/// - `Result<BigUint, Box<dyn Error>>`: Selected message as a big integer.
-///
-/// # Expected Output
-/// - Returns the selected message or a validation error; no side effects.
-fn select_message(
-    args_message: Option<String>,
-    engine: &EngineConfig,
-    n: &BigUint,
-    rng: &mut RngChoice,
-) -> Result<BigUint, Box<dyn Error>> {
-    if let Some(explicit) = args_message {
-        return Ok(BigUint::from_bytes_be(explicit.as_bytes()));
-    }
-    if engine.message.is_random {
-        return random_message_under_n(engine, n, rng);
-    }
-    Ok(BigUint::from_bytes_be(
-        engine.message.fixed_message.as_bytes(),
-    ))
 }
 
 /// Samples a random message that is non-zero and less than `n` (when provided).
@@ -6890,6 +7235,7 @@ fn cache_batch_scored_avalanche_inputs(
     batch_cx_next_log_at_ms: &AtomicU64,
     batch_cx_label: &str,
     keep_sample_details: bool,
+    encrypted_fixed_file_mode: bool,
 ) -> Result<(usize, usize, Option<BatchCxMax>), Box<dyn Error>> {
     #[derive(Debug, Default)]
     struct CachedChunkAccumulator {
@@ -6986,8 +7332,12 @@ fn cache_batch_scored_avalanche_inputs(
                             &candidate.r,
                             d_new,
                         );
-                        let (dm_bits, match_pct) =
-                            truncated_match_percentage(&dm, avalanche_message_bits);
+                        let (dm_bits, match_pct) = truncated_match_percentage_for_accuracy(
+                            engine,
+                            &dm,
+                            avalanche_message_bits,
+                            encrypted_fixed_file_mode,
+                        );
                         cx_evaluated_candidates += 1;
                         if cx_max
                             .as_ref()
@@ -7750,6 +8100,8 @@ fn run_r_candidate_accuracy_batches(
     shift: bool,
     prefer_beam_score_ordering: bool,
     avalanche_cache: Option<&AvalancheCacheGuard>,
+    fixed_message_override: Option<&BigUint>,
+    hide_reference_displays: bool,
 ) -> Result<(), Box<dyn Error>> {
     if !engine.analysis_batch_enable {
         return Ok(());
@@ -7767,7 +8119,10 @@ fn run_r_candidate_accuracy_batches(
     if engine.avalanche_solver_enable && batch_count_raw < 2 {
         return Err("avalanche_solver_enable requires analysis_batch_batches >= 2".into());
     }
-    if engine.avalanche_solver_enable && engine.message.is_random {
+    if engine.avalanche_solver_enable
+        && engine.message.is_random
+        && fixed_message_override.is_none()
+    {
         return Err(
             "avalanche_solver_enable requires engine.message.is_random = false so every batch targets the same message"
                 .into(),
@@ -7892,6 +8247,7 @@ fn run_r_candidate_accuracy_batches(
         } else {
             None
         };
+    let encrypted_fixed_file_mode = hide_reference_displays && fixed_message_override.is_some();
     let mut next_batch_pct = 10u64;
     for batch_idx in 0..batch_count {
         let batch_number = batch_idx + 1;
@@ -7907,7 +8263,9 @@ fn run_r_candidate_accuracy_batches(
             message_count
         );
 
-        let message = if engine.message.is_random {
+        let message = if let Some(message) = fixed_message_override {
+            message.clone()
+        } else if engine.message.is_random {
             random_message_under_n(engine, &ctx.n, rng)?
         } else {
             let msg = BigUint::from_bytes_be(engine.message.fixed_message.as_bytes());
@@ -7917,10 +8275,24 @@ fn run_r_candidate_accuracy_batches(
             transform_message_for_candidate_scoring(engine, &msg, &ctx.n, "analysis_batch")?;
             msg
         };
-        let avalanche_message =
-            transform_message_for_candidate_scoring(engine, &message, &ctx.n, "analysis_batch")?;
         let messages = vec![message.clone(); message_count];
-        let base_ciphertext = avalanche_message.modpow(&ctx.e, &ctx.n);
+        let (base_ciphertext, avalanche_message_bits) = if encrypted_fixed_file_mode {
+            (
+                message.modpow(&ctx.e, &ctx.n),
+                encrypted_fixed_file_payload_bits(engine, &message),
+            )
+        } else {
+            let avalanche_message = transform_message_for_candidate_scoring(
+                engine,
+                &message,
+                &ctx.n,
+                "analysis_batch",
+            )?;
+            (
+                avalanche_message.modpow(&ctx.e, &ctx.n),
+                biguint_to_bits_le(&avalanche_message, resolve_avalanche_bit_width(engine)),
+            )
+        };
         let mut ciphertexts = Vec::with_capacity(message_count);
         let mut shifted_ciphertexts = Vec::with_capacity(message_count);
         let mut e_x_values = Vec::with_capacity(message_count);
@@ -7954,8 +8326,6 @@ fn run_r_candidate_accuracy_batches(
             }
         }
 
-        let avalanche_bit_width = resolve_avalanche_bit_width(engine);
-        let avalanche_message_bits = biguint_to_bits_le(&avalanche_message, avalanche_bit_width);
         let additional_fitness_messages = build_additional_fitness_messages(
             ctx,
             engine,
@@ -8012,6 +8382,7 @@ fn run_r_candidate_accuracy_batches(
                     &batch_cx_next_log_at_ms,
                     &batch_cx_label,
                     keep_sample_details,
+                    encrypted_fixed_file_mode,
                 )?;
             let sampled = run_sampled_avalanche_beam_search_cached(
                 engine,
@@ -8085,8 +8456,12 @@ fn run_r_candidate_accuracy_batches(
                                     &candidate.r,
                                     d_new,
                                 );
-                                let (dm_bits, match_pct) =
-                                    truncated_match_percentage(&dm, &avalanche_message_bits);
+                                let (dm_bits, match_pct) = truncated_match_percentage_for_accuracy(
+                                    engine,
+                                    &dm,
+                                    &avalanche_message_bits,
+                                    encrypted_fixed_file_mode,
+                                );
                                 cx_evaluated_candidates += 1;
                                 if cx_max.as_ref().is_none_or(|current: &BatchCxMax| {
                                     match_pct > current.match_pct
@@ -8489,6 +8864,7 @@ fn run_r_candidate_accuracy_batches(
                     &max.message_bits,
                     "Beam-search message",
                     &max.best_bits,
+                    hide_reference_displays,
                 );
             } else {
                 println!("Avalanche beam run max: N/A");
@@ -8546,6 +8922,7 @@ fn run_r_candidate_accuracy_batches(
                         &max.message_bits,
                         "Majority-vote message",
                         &max.majority_vote_bits,
+                        hide_reference_displays,
                     );
                 } else {
                     println!("Avalanche majority vote results: N/A");
@@ -8705,6 +9082,7 @@ fn run_r_candidate_accuracy_batches(
             &global_majority_vote.message_bits,
             "Global-majority message",
             &global_majority_vote.majority_vote_bits,
+            hide_reference_displays,
         );
     }
 

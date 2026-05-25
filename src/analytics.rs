@@ -28,6 +28,12 @@ pub struct AnalyticsCliArgs {
     pub bits: u32,
     /// Optional message override provided by the CLI.
     pub message_override: Option<String>,
+    /// Whether the configured message source loads from `engine.message.fixed_file`.
+    pub message_use_file: bool,
+    /// Whether the configured fixed file is interpreted as an encrypted ciphertext.
+    pub message_is_encrypted: bool,
+    /// Configured fixed message file path.
+    pub message_fixed_file: String,
     /// Public exponent selected for RSA.
     pub public_exponent: u64,
     /// Optional RNG seed for deterministic runs.
@@ -136,6 +142,9 @@ pub struct AnalyticsCliArgs {
 pub(crate) struct AnalyticsCliInfo {
     bits: u32,
     message_override: Option<String>,
+    message_use_file: bool,
+    message_is_encrypted: bool,
+    message_fixed_file: String,
     public_exponent: u64,
     seed: Option<u64>,
     crypto_rng: bool,
@@ -628,6 +637,9 @@ impl SessionAnalytics {
         let cli = AnalyticsCliInfo {
             bits: args.bits,
             message_override: args.message_override,
+            message_use_file: args.message_use_file,
+            message_is_encrypted: args.message_is_encrypted,
+            message_fixed_file: args.message_fixed_file,
             public_exponent: args.public_exponent,
             seed: args.seed,
             crypto_rng: args.crypto_rng,
