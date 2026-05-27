@@ -1,0 +1,65 @@
+[source: target/debug/build/zmq-sys-d3e7e6ceea7b9446/out/source/external/wepoll/README.md]
+```c typedef union epoll_data { void* ptr; int fd; uint32_t u32; uint64_t u64; SOCKET sock; /* Windows specific */ HANDLE hnd; /* Windows specific */ } epoll_data_t; ```
+
+[source: target/release/build/zmq-sys-541b50d142ccd3ce/out/source/external/wepoll/README.md]
+```c typedef union epoll_data { void* ptr; int fd; uint32_t u32; uint64_t u64; SOCKET sock; /* Windows specific */ HANDLE hnd; /* Windows specific */ } epoll_data_t; ```
+
+[source: README.md]
+# Public-Key Workflows Public-key YAML files are supported for both `analysis` and `demo`. Point `rsa_keypair.keyfile` at an `rsa-public-key-v1` file when you want the run to operate without inline `p` or `q`.
+
+[source: target/release/build/zmq-sys-6cd51d741ac72603/out/source/external/wepoll/README.md]
+* Create a new epoll instance (port). * `size` is ignored but most be greater than zero. * `flags` must be zero as there are no supported flags. * Returns `NULL` on failure. * [Linux man page][man epoll_create]
+
+[source: CGEN.md]
+1. groups the scored outputs by `r` candidate, 2. selects many sampled combinations, 3. runs avalanche reduction for each sample, 4. converts the result into beam-search probabilities, 5. and keeps the best sample for reporting.
+
+[source: CGEN.md]
+- `--universe-size` / `-q`: `Q`, the number of available values, corresponding to indices `0..Q-1` - `--combination-size` / `-n`: `N`, the number of indices in each combination - `--limit` / `-k`: `K`, the maximum number of combinations to write - `--output` / `-o`: destination CSV path
+
+[source: specs/ZMQ_SPEC.md]
+- Reply: `PONG` - Effect: increments the router ping count - Effect: updates the status context to the current ping count - Effect: mirrors the updated value into the global atomic status
+
+[source: MESSAGES.md]
+`r_candidate_accuracy_batch` payload: - `context`: string - `messages`: array of strings - `ciphertexts`: array of strings - `shifted_ciphertexts`: array of strings - `rabin_exponent`: number - `tonelli_shanks_modulus`: string - `tonelli_shanks_ciphertexts`: array of strings - `candidates`: array - `beam_match_pct`: number or null - `beam_ones_match_pct`: number or null - `beam_score`: number or null - `beam_bit_width`: number or null
+
+[source: target/debug/build/zmq-sys-40ae8b621582f512/out/source/external/wepoll/README.md]
+* Can poll 100000s of sockets efficiently. * Fully thread-safe. * Multiple threads can poll the same epoll port. * Sockets can be added to multiple epoll sets. * All epoll events (`EPOLLIN`, `EPOLLOUT`, `EPOLLPRI`, `EPOLLRDHUP`) are supported. * Level-triggered and one-shot (`EPOLLONESTHOT`) modes are supported * Trivial to embed: you need [only two files][dist].
+
+[source: ARCHITECTURE.md]
+This project is an RSA experiment runner centered on the `analysis` pipeline. The code first validates a normal RSA round trip, then measures how much information can be recovered when ciphertexts are transformed into alternate, easier-to-factor candidate moduli and decoded there. The current implementation is driven mainly by `src/bin/analysis.rs`, `src/methods.rs`, `src/r_candidates.rs`, and the session analytics layer in `src/analytics.rs`.
+
+[source: specs/ZMQ_SPEC.md]
+- Direction: router to viewer or other REQ client - Body: JSON object with a `clients` array of per-client resource snapshots - Effect: exposes the latest `QUERY_RESPONSE` data already aggregated by the server
+
+[source: MESSAGES.md]
+This project emits analytics data as streaming JSON (NDJSON). Each line is a single JSON object with two top-level keys: - `event`: string event name - `payload`: event-specific object
+
+[source: AGENTS.md]
+## Commenting Guidelines - Use Rust doc comments (`///`) for public items and major internal routines. - Each documented routine should include: - A one-line summary of what it does. - `# Parameters` with bullet-style `-` entries. - `# Returns` describing the return value (or `()` when applicable). - `# Expected Output` describing side effects (stdout/stderr/file writes) or stating there are none. - Keep comments factual and aligned with the current implementation. - Avoid duplicating obvious information that is already clear from the signature. - Do not add verbose inline comments unless the logic is non-obvious.
+
+[source: target/release/build/zmq-sys-541b50d142ccd3ce/out/source/external/wepoll/README.md]
+* Can poll 100000s of sockets efficiently. * Fully thread-safe. * Multiple threads can poll the same epoll port. * Sockets can be added to multiple epoll sets. * All epoll events (`EPOLLIN`, `EPOLLOUT`, `EPOLLPRI`, `EPOLLRDHUP`) are supported. * Level-triggered and one-shot (`EPOLLONESTHOT`) modes are supported * Trivial to embed: you need [only two files][dist].
+
+[source: target/release/build/zmq-sys-da9ec5a2b121ef80/out/source/external/wepoll/README.md]
+This library implements the [epoll][man epoll] API for Windows applications. It is fast and scalable, and it closely resembles the API and behavior of Linux' epoll.
+
+[source: LATTICES.md]
+- LLL sanity on a small basis - direct `univariate_coppersmith` recovery for positive and negative linear roots - exact `g_{i,j}` basis construction for a linear polynomial - non-monic polynomial rejection - constant polynomial rejection - zero bound rejection - insufficient dimension rejection - invalid scaled-vector rejection - RSA recovery for a small tail - zero-tail RSA handling - oversized tail rejection - invalid prime/modulus pairing rejection
+
+[source: ARCHITECTURE.md]
+The older description of switching from `N^k` and using `get_larger_number` is no longer accurate for the analysis path. The current code does not pivot to a single integer-power modulus such as `N^k`. Instead, it retargets candidates using decimal exponents, so the right mental model is a generic fractional-power construction such as `N^{a/b}` or, more generally, `N^\alpha`.
+
+[source: CGEN.md]
+As of the current codebase, `cgen` is available as a generator, but `analysis` does not yet read this CSV. The sampled-avalanche path still selects groups at runtime with `select_scored_inputs_for_mixed_r_candidates` in [src/methods.rs](/home/nlaroche/projects/rsa/rsa-statistical-advantage/src/methods.rs#L4927).
+
+[source: target/debug/build/zmq-sys-764b1ada5d1a7d4b/out/source/external/wepoll/README.md]
+* The `events` field is a bit mask containing the events being monitored/reported, and optional flags.<br> Flags are accepted by [`epoll_ctl()`](#epoll_ctl), but they are not reported back by [`epoll_wait()`](#epoll_wait). * The `data` field can be used to associate application-specific information with a socket; its value will be returned unmodified by [`epoll_wait()`](#epoll_wait). * [Linux man page][man epoll_ctl]
+
+[source: LATTICES.md]
+- `i`: the exponent used on `f(x)^i` - `j`: the monomial shift `x^j` - `polynomial`: the unscaled `g_{i,j}(x)` - `scaled_polynomial`: the scaled `g_{i,j}(Xx)` - `coefficient_vector`: the row actually placed in the lattice basis
+
+[source: ARTICLE.md]
+| Envelope field | Typical content | Why it matters | | --- | --- | --- | | PKCS#1 prefix | `0x00 0x02` | Fixed structure helps align the recovered block. | | Padding string `PS` | Nonzero random bytes | Adds variability, but also preserves the location of the payload delimiter. | | Delimiter | `0x00` | Marks the start of the OpenPGP session-key payload. | | Symmetric algorithm octet | `0x07` for AES-128 | Identifies the target cipher and helps confirm payload alignment. | | Session key | 16 bytes | Main recovery target: the AES-128 key material. | | Checksum | 2 bytes | Supports validation of a partially recovered session key. |
+
+[source: target/debug/build/zmq-sys-91383aaabbef1cd5/out/source/external/wepoll/README.md]
+* The `events` field is a bit mask containing the events being monitored/reported, and optional flags.<br> Flags are accepted by [`epoll_ctl()`](#epoll_ctl), but they are not reported back by [`epoll_wait()`](#epoll_wait). * The `data` field can be used to associate application-specific information with a socket; its value will be returned unmodified by [`epoll_wait()`](#epoll_wait). * [Linux man page][man epoll_ctl]

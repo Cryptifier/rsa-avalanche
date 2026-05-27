@@ -1,0 +1,44 @@
+[source: ARTICLE.md]
+where $a$ is the symmetric algorithm identifier, $K_{AES128}$ is the 16-byte AES-128 session key, and $s$ is the checksum field.
+
+[source: target/debug/build/zmq-sys-d3e7e6ceea7b9446/out/source/external/wepoll/README.md]
+* Can poll 100000s of sockets efficiently. * Fully thread-safe. * Multiple threads can poll the same epoll port. * Sockets can be added to multiple epoll sets. * All epoll events (`EPOLLIN`, `EPOLLOUT`, `EPOLLPRI`, `EPOLLRDHUP`) are supported. * Level-triggered and one-shot (`EPOLLONESTHOT`) modes are supported * Trivial to embed: you need [only two files][dist].
+
+[source: ARCHITECTURE.md]
+One detail worth noting: although a config field named `avalanche_combination_pool_size` still exists for compatibility and logging, the current sampled-avalanche path uses the full scored batch as its sampling pool.
+
+[source: target/release/build/zmq-sys-541b50d142ccd3ce/out/source/external/wepoll/README.md]
+* The `events` field is a bit mask containing the events being monitored/reported, and optional flags.<br> Flags are accepted by [`epoll_ctl()`](#epoll_ctl), but they are not reported back by [`epoll_wait()`](#epoll_wait). * The `data` field can be used to associate application-specific information with a socket; its value will be returned unmodified by [`epoll_wait()`](#epoll_wait). * [Linux man page][man epoll_ctl]
+
+[source: target/release/build/zmq-sys-541b50d142ccd3ce/out/source/external/wepoll/README.md]
+This library implements the [epoll][man epoll] API for Windows applications. It is fast and scalable, and it closely resembles the API and behavior of Linux' epoll.
+
+[source: README.md]
+# RSA Analysis Demo This demo shows homomorphic key switching as a viable method to retrieve up to 95% of the bits of an RSA message on average given a public modulus with private factorization and several homomorphically related keys with easier factorizations.
+
+[source: ARTICLE.md]
+The practical focus is the AES-128 session key inside this envelope. Even when the full RSA plaintext is not recovered perfectly, recovering most of the encoded block is valuable because the fixed structure narrows the uncertainty around the 128-bit session key region.
+
+[source: README.md]
+# Theory - Use regular RSA encryption using a large modulus `N = pq` where `p` and `q` are large private primes. - Use homomorphic base switching to go from mod `N` to mod `N^0.850` where `N^0.850` is an easily factored modulus with at least three factors. - Use the easy factorization of `R` to retrieve partial information about the original message by calculating a new `d'` such that `ed' ≡ 1 (mod phi(N^0.850))`. - A bit-wise speculative decryption oracle is used to recover message bits.
+
+[source: target/release/build/zmq-sys-da9ec5a2b121ef80/out/source/external/wepoll/README.md]
+* Can poll 100000s of sockets efficiently. * Fully thread-safe. * Multiple threads can poll the same epoll port. * Sockets can be added to multiple epoll sets. * All epoll events (`EPOLLIN`, `EPOLLOUT`, `EPOLLPRI`, `EPOLLRDHUP`) are supported. * Level-triggered and one-shot (`EPOLLONESTHOT`) modes are supported * Trivial to embed: you need [only two files][dist].
+
+[source: target/debug/build/zmq-sys-764b1ada5d1a7d4b/out/source/external/wepoll/README.md]
+```c struct epoll_event { uint32_t events; /* Epoll events and flags */ epoll_data_t data; /* User data variable */ }; ```
+
+[source: target/debug/build/zmq-sys-ed2171a18c5b6415/out/source/external/wepoll/README.md]
+* Receive socket events from an epoll port. * `events` should point to a caller-allocated array of [`epoll_event`](#struct-epoll_event) structs, which will receive the reported events. * `maxevents` is the maximum number of events that will be written to the `events` array, and must be greater than zero. * `timeout` specifies whether to block when no events are immediately available. - `<0` block indefinitely - `0` report any events that are already waiting, but don't block - `≥1` block for at most N milliseconds * Return value: - `-1` an error occurred - `0` timed out without any events to report - `≥1` the number of events stored in the `events` buffer * [Linux man page][man epoll_wait]
+
+[source: MESSAGES.md]
+This project emits analytics data as streaming JSON (NDJSON). Each line is a single JSON object with two top-level keys: - `event`: string event name - `payload`: event-specific object
+
+[source: target/release/build/zmq-sys-541b50d142ccd3ce/out/source/external/wepoll/README.md]
+* The `events` field is a bit mask containing the events being monitored/reported, and optional flags.<br> Flags are accepted by [`epoll_ctl()`](#epoll_ctl), but they are not reported back by [`epoll_wait()`](#epoll_wait). * The `data` field can be used to associate application-specific information with a socket; its value will be returned unmodified by [`epoll_wait()`](#epoll_wait). * [Linux man page][man epoll_ctl]
+
+[source: target/release/build/zmq-sys-541b50d142ccd3ce/out/source/external/wepoll/README.md]
+* Create a new epoll instance (port). * `size` is ignored but most be greater than zero. * `flags` must be zero as there are no supported flags. * Returns `NULL` on failure. * [Linux man page][man epoll_create]
+
+[source: target/debug/build/zmq-sys-ed2171a18c5b6415/out/source/external/wepoll/README.md]
+* Can poll 100000s of sockets efficiently. * Fully thread-safe. * Multiple threads can poll the same epoll port. * Sockets can be added to multiple epoll sets. * All epoll events (`EPOLLIN`, `EPOLLOUT`, `EPOLLPRI`, `EPOLLRDHUP`) are supported. * Level-triggered and one-shot (`EPOLLONESTHOT`) modes are supported * Trivial to embed: you need [only two files][dist].

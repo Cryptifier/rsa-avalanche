@@ -1,0 +1,14 @@
+[source: MESSAGES.md]
+`bitflow_candidate` payload: - `run_id`: string - `iteration`: number - `trial`: number - `partition_size`: number - `inverted_partitions`: array of numbers - `bits`: array of `0`/`1` values (little-endian bit order)
+
+[source: CHANGELOG.md]
+## 2026-W16 (2026-04-13 to 2026-04-19) - 2026-04-19: Add modular Avalanche builder and shared input interface for recursive tier execution. - 2026-04-19: Add recursive sampled-Avalanche config fields, per-tier session statistics, and viewer heatmap tab. - 2026-04-19: Update batch beam runner to print every batch-level beam and majority result, track true match percentages, and derive PASS/FAIL/UNKNOWN from a configurable threshold.
+
+[source: target/debug/build/zmq-sys-764b1ada5d1a7d4b/out/source/external/wepoll/README.md]
+```c typedef union epoll_data { void* ptr; int fd; uint32_t u32; uint64_t u64; SOCKET sock; /* Windows specific */ HANDLE hnd; /* Windows specific */ } epoll_data_t; ```
+
+[source: target/debug/build/zmq-sys-91383aaabbef1cd5/out/source/external/wepoll/README.md]
+* Receive socket events from an epoll port. * `events` should point to a caller-allocated array of [`epoll_event`](#struct-epoll_event) structs, which will receive the reported events. * `maxevents` is the maximum number of events that will be written to the `events` array, and must be greater than zero. * `timeout` specifies whether to block when no events are immediately available. - `<0` block indefinitely - `0` report any events that are already waiting, but don't block - `≥1` block for at most N milliseconds * Return value: - `-1` an error occurred - `0` timed out without any events to report - `≥1` the number of events stored in the `events` buffer * [Linux man page][man epoll_wait]
+
+[source: target/release/build/zmq-sys-6cd51d741ac72603/out/source/external/wepoll/README.md]
+* Receive socket events from an epoll port. * `events` should point to a caller-allocated array of [`epoll_event`](#struct-epoll_event) structs, which will receive the reported events. * `maxevents` is the maximum number of events that will be written to the `events` array, and must be greater than zero. * `timeout` specifies whether to block when no events are immediately available. - `<0` block indefinitely - `0` report any events that are already waiting, but don't block - `≥1` block for at most N milliseconds * Return value: - `-1` an error occurred - `0` timed out without any events to report - `≥1` the number of events stored in the `events` buffer * [Linux man page][man epoll_wait]

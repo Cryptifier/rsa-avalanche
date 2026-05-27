@@ -1,0 +1,20 @@
+[source: specs/ZMQ_SPEC.md]
+- Direction: poller to router - Body: JSON object with `client_id`, `cpu_cores`, and `available_memory_bytes` - Effect: updates the router's in-memory resource aggregation for that client - Effect: causes the server to print the aggregated snapshot to stdout
+
+[source: target/debug/build/zmq-sys-40ae8b621582f512/out/source/external/wepoll/README.md]
+| Event | Description | |---------------|----------------------------------------------------------------------| | `EPOLLIN` | incoming data available, or incoming connection ready to be accepted | | `EPOLLOUT` | ready to send data, or outgoing connection successfully established | | `EPOLLRDHUP` | remote peer initiated graceful socket shutdown | | `EPOLLPRI` | out-of-band data available for reading | | `EPOLLERR` | socket error<sup>1</sup> | | `EPOLLHUP` | socket hang-up<sup>1</sup> | | `EPOLLRDNORM` | same as `EPOLLIN` | | `EPOLLRDBAND` | same as `EPOLLPRI` | | `EPOLLWRNORM` | same as `EPOLLOUT` | | `EPOLLWRBAND` | same as `EPOLLOUT` | | `EPOLLMSG` | never reported |
+
+[source: target/release/build/zmq-sys-da9ec5a2b121ef80/out/source/external/wepoll/README.md]
+* The epoll port is a `HANDLE`, not a file descriptor. * All functions set both `errno` and `GetLastError()` on failure. * For more extensive documentation, see the [epoll(7) man page][man epoll], and the per-function man pages that are linked below.
+
+[source: DEMO.md]
+**Suggestions to improve the experiment** 1. Increase **unique decryptions**: - Raise `analysis_batch_messages` and `analysis_batch_candidates`. - Increase `process_count` / `process_min_count` for r‑candidate generation. 2. Reduce duplicate `(e*x)^{-1}`: - Increase `analysis_batch_messages` first; duplicates are filtered per candidate. 3. Stabilize bit width: - Always set `--bits-decrypt` to the expected message width. 4. Compare ordering strategies: - Toggle `--use-hamming-distance` to see its effect on beam match. 5. Diversify r‑candidates: - Set `same_r_batch: false` and increase `analysis_batch_candidates`. - Vary `r_candidate_small_primes` and `r_candidate_small_prime_factors`.
+
+[source: ARCHITECTURE.md]
+The older description of switching from `N^k` and using `get_larger_number` is no longer accurate for the analysis path. The current code does not pivot to a single integer-power modulus such as `N^k`. Instead, it retargets candidates using decimal exponents, so the right mental model is a generic fractional-power construction such as `N^{a/b}` or, more generally, `N^\alpha`.
+
+[source: CGEN.md]
+The longest-running modern `analysis` path is the batch scoring plus sampled-avalanche stage. After each batch has produced scored candidate decryptions, analysis repeatedly:
+
+[source: README.md]
+# Theory - Use regular RSA encryption using a large modulus `N = pq` where `p` and `q` are large private primes. - Use homomorphic base switching to go from mod `N` to mod `N^0.850` where `N^0.850` is an easily factored modulus with at least three factors. - Use the easy factorization of `R` to retrieve partial information about the original message by calculating a new `d'` such that `ed' ≡ 1 (mod phi(N^0.850))`. - A bit-wise speculative decryption oracle is used to recover message bits.
