@@ -12,7 +12,7 @@ deploy:
 	./scripts/make_deploy.sh
 
 demo:
-	RUNS=20 SEED_START=2100000 ./scripts/run_small_batch_beam.sh
+	RUNS=1 SEED_START=2100000 AVALANCHE_BATCHES=50 ./scripts/run_small_public_key_demo.sh
 
 install-deps:
 	./scripts/install_deps.sh
