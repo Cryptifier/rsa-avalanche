@@ -63,7 +63,6 @@
     "beam_bit_one_threshold": 0.5,
     "combiner_k_oracles": 100,
     "combiner_tie_breaker": true,
-    "base_convert": false,
     "invert_bits": false,
     "use_rs_decrypt": true,
     "mirror_invert_candidates": false,
@@ -71,6 +70,10 @@
     // - "phi": use (p - 1) * (q - 1).
     // - "lambda": use lcm(p - 1, q - 1).
     "avalanche_totient_mode": "phi",
+    // Homomorphic base conversion mode.
+    // - false: apply the rescaling as (x%p)%r
+    // - true: apply the rescaling as (x*r)%p
+    "avalanche_rescaling_alt_mode": false,
     // Small-batch feature: score a large pool once, then draw many avalanche
     // combinations from that scored batch to estimate per-bit agreement.
     "analysis_batch_enable": true,

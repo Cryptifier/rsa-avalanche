@@ -111,7 +111,7 @@ Notes:
 | `engine.combiner_k_oracles` | usize | `5` | Number of oracles to request. |
 | `engine.combiner_match_probability` | number | `0.75` | Target oracle match probability. |
 | `engine.combiner_tie_breaker` | bool | `true` | Tie-breaking strategy. |
-| `engine.base_convert` | bool | `true` | Enable base conversion in analysis. |
+| `engine.avalanche_rescaling_alt_mode` | bool | `true` | Choose the alternate Avalanche rescaling path; `false` applies `(x % p) % r`, while `true` applies `(x * r) / p`. |
 | `engine.invert_bits` | bool | `false` | Invert bits during analysis. |
 | `engine.use_rs_decrypt` | bool | `true` | Use Rust decrypt path for `r` analysis. |
 | `engine.enciphered_export_enable` | bool | `false` | Export enciphered bins/ramp data. |
