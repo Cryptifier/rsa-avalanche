@@ -54,8 +54,8 @@
     "r_candidate_small_prime_factors": 3,
     "r_candidate_bit_length": 510,
     "r_candidate_random_power_window": true,
-    "r_candidate_target_exponent_minimum": 1.40, // Lower bound for sampled retarget exponents.
-    "r_candidate_target_exponent": 1.50, // Upper bound for sampled retarget exponents.
+    "r_candidate_target_exponent_minimum": 1.05, // Lower bound for sampled retarget exponents.
+    "r_candidate_target_exponent": 1.10, // Upper bound for sampled retarget exponents.
     "r_candidate_retarget_partition_count": 2,
     "r_candidate_retarget_minimum_exponent": 0.15,
     // Beam search keeps a short candidate list and interprets per-bit
@@ -63,17 +63,25 @@
     "beam_bit_one_threshold": 0.5,
     "combiner_k_oracles": 100,
     "combiner_tie_breaker": true,
-    "base_convert": false,
     "invert_bits": false,
     "use_rs_decrypt": true,
     "mirror_invert_candidates": false,
+    // Select how the RSA private exponent totient is derived from p and q:
+    // - "phi": use (p - 1) * (q - 1).
+    // - "lambda": use lcm(p - 1, q - 1).
+    "avalanche_totient_mode": "phi",
+    // Homomorphic base conversion mode.
+    // - false: apply the rescaling as (x%p)%r
+    // - true: apply the rescaling as (x*r)%p
+    "avalanche_rescaling_alt_mode": true,
     // Small-batch feature: score a large pool once, then draw many avalanche
     // combinations from that scored batch to estimate per-bit agreement.
     "analysis_batch_enable": true,
-    "analysis_batch_messages": 25000, // Number of ciphertext variants scored per batch before avalanche sampling.
+    "analysis_batch_messages": 2500, // Number of ciphertext variants scored per batch before avalanche sampling.
     "analysis_batch_candidates": 500, // Number of r candidates scored in each batch before sampling combinations.
     "analysis_batch_batches": 1, // Number of scored batches to run for the small-batch beam workflow.
     "avalanche_solver_enable": false, // Compare final-tier outputs across every 2-batch cartesian product and brute-force differing bit positions.
+    "avalanche_solver_global_log_enable": true, // Compute and print one batch-global majority vote per batch, then a final majority across those batch-global results.
     "avalanche_solver_max_bits": 8, // Maximum number of differing bit positions the cross-batch solver may brute-force per sample pair.
     "sqlite_soft_heap": 10737418240,
     "sqlite_hard_heap": 10737418240,
@@ -88,18 +96,17 @@
     // Search parameters.
     "avalanche_beam_top_k": 6, // Number of top-scoring candidates to keep for beam search results.
     "avalanche_use_top_beam": true, // Carry forward the prior tier's top beam-search bits between recursive Avalanche tiers.
-    "avalanche_probability_spread_exponent": 0.55, //0.45
-    // Whether to write the near-center probabilities for each candidate into the session log; these are used for debugging and analysis but not needed for the core beam search workflow.
+    "avalanche_probability_spread_exponent": 0.55,
     "avalanche_report_biases": true, // Write final-tier near-center beam probabilities into the session log.
     "avalanche_center_threshold": 0.025, // Keep only probabilities within +/- this distance from 50% after normalization and spreading.
     "avalanche_center_threshold_best": true, // When reporting center biases, emit only the best overall avalanche candidate in the session log.
     // Fitness function parameters for scoring the avalanche effect of each candidate against the sampled batch of ciphertext variants.
     "avalanche_fitness_scoring_pass": true, // Enable the fitness pass for Avalanche scoring.
-    "avalanche_fitness_shift_bytes": 9, // Number of bytes to right-shift the ciphertext difference before applying the avalanche fitness function; set to 0 for no shift.
-    "avalanche_fitness_bit_width": 72, // Number of bits to consider for the zero padding fitness function.
-    "avalanche_fitness_r_candidate_limit": 0, // Cap how many r candidates can be scored by the avalanche fitness function; set to 0 for no limit.
-    "avalanche_fitness_cx_candidate_limit": 2000, // Cap how many c^x variants per r candidate can be scored by the avalanche fitness function; set to 0 for no limit.
-    "avalanche_fitness_use_threshold": false, // Default to false.
+    "avalanche_fitness_shift_bytes": 9, // Number of bytes to left-shift the plaintext before candidate scoring; set to 0 for no shift.
+    "avalanche_fitness_bit_width": 72, // Number of least-significant bits inspected by the zero-count fitness function.
+    "avalanche_fitness_r_candidate_limit": 0, // Cap how many r candidates can be retained by the avalanche fitness function; set to 0 for no limit.
+    "avalanche_fitness_cx_candidate_limit": 2000, // Cap how many c^x variants per r candidate can be retained by the avalanche fitness function; set to 0 for no limit.
+    "avalanche_fitness_use_threshold": false, // Drop candidates below avalanche_fitness_threshold when true.
     "avalanche_fitness_threshold": 0.510,
     "avalanche_fitness_log_top_pct": 0.30,
     // Additional random-message fitness checks:
@@ -123,12 +130,12 @@
     // Cap how many distinct r values can appear in one sampled avalanche input;
     // each selected r still contributes all of its sampled c^x variants.
     "avalanche_combination_mixed_r_candidates": 128,
-    "avalanche_combination_samples": 300000, // N: number of sampled combinations evaluated by avalanche per batch.
+    "avalanche_combination_samples": 30000, // N: number of sampled combinations evaluated by avalanche per batch.
     "avalanche_combination_size": 100, // Number of scored items taken in each sampled combination.
     "avalanche_combination_pool_size": 100000, // Legacy compatibility field; runtime sampling now always uses the full batch-sized pool.
-    "avalanche_combination_recursion_depth": 3, // Run one recursive Avalanche tier on top of the sampled-input tier.
-    "avalanche_combination_recursive_group_size": [16, 4, 2], // Per-recursive-tier group sizes; later recursive tiers reuse the last entry.
-    "avalanche_combination_recursive_resample_count": [300000, 300000, 300000, 300000], // Per-recursive-tier resample counts; 0 preserves one-pass regrouping and later recursive tiers reuse the last entry.
+    "avalanche_combination_recursion_depth": 3, // Number of Avalanche tiers to execute, including the sampled-input tier.
+    "avalanche_combination_recursive_group_size": [16, 4, 8, 2], // Per-recursive-tier group sizes; later recursive tiers reuse the last entry.
+    "avalanche_combination_recursive_resample_count": [30000, 30000, 30000, 30000], // Per-recursive-tier resample counts; 0 preserves one-pass regrouping and later recursive tiers reuse the last entry.
     // Hamming-distance pruning keeps a central percentile band of scored items
     // before sampling, then optionally adds some tail outliers back in.
     "avalanche_combination_hamming_distance_prune": true,
@@ -137,7 +144,7 @@
     // Majority-vote mode turns each sampled combination into per-bit frequencies
     // for the beam, then smooths them before ranking plaintext hypotheses.
     "avalanche_combination_majority_vote": true, // Use per-bit majority-vote probabilities from each sampled combination.
-    "avalanche_combination_sample_smoothing": true, // Apply Jeffreys smoothing to the sampled majority-vote probabilities before beam search.
+    "avalanche_combination_sample_smoothing": false, // Apply Jeffreys smoothing to the sampled majority-vote probabilities before beam search.
     "avalanche_combination_majority_vote_print": true, // Print a separate sampled-combination majority-vote summary alongside the beam output.
     "avalanche_statistics_show_majority_vote_biases": true, // Print differing majority-vote bit locations with absolute bias and relative bias percentage.
     "avalanche_statistics_collection": false, // Collect recursive Avalanche tier statistics and other heavy analytics payloads.
@@ -146,11 +153,14 @@
     "same_r_batch": false,
     "ciphertext_modify": true,
     "message": {
-      // Random 64-bit plaintexts are used for scoring; fixed_message only
-      // matters when is_random is set to false.
+      // Random 128-bit plaintexts are used for scoring only when is_random is true.
+      // The existing fixed_message remains the default fixed source unless use_file is true.
       "is_random": false,
       "bits": 128,
-      "fixed_message": "Mary had a little lamb, little lamb, little lamb."
+      "fixed_message": "Mary had a little lamb, little lamb, little lamb.",
+      "fixed_file": "", // Optional plaintext or ciphertext file loaded when use_file is true.
+      "use_file": false, // When true, fixed_file overrides fixed_message and random generation.
+      "is_encrypted": false // Treat fixed_file as an RSA ciphertext and hide the recovered plaintext in console comparisons.
     }
   }
 }

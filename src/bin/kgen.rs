@@ -11,8 +11,11 @@ use std::{
 use clap::{Parser, ValueEnum};
 use num_bigint::BigUint;
 use num_traits::{One, ToPrimitive};
+use rand::RngCore;
 use rsademo::config::{RsaKeyFileFormat, load_rsa_key_material_from_yaml_path};
-use rsademo::math::{choose_exponent, mod_inverse, random_prime_with_bits};
+use rsademo::math::{
+    choose_exponent, mod_inverse, random_biguint_bits, random_prime_with_bits, to_hex,
+};
 use rsademo::pgp::{import_rsa_public_key_from_pgp_path, parse_openpgp_file_path};
 use rsademo::rng::{RngChoice, RngMode};
 use serde::Serialize;
@@ -21,6 +24,7 @@ const DEFAULT_OUTPUT_PATH: &str = "config/keys/private_key.yaml";
 const DEFAULT_PRIME_BITS: u32 = 56;
 const DEFAULT_MODULUS_BITS: u32 = 144;
 const DEFAULT_PUBLIC_EXPONENT: u64 = 65_537;
+const DEFAULT_ENCRYPT_KEY_BITS: u32 = 128;
 const MODULUS_MODE_ATTEMPT_LIMIT: usize = 10_000;
 
 #[derive(Parser, Debug)]
@@ -59,6 +63,10 @@ struct Args {
     #[arg(long)]
     input_private_key: Option<String>,
 
+    /// Existing rsa-public-key-v1 YAML file to use for encryption or normalized output
+    #[arg(long)]
+    input_public_key: Option<String>,
+
     /// Existing OpenPGP public-key file to convert into rsa-public-key-v1 output
     #[arg(long)]
     input_pgp_public_key: Option<String>,
@@ -70,6 +78,14 @@ struct Args {
     /// Optional YAML output path for unpacked OpenPGP packet contents
     #[arg(long)]
     pgp_output: Option<String>,
+
+    /// Optional binary output path for an RSA PKCS#1 v1.5 encrypted random key
+    #[arg(long)]
+    encrypt_output: Option<String>,
+
+    /// Bit width of the random key appended to the PKCS#1 v1.5 encryption block
+    #[arg(long, default_value_t = DEFAULT_ENCRYPT_KEY_BITS, value_parser = clap::value_parser!(u32).range(1..=65536))]
+    encrypt_key_bits: u32,
 
     /// Overwrite the output path if it already exists
     #[arg(long)]
@@ -159,6 +175,14 @@ struct RsaKeyGeneration {
     created_unix_ms: u128,
 }
 
+#[derive(Debug, PartialEq, Eq)]
+struct EncryptedRandomKeyOutput {
+    key_bytes: Vec<u8>,
+    padded_message: Vec<u8>,
+    ciphertext_bytes: Vec<u8>,
+    ciphertext: BigUint,
+}
+
 /// Entry point for the YAML RSA key generator.
 ///
 /// # Parameters
@@ -183,14 +207,15 @@ fn main() -> Result<(), Box<dyn Error>> {
 /// - `Result<(), Box<dyn Error>>`: `Ok(())` on success or an error on failure.
 ///
 /// # Expected Output
-/// - Writes generated private/public YAML files or converts a private YAML into public-key YAML and prints a summary to stdout.
+/// - Writes generated private/public YAML files, optionally emits an RSA-encrypted PKCS#1 v1.5 ciphertext file, and prints a summary to stdout.
 fn run_kgen(args: Args) -> Result<(), Box<dyn Error>> {
     let import_mode_count = usize::from(args.input_private_key.is_some())
+        + usize::from(args.input_public_key.is_some())
         + usize::from(args.input_pgp_public_key.is_some())
         + usize::from(args.input_pgp_file.is_some());
     if import_mode_count > 1 {
         return Err(
-            "--input-private-key, --input-pgp-public-key, and --input-pgp-file are mutually exclusive"
+            "--input-private-key, --input-public-key, --input-pgp-public-key, and --input-pgp-file are mutually exclusive"
                 .into(),
         );
     }
@@ -199,7 +224,11 @@ fn run_kgen(args: Args) -> Result<(), Box<dyn Error>> {
         if args.pgp_output.is_none() {
             return Err("--input-pgp-file requires --pgp-output".into());
         }
-        if args.public_output.is_some() || args.input_private_key.is_some() {
+        if args.public_output.is_some()
+            || args.input_private_key.is_some()
+            || args.input_public_key.is_some()
+            || args.encrypt_output.is_some()
+        {
             return Err("--input-pgp-file does not support RSA key conversion outputs".into());
         }
 
@@ -246,54 +275,140 @@ fn run_kgen(args: Args) -> Result<(), Box<dyn Error>> {
     } else {
         KeyRngMode::Standard
     };
-    let (key, generated_new_private_key) =
-        if let Some(input_private_key) = args.input_private_key.as_deref() {
-            if args.public_output.is_none() {
-                return Err("--input-private-key requires --public-output".into());
-            }
-            (load_private_key_from_yaml(input_private_key)?, false)
-        } else {
-            let mut rng = build_rng(&args, rng_mode)?;
-            (generate_private_key(&args, &mut rng)?, true)
-        };
-    validate_generated_key(&key)?;
+    let needs_rng = args.encrypt_output.is_some() || args.input_private_key.is_none();
+    let mut rng = if needs_rng {
+        Some(build_rng(&args, rng_mode)?)
+    } else {
+        None
+    };
 
-    if generated_new_private_key {
-        let document = build_private_key_document(&args, &key, rng_mode)?;
-        write_yaml_file(&args.output, &document, args.force)?;
-    }
-    if let Some(public_output) = args.public_output.as_deref() {
-        let public_document = build_public_key_document(&key);
-        write_yaml_file(public_output, &public_document, args.force)?;
-    }
-
-    if generated_new_private_key {
-        println!(
-            "Generated RSA private key: mode {} p-bits {} q-bits {} modulus-bits {} e {} output {}",
-            size_mode_label(args.size_mode),
-            key.p.bits(),
-            key.q.bits(),
-            key.n.bits(),
-            key.e,
-            args.output
-        );
-        if key.e != BigUint::from(args.public_exponent) {
-            println!(
-                "Adjusted public exponent from {} to {} to satisfy odd coprime RSA requirements",
-                args.public_exponent, key.e
+    let (public_modulus, public_exponent) = if let Some(input_pgp_public_key) =
+        args.input_pgp_public_key.as_deref()
+    {
+        if args.public_output.is_none() && args.encrypt_output.is_none() {
+            return Err(
+                "--input-pgp-public-key requires --public-output or --encrypt-output".into(),
             );
         }
-    } else {
+        let imported = import_rsa_public_key_from_pgp_path(Path::new(input_pgp_public_key))?;
+        let public_document = build_public_key_document_from_components(
+            &imported.modulus,
+            &imported.public_exponent,
+        )?;
+        if let Some(public_output) = args.public_output.as_deref() {
+            write_yaml_file(public_output, &public_document, args.force)?;
+            println!("Wrote RSA public key output {}", public_output);
+        }
+        if let Some(pgp_output) = args.pgp_output.as_deref() {
+            write_yaml_file(pgp_output, &imported.parsed_file, args.force)?;
+            println!("Wrote unpacked OpenPGP YAML output {}", pgp_output);
+        }
         println!(
-            "Loaded RSA private key: p-bits {} q-bits {} modulus-bits {} e {}",
-            key.p.bits(),
-            key.q.bits(),
-            key.n.bits(),
-            key.e,
+            "Imported OpenPGP RSA public key: modulus-bits {} e {}",
+            imported.modulus.bits(),
+            imported.public_exponent,
         );
-    }
-    if let Some(public_output) = args.public_output.as_deref() {
-        println!("Wrote RSA public key output {}", public_output);
+        (imported.modulus, imported.public_exponent)
+    } else if let Some(input_public_key) = args.input_public_key.as_deref() {
+        if args.public_output.is_none() && args.encrypt_output.is_none() {
+            return Err("--input-public-key requires --public-output or --encrypt-output".into());
+        }
+        let material = load_rsa_key_material_from_yaml_path(Path::new(input_public_key))?;
+        if material.format != RsaKeyFileFormat::PublicKeyV1 {
+            return Err(format!("{input_public_key} is not an rsa-public-key-v1 YAML file").into());
+        }
+        let public_exponent = BigUint::from(material.public_exponent);
+        if let Some(public_output) = args.public_output.as_deref() {
+            let public_document =
+                build_public_key_document_from_components(&material.modulus, &public_exponent)?;
+            write_yaml_file(public_output, &public_document, args.force)?;
+            println!("Wrote RSA public key output {}", public_output);
+        }
+        println!(
+            "Loaded RSA public key: modulus-bits {} e {} source {}",
+            material.modulus.bits(),
+            material.public_exponent,
+            input_public_key
+        );
+        (material.modulus, public_exponent)
+    } else {
+        let (key, generated_new_private_key) =
+            if let Some(input_private_key) = args.input_private_key.as_deref() {
+                if args.public_output.is_none() && args.encrypt_output.is_none() {
+                    return Err(
+                        "--input-private-key requires --public-output or --encrypt-output".into(),
+                    );
+                }
+                (load_private_key_from_yaml(input_private_key)?, false)
+            } else {
+                let rng = rng
+                    .as_mut()
+                    .ok_or("internal error: missing RNG for RSA key generation")?;
+                (generate_private_key(&args, rng)?, true)
+            };
+        validate_generated_key(&key)?;
+
+        if generated_new_private_key {
+            let document = build_private_key_document(&args, &key, rng_mode)?;
+            write_yaml_file(&args.output, &document, args.force)?;
+        }
+        if let Some(public_output) = args.public_output.as_deref() {
+            let public_document = build_public_key_document(&key);
+            write_yaml_file(public_output, &public_document, args.force)?;
+            println!("Wrote RSA public key output {}", public_output);
+        }
+
+        if generated_new_private_key {
+            println!(
+                "Generated RSA private key: mode {} p-bits {} q-bits {} modulus-bits {} e {} output {}",
+                size_mode_label(args.size_mode),
+                key.p.bits(),
+                key.q.bits(),
+                key.n.bits(),
+                key.e,
+                args.output
+            );
+            if key.e != BigUint::from(args.public_exponent) {
+                println!(
+                    "Adjusted public exponent from {} to {} to satisfy odd coprime RSA requirements",
+                    args.public_exponent, key.e
+                );
+            }
+        } else {
+            println!(
+                "Loaded RSA private key: p-bits {} q-bits {} modulus-bits {} e {}",
+                key.p.bits(),
+                key.q.bits(),
+                key.n.bits(),
+                key.e,
+            );
+        }
+
+        (key.n, key.e)
+    };
+
+    if let Some(encrypt_output) = args.encrypt_output.as_deref() {
+        let rng = rng
+            .as_mut()
+            .ok_or("internal error: missing RNG for PKCS#1 ciphertext generation")?;
+        let encrypted = encrypt_pkcs1_v1_5_random_key(
+            &public_modulus,
+            &public_exponent,
+            args.encrypt_key_bits,
+            rng,
+        )?;
+        write_binary_file(encrypt_output, &encrypted.ciphertext_bytes, args.force)?;
+        println!(
+            "Encrypted PKCS#1 v1.5 random key: key-bits {} modulus-bits {} output {}",
+            args.encrypt_key_bits,
+            public_modulus.bits(),
+            encrypt_output
+        );
+        println!(
+            "Random key (hex): {}",
+            to_hex(&BigUint::from_bytes_be(&encrypted.key_bytes))
+        );
+        println!("Ciphertext (hex): {}", to_hex(&encrypted.ciphertext));
     }
 
     Ok(())
@@ -551,6 +666,116 @@ fn build_public_key_document_from_components(
     })
 }
 
+/// Generates a fixed-width random key payload for PKCS#1 v1.5 encryption.
+///
+/// # Parameters
+/// - `bits`: Exact payload bit width to generate.
+/// - `rng`: Random number generator used for payload sampling.
+///
+/// # Returns
+/// - `Vec<u8>`: Big-endian payload bytes sized to `bits.div_ceil(8)`.
+///
+/// # Expected Output
+/// - Returns an in-memory random payload with its top bit set so it uses the requested width.
+fn generate_random_key_bytes(bits: u32, rng: &mut RngChoice) -> Vec<u8> {
+    let bytes_len = bits.div_ceil(8) as usize;
+    let mut bytes = random_biguint_bits(bits, rng).to_bytes_be();
+    if bytes.len() < bytes_len {
+        let mut padded = vec![0u8; bytes_len - bytes.len()];
+        padded.extend_from_slice(&bytes);
+        bytes = padded;
+    }
+    bytes
+}
+
+/// Builds a PKCS#1 v1.5 encryption block containing the provided payload bytes.
+///
+/// # Parameters
+/// - `modulus`: RSA modulus used to determine the padded block width.
+/// - `payload_bytes`: Random key bytes appended after the PKCS#1 separator.
+/// - `rng`: Random number generator used for the non-zero padding string.
+///
+/// # Returns
+/// - `Result<Vec<u8>, Box<dyn Error>>`: Full padded encryption block in big-endian order.
+///
+/// # Expected Output
+/// - Returns a `0x00 0x02 || PS || 0x00 || payload` block or an error when the modulus is too small.
+fn build_pkcs1_v1_5_encryption_block(
+    modulus: &BigUint,
+    payload_bytes: &[u8],
+    rng: &mut RngChoice,
+) -> Result<Vec<u8>, Box<dyn Error>> {
+    let modulus_len = modulus.bits().div_ceil(8).max(1) as usize;
+    if payload_bytes.len() + 11 > modulus_len {
+        return Err(format!(
+            "payload requires {} byte(s) but PKCS#1 v1.5 with modulus width {} byte(s) allows at most {} byte(s)",
+            payload_bytes.len(),
+            modulus_len,
+            modulus_len.saturating_sub(11)
+        )
+        .into());
+    }
+
+    let padding_len = modulus_len - payload_bytes.len() - 3;
+    let mut block = Vec::with_capacity(modulus_len);
+    block.push(0x00);
+    block.push(0x02);
+    for _ in 0..padding_len {
+        let mut byte = 0u8;
+        while byte == 0 {
+            let mut sample = [0u8; 1];
+            rng.fill_bytes(&mut sample);
+            byte = sample[0];
+        }
+        block.push(byte);
+    }
+    block.push(0x00);
+    block.extend_from_slice(payload_bytes);
+    Ok(block)
+}
+
+/// Encrypts a random key embedded in a PKCS#1 v1.5 block using the provided RSA public key.
+///
+/// # Parameters
+/// - `modulus`: RSA modulus `n`.
+/// - `public_exponent`: RSA public exponent `e`.
+/// - `key_bits`: Payload bit width for the embedded random key.
+/// - `rng`: Random number generator used for both the payload and the PKCS padding string.
+///
+/// # Returns
+/// - `Result<EncryptedRandomKeyOutput, Box<dyn Error>>`: Random key bytes, padded plaintext block, and ciphertext.
+///
+/// # Expected Output
+/// - Returns an encrypted random key without writing files or printing.
+fn encrypt_pkcs1_v1_5_random_key(
+    modulus: &BigUint,
+    public_exponent: &BigUint,
+    key_bits: u32,
+    rng: &mut RngChoice,
+) -> Result<EncryptedRandomKeyOutput, Box<dyn Error>> {
+    let key_bytes = generate_random_key_bytes(key_bits, rng);
+    let padded_message = build_pkcs1_v1_5_encryption_block(modulus, &key_bytes, rng)?;
+    let padded_value = BigUint::from_bytes_be(&padded_message);
+    if padded_value >= *modulus {
+        return Err("generated PKCS#1 v1.5 plaintext is not smaller than the RSA modulus".into());
+    }
+    let ciphertext = padded_value.modpow(public_exponent, modulus);
+    let modulus_len = modulus.bits().div_ceil(8).max(1) as usize;
+    let mut ciphertext_bytes = ciphertext.to_bytes_be();
+    if ciphertext_bytes.len() < modulus_len {
+        let mut padded = vec![0u8; modulus_len - ciphertext_bytes.len()];
+        padded.extend_from_slice(&ciphertext_bytes);
+        ciphertext_bytes = padded;
+    }
+
+    Ok(EncryptedRandomKeyOutput {
+        key_bytes,
+        padded_message,
+        ciphertext_bytes,
+        ciphertext,
+    })
+}
+
 /// Writes a YAML document to disk.
 ///
 /// # Parameters
@@ -589,6 +814,39 @@ fn write_yaml_file<T: Serialize>(
         yaml.push('\n');
     }
     fs::write(output_path, yaml)?;
+    Ok(())
+}
+
+/// Writes a binary file to disk.
+///
+/// # Parameters
+/// - `path`: Output path for the binary file.
+/// - `bytes`: File contents to write.
+/// - `force`: Whether to overwrite an existing file.
+///
+/// # Returns
+/// - `Result<(), Box<dyn Error>>`: `Ok(())` when the file is written successfully.
+///
+/// # Expected Output
+/// - Creates parent directories as needed and writes the bytes at `path`.
+fn write_binary_file(path: &str, bytes: &[u8], force: bool) -> Result<(), Box<dyn Error>> {
+    let output_path = Path::new(path);
+    if output_path.exists() && !force {
+        return Err(format!(
+            "output file {} already exists; rerun with --force to overwrite",
+            output_path.display()
+        )
+        .into());
+    }
+
+    if let Some(parent) = output_path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+    {
+        fs::create_dir_all(parent)?;
+    }
+
+    fs::write(output_path, bytes)?;
     Ok(())
 }
 
@@ -648,9 +906,12 @@ mod tests {
             output: DEFAULT_OUTPUT_PATH.to_string(),
             public_output: None,
             input_private_key: None,
+            input_public_key: None,
             input_pgp_public_key: None,
             input_pgp_file: None,
             pgp_output: None,
+            encrypt_output: None,
+            encrypt_key_bits: DEFAULT_ENCRYPT_KEY_BITS,
             force: false,
             seed: None,
             crypto_rng: false,
@@ -667,9 +928,12 @@ mod tests {
         assert_eq!(args.output, DEFAULT_OUTPUT_PATH);
         assert!(args.public_output.is_none());
         assert!(args.input_private_key.is_none());
+        assert!(args.input_public_key.is_none());
         assert!(args.input_pgp_public_key.is_none());
         assert!(args.input_pgp_file.is_none());
         assert!(args.pgp_output.is_none());
+        assert!(args.encrypt_output.is_none());
+        assert_eq!(args.encrypt_key_bits, DEFAULT_ENCRYPT_KEY_BITS);
         assert_eq!(args.public_exponent, DEFAULT_PUBLIC_EXPONENT);
     }
 
@@ -775,6 +1039,90 @@ mod tests {
         assert!(err.to_string().contains("--force"));
 
         let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn test_encrypt_pkcs1_v1_5_random_key_round_trips_and_preserves_payload() {
+        let mut key_rng = RngChoice::from_seed(RngMode::Standard, 7);
+        let mut key_args = base_args();
+        key_args.size_mode = SizeMode::Modulus;
+        key_args.modulus_bits = 128;
+        let key = generate_private_key(&key_args, &mut key_rng).expect("generate key");
+        let mut encrypt_rng = RngChoice::from_seed(RngMode::Standard, 11);
+
+        let encrypted = encrypt_pkcs1_v1_5_random_key(&key.n, &key.e, 24, &mut encrypt_rng)
+            .expect("encrypt random key");
+        let decrypted = encrypted.ciphertext.modpow(&key.d, &key.n);
+        let modulus_len = key.n.bits().div_ceil(8) as usize;
+        let mut decrypted_bytes = decrypted.to_bytes_be();
+        if decrypted_bytes.len() < modulus_len {
+            let mut padded = vec![0u8; modulus_len - decrypted_bytes.len()];
+            padded.extend_from_slice(&decrypted_bytes);
+            decrypted_bytes = padded;
+        }
+
+        assert_eq!(decrypted_bytes, encrypted.padded_message);
+        assert_eq!(decrypted_bytes[0], 0x00);
+        assert_eq!(decrypted_bytes[1], 0x02);
+        let separator_index = decrypted_bytes[2..]
+            .iter()
+            .position(|byte| *byte == 0x00)
+            .map(|index| index + 2)
+            .expect("separator byte");
+        assert!(separator_index >= 10);
+        assert_eq!(&decrypted_bytes[separator_index + 1..], encrypted.key_bytes);
+        assert_eq!(encrypted.key_bytes.len(), 3);
+    }
+
+    #[test]
+    fn test_run_kgen_encrypts_random_key_from_public_yaml() {
+        let public_key_path = temp_path("public_encrypt_input");
+        let ciphertext_path = temp_path("public_encrypt_output").with_extension("bin");
+        let mut key_rng = RngChoice::from_seed(RngMode::Standard, 13);
+        let mut key_args = base_args();
+        key_args.size_mode = SizeMode::Modulus;
+        key_args.modulus_bits = 128;
+        let key = generate_private_key(&key_args, &mut key_rng).expect("generate key");
+        let public_document = build_public_key_document(&key);
+        write_yaml_file(
+            public_key_path.to_str().expect("utf8 path"),
+            &public_document,
+            true,
+        )
+        .expect("write public key");
+
+        let mut args = base_args();
+        args.input_public_key = Some(public_key_path.to_string_lossy().to_string());
+        args.encrypt_output = Some(ciphertext_path.to_string_lossy().to_string());
+        args.encrypt_key_bits = 32;
+        args.seed = Some(19);
+        args.force = true;
+
+        run_kgen(args).expect("encrypt from public key");
+        let ciphertext_bytes = fs::read(&ciphertext_path).expect("read ciphertext");
+        let ciphertext = BigUint::from_bytes_be(&ciphertext_bytes);
+        let decrypted = ciphertext.modpow(&key.d, &key.n);
+        let modulus_len = key.n.bits().div_ceil(8) as usize;
+        let mut decrypted_bytes = decrypted.to_bytes_be();
+        if decrypted_bytes.len() < modulus_len {
+            let mut padded = vec![0u8; modulus_len - decrypted_bytes.len()];
+            padded.extend_from_slice(&decrypted_bytes);
+            decrypted_bytes = padded;
+        }
+        let separator_index = decrypted_bytes[2..]
+            .iter()
+            .position(|byte| *byte == 0x00)
+            .map(|index| index + 2)
+            .expect("separator byte");
+        let payload = &decrypted_bytes[separator_index + 1..];
+
+        assert_eq!(ciphertext_bytes.len(), modulus_len);
+        assert_eq!(decrypted_bytes[0], 0x00);
+        assert_eq!(decrypted_bytes[1], 0x02);
+        assert_eq!(payload.len(), 4);
+
+        let _ = fs::remove_file(public_key_path);
+        let _ = fs::remove_file(ciphertext_path);
     }
 
     #[test]

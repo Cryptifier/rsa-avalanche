@@ -1,0 +1,23 @@
+[source: CHANGELOG.md]
+## 2026-W16 (2026-04-13 to 2026-04-19) - 2026-04-19: Add modular Avalanche builder and shared input interface for recursive tier execution. - 2026-04-19: Add recursive sampled-Avalanche config fields, per-tier session statistics, and viewer heatmap tab. - 2026-04-19: Update batch beam runner to print every batch-level beam and majority result, track true match percentages, and derive PASS/FAIL/UNKNOWN from a configurable threshold.
+
+[source: ARCHITECTURE.md]
+9. Compare the recovered candidate bits against the true message bits. This is an analysis experiment, so the code scores each candidate against the known plaintext and records match percentages, best `c^x` hits, and per-candidate analytics.
+
+[source: CONFIGS.md]
+# Notes for generated public-key demo configs - `scripts/run_small_public_key_demo.sh` writes a modulus-specific generated config beside the tracked configs, for example `config/rsa_config_small_public_key_demo_512.json`. - The generated config starts from `config/rsa_config_small_batch.json`, switches `rsa_keypair.keyfile` to the generated public YAML, keeps `rsa_keypair.private_keyfile` as a verification peek, and enables `engine.message.use_file` plus `engine.message.is_encrypted`. - `engine.message.fixed_file` points at the extracted PKESK ciphertext hex file written beside `config/pgp/<modulus-bits>/prep_blob_1.asc`. - `engine.message.bits` is derived from the decrypted PKCS#1 v1.5 payload width, and `engine.avalanche_fitness_shift_bytes` is forced to `0` so the final global-majority hex can be compared directly against the stored payload hex artifact.
+
+[source: AGENTS.md]
+## Modularity Guidelines - Preserve the current module boundaries and responsibilities. - Keep functionality in its existing module (`dsp`, `combiner`, `math`, `r_candidates`, and `bin/analysis`). - Avoid moving functions across modules unless explicitly requested. - Add new helpers in the most relevant existing module; do not create new modules without a clear need. - Maintain clear separation between library code (`src/*.rs`) and CLI/analysis code (`src/bin/analysis.rs`).
+
+[source: API.md]
+$$ S(b) = \sum_{i=0}^{W-1} \begin{cases} p_i & \text{if } b_i = 1 \\ 1 - p_i & \text{if } b_i = 0 \end{cases} $$
+
+[source: CONFIGS.md]
+# Key YAML - `kgen` writes RSA private keys as YAML under `config/keys`. - `kgen --public-output ...` writes matching RSA public keys as `rsa-public-key-v1` YAML. - `kgen --input-pgp-public-key ... --public-output ...` imports RSA public keys from OpenPGP files into the same `rsa-public-key-v1` YAML format. - `kgen --input-pgp-file ... --pgp-output ...` writes unpacked OpenPGP packet contents as `pgp-file-v1` YAML. - Non-secret example schemas live at `config/keys/private_key.example.yaml` and `config/keys/public_key.example.yaml`. - A non-secret `pgp-file-v1` schema example lives at `config/keys/pgp_file.example.yaml`. - The tracked repository ignores the default generated key path `config/keys/private_key.yaml`. - Tracked examples include both private and public YAMLs for the small-batch keys under `config/keys/`.
+
+[source: API.md]
+```text run_demo -> run_r_candidate_accuracy_batches -> generate_r_candidates_with_analytics -> prepare valid batch candidates -> per-batch scoring loop -> run_sampled_avalanche_beam_search -> analytics aggregation ```
+
+[source: target/debug/build/zmq-sys-91383aaabbef1cd5/out/source/external/wepoll/README.md]
+* Control which socket events are monitored by an epoll port. * `ephnd` must be a HANDLE created by [`epoll_create()`](#epoll_createepoll_create1) or [`epoll_create1()`](#epoll_createepoll_create1). * `op` must be one of `EPOLL_CTL_ADD`, `EPOLL_CTL_MOD`, `EPOLL_CTL_DEL`. * `sock` must be a valid socket created by [`socket()`][msdn socket], [`WSASocket()`][msdn wsasocket], or [`accept()`][msdn accept]. * `event` should be a pointer to a [`struct epoll_event`](#struct-epoll_event).<br> If `op` is `EPOLL_CTL_DEL` then the `event` parameter is ignored, and it may be `NULL`. * Returns 0 on success, -1 on failure. * It is recommended to always explicitly remove a socket from its epoll set using `EPOLL_CTL_DEL` *before* closing it.<br> As on Linux, closed sockets are automatically removed from the epoll set, but wepoll may not be able to detect that a socket was closed until the next call to [`epoll_wait()`](#epoll_wait). * [Linux man page][man epoll_ctl]

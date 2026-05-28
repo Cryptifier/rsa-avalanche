@@ -1,0 +1,32 @@
+[source: target/debug/build/zmq-sys-91383aaabbef1cd5/out/source/external/wepoll/README.md]
+Using I/O completion ports isn't always practical when software is designed to be cross-platform. Wepoll offers an alternative that is much closer to a drop-in replacement for software that was designed to run on Linux.
+
+[source: target/debug/build/zmq-sys-d3e7e6ceea7b9446/out/source/external/wepoll/README.md]
+* Receive socket events from an epoll port. * `events` should point to a caller-allocated array of [`epoll_event`](#struct-epoll_event) structs, which will receive the reported events. * `maxevents` is the maximum number of events that will be written to the `events` array, and must be greater than zero. * `timeout` specifies whether to block when no events are immediately available. - `<0` block indefinitely - `0` report any events that are already waiting, but don't block - `≥1` block for at most N milliseconds * Return value: - `-1` an error occurred - `0` timed out without any events to report - `≥1` the number of events stored in the `events` buffer * [Linux man page][man epoll_wait]
+
+[source: API.md]
+| Function | Purpose | | --- | --- | | `majority_vote_per_bit` | Hard majority vote across oracle bit vectors | | `majority_vote_with_distribution` | Majority vote plus per-bit one/zero counts and probabilities | | `generate_oracle_samples` | Synthetic noisy-oracle generator used by combiner tests and experiments | | `optimal_combiner_test` | End-to-end simulated combiner experiment |
+
+[source: LATTICES.md]
+- `modulus` is the RSA modulus `N` - `polynomial` is a monic integer polynomial `f(x)` - `bound` is the small-root bound `X` - `m` is the Coppersmith exponent parameter - `dimension` is the final square lattice dimension `d`
+
+[source: CGEN.md]
+That loop is implemented in [src/methods.rs](/home/nlaroche/projects/rsa/rsa-statistical-advantage/src/methods.rs#L4998) and described in [ARCHITECTURE.md](/home/nlaroche/projects/rsa/rsa-statistical-advantage/ARCHITECTURE.md#L115). In practice, this stage can dominate runtime when `avalanche_combination_samples` is large, because analysis evaluates many sample layouts per batch.
+
+[source: ARCHITECTURE.md]
+When `ciphertext_modify` is enabled, the code uses increasing odd `x` values. It now retries until it has collected the requested number of ciphertext variants whose inverses actually exist for the target batch. In other words, the batch logic no longer silently burns a slot on a non-invertible `(e x)`. 6. Convert each ciphertext into candidate-modulus space with the HBC transform:
+
+[source: specs/ZMQ_SPEC.md]
+- `pings`: number of processed `PING` commands - `query_requests_sent`: number of `QUERY` messages sent by the router - `query_responses`: number of processed `QUERY_RESPONSE` messages - `status_queries`: number of processed `STATUS` commands - `final_status`: last mirrored status observed before exit - `known_clients`: number of distinct client identities seen by the router - `stop_requested`: `true` when shutdown happened via `STOP`
+
+[source: ARTICLE.md]
+Here, **HBC** means **homomorphic base conversion**. In this method, HBC is the transformation that moves a value from one modulus domain into another related modulus domain without discarding the algebraic structure needed for the next step. The first HBC maps the RSA ciphertext view from the original modulus $N$ into the candidate modulus $r$, and the second HBC maps the candidate decryption result back into the original modulus domain for comparison with the target message. HBC is therefore the bridge that lets alternate moduli produce usable, bit-biased message estimates instead of unrelated residues.
+
+[source: LATTICES.md]
+Each row is scaled as `g_{i,j}(Xx)` before its coefficients are inserted into the lattice matrix. This is what lets `vector_to_polynomial` and `reduced_polynomials` map reduced lattice vectors back into ordinary integer polynomials.
+
+[source: ARCHITECTURE.md]
+9. Compare the recovered candidate bits against the true message bits. This is an analysis experiment, so the code scores each candidate against the known plaintext and records match percentages, best `c^x` hits, and per-candidate analytics.
+
+[source: target/release/build/zmq-sys-541b50d142ccd3ce/out/source/external/wepoll/README.md]
+* Control which socket events are monitored by an epoll port. * `ephnd` must be a HANDLE created by [`epoll_create()`](#epoll_createepoll_create1) or [`epoll_create1()`](#epoll_createepoll_create1). * `op` must be one of `EPOLL_CTL_ADD`, `EPOLL_CTL_MOD`, `EPOLL_CTL_DEL`. * `sock` must be a valid socket created by [`socket()`][msdn socket], [`WSASocket()`][msdn wsasocket], or [`accept()`][msdn accept]. * `event` should be a pointer to a [`struct epoll_event`](#struct-epoll_event).<br> If `op` is `EPOLL_CTL_DEL` then the `event` parameter is ignored, and it may be `NULL`. * Returns 0 on success, -1 on failure. * It is recommended to always explicitly remove a socket from its epoll set using `EPOLL_CTL_DEL` *before* closing it.<br> As on Linux, closed sockets are automatically removed from the epoll set, but wepoll may not be able to detect that a socket was closed until the next call to [`epoll_wait()`](#epoll_wait). * [Linux man page][man epoll_ctl]

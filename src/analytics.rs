@@ -28,6 +28,12 @@ pub struct AnalyticsCliArgs {
     pub bits: u32,
     /// Optional message override provided by the CLI.
     pub message_override: Option<String>,
+    /// Whether the configured message source loads from `engine.message.fixed_file`.
+    pub message_use_file: bool,
+    /// Whether the configured fixed file is interpreted as an encrypted ciphertext.
+    pub message_is_encrypted: bool,
+    /// Configured fixed message file path.
+    pub message_fixed_file: String,
     /// Public exponent selected for RSA.
     pub public_exponent: u64,
     /// Optional RNG seed for deterministic runs.
@@ -58,9 +64,11 @@ pub struct AnalyticsCliArgs {
     pub avalanche_probability_spread_exponent: f64,
     /// Number of avalanche combination samples evaluated per batch.
     pub avalanche_combination_samples: u64,
+    /// Prime-derived RSA totient formula used when deriving a private exponent from `p` and `q`.
+    pub avalanche_totient_mode: String,
     /// Whether the cross-batch Avalanche solver is enabled.
     pub avalanche_solver_enable: bool,
-    /// Whether Avalanche logs the global majority vote across all final-tier outputs.
+    /// Whether Avalanche logs per-batch global majorities plus a final majority across those batch-global results.
     pub avalanche_solver_global_log_enable: bool,
     /// Maximum number of differing bit positions the cross-batch Avalanche solver may brute-force.
     pub avalanche_solver_max_bits: usize,
@@ -136,6 +144,9 @@ pub struct AnalyticsCliArgs {
 pub(crate) struct AnalyticsCliInfo {
     bits: u32,
     message_override: Option<String>,
+    message_use_file: bool,
+    message_is_encrypted: bool,
+    message_fixed_file: String,
     public_exponent: u64,
     seed: Option<u64>,
     crypto_rng: bool,
@@ -151,6 +162,7 @@ pub(crate) struct AnalyticsCliInfo {
     avalanche_beam_top_k: usize,
     avalanche_probability_spread_exponent: f64,
     avalanche_combination_samples: u64,
+    avalanche_totient_mode: String,
     avalanche_solver_enable: bool,
     avalanche_solver_global_log_enable: bool,
     avalanche_solver_max_bits: usize,
@@ -628,6 +640,9 @@ impl SessionAnalytics {
         let cli = AnalyticsCliInfo {
             bits: args.bits,
             message_override: args.message_override,
+            message_use_file: args.message_use_file,
+            message_is_encrypted: args.message_is_encrypted,
+            message_fixed_file: args.message_fixed_file,
             public_exponent: args.public_exponent,
             seed: args.seed,
             crypto_rng: args.crypto_rng,
@@ -643,6 +658,7 @@ impl SessionAnalytics {
             avalanche_beam_top_k: args.avalanche_beam_top_k,
             avalanche_probability_spread_exponent: args.avalanche_probability_spread_exponent,
             avalanche_combination_samples: args.avalanche_combination_samples,
+            avalanche_totient_mode: args.avalanche_totient_mode,
             avalanche_solver_enable: args.avalanche_solver_enable,
             avalanche_solver_global_log_enable: args.avalanche_solver_global_log_enable,
             avalanche_solver_max_bits: args.avalanche_solver_max_bits,

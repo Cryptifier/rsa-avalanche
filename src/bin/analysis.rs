@@ -130,7 +130,7 @@ struct Args {
     #[arg(long = "avalanche-combination-majority-vote-print")]
     avalanche_combination_majority_vote_print: Option<bool>,
 
-    /// Whether Avalanche logs a global majority vote across all final-tier outputs
+    /// Whether Avalanche logs per-batch global majorities plus a final majority across those batch-global results
     #[arg(long = "avalanche-solver-global-log-enable")]
     avalanche_solver_global_log_enable: Option<bool>,
 
@@ -264,6 +264,9 @@ fn main() -> Result<(), Box<dyn Error>> {
     let analytics = Arc::new(Mutex::new(SessionAnalytics::new(AnalyticsCliArgs {
         bits: args.bits,
         message_override: args.message.clone(),
+        message_use_file: config.engine.message.use_file,
+        message_is_encrypted: config.engine.message.is_encrypted,
+        message_fixed_file: config.engine.message.fixed_file.clone(),
         public_exponent: args.public_exponent,
         seed: args.seed,
         crypto_rng: args.crypto_rng,
@@ -279,6 +282,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         avalanche_beam_top_k: config.engine.avalanche_beam_top_k,
         avalanche_probability_spread_exponent: config.engine.avalanche_probability_spread_exponent,
         avalanche_combination_samples: config.engine.avalanche_combination_samples,
+        avalanche_totient_mode: config.engine.avalanche_totient_mode.as_str().to_string(),
         avalanche_solver_enable: config.engine.avalanche_solver_enable,
         avalanche_solver_global_log_enable: config.engine.avalanche_solver_global_log_enable,
         avalanche_solver_max_bits: config.engine.avalanche_solver_max_bits,

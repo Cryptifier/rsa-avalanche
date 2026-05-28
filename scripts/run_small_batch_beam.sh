@@ -6,6 +6,8 @@ SEED_START=${SEED_START:-1}
 CONFIG=${CONFIG:-"config/rsa_config_small_batch.json"}
 ANALYSIS_LOG=${ANALYSIS_LOG:-"logs_current.log"}
 SCRIPT_LOG=${SCRIPT_LOG:-"logs_current_script.log"}
+ANALYSIS_BITS=${ANALYSIS_BITS:-56}
+ANALYSIS_BITS_DECRYPT=${ANALYSIS_BITS_DECRYPT:-128}
 RESUME=${RESUME:-0}
 ANALYSIS_EXTRA_ARGS=${ANALYSIS_EXTRA_ARGS:-}
 AVALANCHE_BATCHES=${AVALANCHE_BATCHES:-${ANALYSIS_BATCHES:-}}
@@ -172,7 +174,7 @@ for i in $(seq 1 "${RUNS}"); do
   echo ""
   echo "===== RUN ${i} (seed ${seed}) ====="
   set +e
-  cargo run "${CARGO_RUN_ARGS[@]}" --bin analysis -- --true --bits 56 --bits-decrypt 128 --seed "${seed}" -c "${CONFIG}" --crypto-rng --session-json "${session_path}" \
+  cargo run "${CARGO_RUN_ARGS[@]}" --bin analysis -- --true --bits "${ANALYSIS_BITS}" --bits-decrypt "${ANALYSIS_BITS_DECRYPT}" --seed "${seed}" -c "${CONFIG}" --crypto-rng --session-json "${session_path}" \
     "${BATCH_ARGS[@]}" "${TEST_ARGS[@]}" "${EXTRA_ARGS[@]}" \
     2>&1 | tee -a "${ANALYSIS_LOG}" | tee "${run_output}" > /dev/null
   status=$?
@@ -187,7 +189,8 @@ for i in $(seq 1 "${RUNS}"); do
   cx_match_pct=$(echo "${cx_match_line}" | sed -n 's/.*match \([0-9.]*\)%.*/\1/p')
   majority_vote_line=$(grep -F -m1 "Avalanche majority vote run max:" "${run_output}" || true)
   majority_vote_match_pct=$(echo "${majority_vote_line}" | extract_first_match_pct)
-  global_majority_vote_line=$(grep -F -m1 "Avalanche global majority vote:" "${run_output}" || true)
+  batch_global_majority_vote_lines=$(grep -E '^Avalanche batch global majority vote:' "${run_output}" || true)
+  global_majority_vote_line=$(awk '/^Avalanche global majority vote:/{line=$0} END {print line}' "${run_output}")
   global_majority_vote_match_pct=$(echo "${global_majority_vote_line}" | extract_first_match_pct)
   majority_vote_summary_lines=$(grep -E '^Avalanche majority vote histogram:|^Avalanche majority vote batch stats:' "${run_output}" || true)
   beam_run_max_line=$(grep -F -m1 "Avalanche beam run max:" "${run_output}" || true)
@@ -319,6 +322,9 @@ for i in $(seq 1 "${RUNS}"); do
   fi
   if [[ -n "${majority_vote_line}" ]]; then
     echo "${majority_vote_line}"
+  fi
+  if [[ -n "${batch_global_majority_vote_lines}" ]]; then
+    echo "${batch_global_majority_vote_lines}"
   fi
   if [[ -n "${global_majority_vote_line}" ]]; then
     echo "${global_majority_vote_line}"

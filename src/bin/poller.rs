@@ -303,7 +303,7 @@ fn available_memory_bytes() -> Result<u64, String> {
     #[cfg(target_family = "unix")]
     unsafe {
         let page_size = libc::sysconf(libc::_SC_PAGESIZE);
-        let available_pages = libc::sysconf(libc::_SC_AVPHYS_PAGES);
+        let available_pages = libc::sysconf(libc::_SC_PHYS_PAGES);
         if page_size <= 0 || available_pages < 0 {
             return Err("available memory query returned an invalid value".to_string());
         }

@@ -67,6 +67,38 @@ pub fn mod_inverse(a: &BigUint, modulus: &BigUint) -> Option<BigUint> {
     x.to_biguint()
 }
 
+/// Computes Euler's totient `phi(n)` for an RSA modulus `n = p * q`.
+///
+/// # Parameters
+/// - `p`: First RSA prime factor.
+/// - `q`: Second RSA prime factor.
+///
+/// # Returns
+/// - `BigUint`: `(p - 1) * (q - 1)`.
+///
+/// # Expected Output
+/// - Returns the RSA totient value; no side effects.
+pub fn compute_rsa_phi(p: &BigUint, q: &BigUint) -> BigUint {
+    let one = BigUint::one();
+    (p - &one) * (q - &one)
+}
+
+/// Computes Carmichael's lambda `lambda(n)` for an RSA modulus `n = p * q`.
+///
+/// # Parameters
+/// - `p`: First RSA prime factor.
+/// - `q`: Second RSA prime factor.
+///
+/// # Returns
+/// - `BigUint`: `lcm(p - 1, q - 1)`.
+///
+/// # Expected Output
+/// - Returns the RSA Carmichael function value; no side effects.
+pub fn compute_rsa_lambda(p: &BigUint, q: &BigUint) -> BigUint {
+    let one = BigUint::one();
+    (p - &one).lcm(&(q - &one))
+}
+
 /// Encodes a `BigUint` as a lowercase hexadecimal string.
 ///
 /// # Parameters
@@ -996,6 +1028,20 @@ mod tests {
         let a = BigUint::from(6u8);
         let m = BigUint::from(12u8);
         assert!(mod_inverse(&a, &m).is_none());
+    }
+
+    #[test]
+    fn test_compute_rsa_phi() {
+        let p = BigUint::from(11u8);
+        let q = BigUint::from(13u8);
+        assert_eq!(compute_rsa_phi(&p, &q), BigUint::from(120u8));
+    }
+
+    #[test]
+    fn test_compute_rsa_lambda() {
+        let p = BigUint::from(11u8);
+        let q = BigUint::from(13u8);
+        assert_eq!(compute_rsa_lambda(&p, &q), BigUint::from(60u8));
     }
 
     #[test]

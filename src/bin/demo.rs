@@ -1038,7 +1038,7 @@ fn homomorphic_base_conversion(x: &BigUint, r: &BigUint, p: &BigUint) -> BigUint
 /// # Expected Output
 /// - Returns a converted value based on configuration; no side effects.
 fn hbc(x: &BigUint, r: &BigUint, p: &BigUint, engine: &EngineConfig) -> BigUint {
-    if engine.base_convert {
+    if engine.avalanche_rescaling_alt_mode {
         homomorphic_base_conversion(x, r, p)
     } else {
         let num = r * x;

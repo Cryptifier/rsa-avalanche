@@ -1,0 +1,11 @@
+[source: target/debug/build/zmq-sys-91383aaabbef1cd5/out/source/external/wepoll/README.md]
+| Event | Description | |---------------|----------------------------------------------------------------------| | `EPOLLIN` | incoming data available, or incoming connection ready to be accepted | | `EPOLLOUT` | ready to send data, or outgoing connection successfully established | | `EPOLLRDHUP` | remote peer initiated graceful socket shutdown | | `EPOLLPRI` | out-of-band data available for reading | | `EPOLLERR` | socket error<sup>1</sup> | | `EPOLLHUP` | socket hang-up<sup>1</sup> | | `EPOLLRDNORM` | same as `EPOLLIN` | | `EPOLLRDBAND` | same as `EPOLLPRI` | | `EPOLLWRNORM` | same as `EPOLLOUT` | | `EPOLLWRBAND` | same as `EPOLLOUT` | | `EPOLLMSG` | never reported |
+
+[source: LATTICES.md]
+```rust let input = RsaCoppersmithInput { modulus: BigUint::from(11413u32), prime: BigUint::zero(), known_prefix: BigUint::from(96u8), unknown_part: BigUint::from(5u8), m: 3, dimension: 6, }; ```
+
+[source: CHANGELOG.md]
+## 2026-W06 (2026-02-02 to 2026-02-08) - 2026-02-06: Next experiment. - 2026-02-06: Added a bit position histogram. - 2026-02-06: Cleaned up code and config. - 2026-02-06: Updated to use invert_bits setting, and also updated config. - 2026-02-06: Updated the configuration file and histogram bin number. - 2026-02-06: Added historical factors for later. It looks like the factors all end in 3 for the best_r candidate. - 2026-02-06: Added historical images showing notch and regular bell curve for either the best and worst r candidates. - 2026-02-06: Added a histogram for plotting the overlapping bit percentages across all runs. - 2026-02-06: Temporary changes removing inverted bits. - 2026-02-05: Changed the logic to use HBC in a way to make e > phi(N).
+
+[source: MESSAGES.md]
+`r_candidate_accuracy_batch` payload: - `context`: string - `messages`: array of strings - `ciphertexts`: array of strings - `shifted_ciphertexts`: array of strings - `rabin_exponent`: number - `tonelli_shanks_modulus`: string - `tonelli_shanks_ciphertexts`: array of strings - `candidates`: array - `beam_match_pct`: number or null - `beam_ones_match_pct`: number or null - `beam_score`: number or null - `beam_bit_width`: number or null

@@ -1,0 +1,11 @@
+[source: specs/ZMQ_SPEC.md]
+- Direction: router to viewer or other REQ client - Body: JSON object with a `clients` array of per-client resource snapshots - Effect: exposes the latest `QUERY_RESPONSE` data already aggregated by the server
+
+[source: ARCHITECTURE.md]
+The older description of switching from `N^k` and using `get_larger_number` is no longer accurate for the analysis path. The current code does not pivot to a single integer-power modulus such as `N^k`. Instead, it retargets candidates using decimal exponents, so the right mental model is a generic fractional-power construction such as `N^{a/b}` or, more generally, `N^\alpha`.
+
+[source: DATASET.md]
+The rgen grid data captures r-candidate CSVs across a range of modulus-size reductions (5, 10, 20, 30, 40, 50 percent smaller). This makes it easy to compare how candidate generation behaves as the target bit-length changes.
+
+[source: DEMO.md]
+**Suggestions to improve the experiment** 1. Increase **unique decryptions**: - Raise `analysis_batch_messages` and `analysis_batch_candidates`. - Increase `process_count` / `process_min_count` for r‑candidate generation. 2. Reduce duplicate `(e*x)^{-1}`: - Increase `analysis_batch_messages` first; duplicates are filtered per candidate. 3. Stabilize bit width: - Always set `--bits-decrypt` to the expected message width. 4. Compare ordering strategies: - Toggle `--use-hamming-distance` to see its effect on beam match. 5. Diversify r‑candidates: - Set `same_r_batch: false` and increase `analysis_batch_candidates`. - Vary `r_candidate_small_primes` and `r_candidate_small_prime_factors`.

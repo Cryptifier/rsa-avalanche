@@ -89,11 +89,20 @@ pub struct RsaKeyMaterial {
 }
 
 /// Message configuration for generating plaintexts.
-#[derive(Debug, Deserialize, Clone, Default)]
+#[derive(Debug, Deserialize, Clone)]
 pub struct MessageConfig {
     /// Fixed message to encrypt when random selection is disabled.
     #[serde(default = "default_fixed_message")]
     pub fixed_message: String,
+    /// Optional plaintext or ciphertext file used when `use_file` is enabled.
+    #[serde(default = "default_fixed_file")]
+    pub fixed_file: String,
+    /// Whether message selection should load from `fixed_file` instead of `fixed_message`.
+    #[serde(default = "default_message_use_file")]
+    pub use_file: bool,
+    /// Whether `fixed_file` contains an already-encrypted RSA ciphertext instead of plaintext bytes.
+    #[serde(default = "default_message_is_encrypted")]
+    pub is_encrypted: bool,
     /// Whether to use random messages instead of the fixed string.
     #[serde(default = "default_message_random")]
     pub is_random: bool,
@@ -102,12 +111,45 @@ pub struct MessageConfig {
     pub bits: u32,
 }
 
+/// Supported prime-derived RSA totient formulas for Avalanche round-trip setup.
+#[derive(Debug, Deserialize, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum AvalancheTotientMode {
+    /// Use Euler's totient `phi(n) = (p - 1) * (q - 1)`.
+    Phi,
+    /// Use Carmichael's lambda `lambda(n) = lcm(p - 1, q - 1)`.
+    Lambda,
+}
+
+impl AvalancheTotientMode {
+    /// Returns the config string used to serialize and log this totient mode.
+    ///
+    /// # Parameters
+    /// - None.
+    ///
+    /// # Returns
+    /// - `&'static str`: Lowercase config value for the mode.
+    ///
+    /// # Expected Output
+    /// - Returns a static string without side effects.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Phi => "phi",
+            Self::Lambda => "lambda",
+        }
+    }
+}
+
+impl Default for AvalancheTotientMode {
+    fn default() -> Self {
+        default_avalanche_totient_mode()
+    }
+}
+
 /// Engine configuration parameters for candidate generation and analysis.
 #[allow(dead_code)]
 #[derive(Debug, Deserialize, Clone)]
 pub struct EngineConfig {
-    #[serde(default = "default_base_convert")]
-    pub base_convert: bool,
     #[serde(default = "default_invert_bits")]
     pub invert_bits: bool,
     #[serde(default = "default_rabin_exponent")]
@@ -149,10 +191,19 @@ pub struct EngineConfig {
     pub analysis_batch_candidates: u64,
     #[serde(default = "default_analysis_batch_batches")]
     pub analysis_batch_batches: u64,
+    /// Prime-derived RSA totient formula used when Avalanche computes a private exponent from configured `p` and `q`.
+    #[serde(default = "default_avalanche_totient_mode")]
+    pub avalanche_totient_mode: AvalancheTotientMode,
+    /// Whether Avalanche uses the alternate homomorphic rescaling path `(x * r) / p` instead of `(x % p) % r`.
+    #[serde(
+        default = "default_avalanche_rescaling_alt_mode",
+        alias = "base_convert"
+    )]
+    pub avalanche_rescaling_alt_mode: bool,
     /// Whether the final-tier Avalanche solver should compare batch-pair sample products for whole-message recovery.
     #[serde(default = "default_avalanche_solver_enable")]
     pub avalanche_solver_enable: bool,
-    /// Whether Avalanche runs should log the global majority vote across every final-tier output.
+    /// Whether Avalanche runs should log one batch-global majority per batch and a final majority across those batch-global results.
     #[serde(default = "default_avalanche_solver_global_log_enable")]
     pub avalanche_solver_global_log_enable: bool,
     /// Maximum number of differing sample bits the Avalanche solver may brute-force per batch-pair sample comparison.
@@ -410,10 +461,22 @@ impl Default for KeyConfig {
     }
 }
 
+impl Default for MessageConfig {
+    fn default() -> Self {
+        Self {
+            fixed_message: default_fixed_message(),
+            fixed_file: default_fixed_file(),
+            use_file: default_message_use_file(),
+            is_encrypted: default_message_is_encrypted(),
+            is_random: default_message_random(),
+            bits: default_message_bits(),
+        }
+    }
+}
+
 impl Default for EngineConfig {
     fn default() -> Self {
         Self {
-            base_convert: default_base_convert(),
             invert_bits: default_invert_bits(),
             rabin_exponent: default_rabin_exponent(),
             min_message_trials: default_min_message_trials(),
@@ -434,6 +497,8 @@ impl Default for EngineConfig {
             analysis_batch_messages: default_analysis_batch_messages(),
             analysis_batch_candidates: default_analysis_batch_candidates(),
             analysis_batch_batches: default_analysis_batch_batches(),
+            avalanche_totient_mode: default_avalanche_totient_mode(),
+            avalanche_rescaling_alt_mode: default_avalanche_rescaling_alt_mode(),
             avalanche_solver_enable: default_avalanche_solver_enable(),
             avalanche_solver_global_log_enable: default_avalanche_solver_global_log_enable(),
             avalanche_solver_max_bits: default_avalanche_solver_max_bits(),
@@ -585,16 +650,34 @@ struct RsaPrivateKeyYamlPrimes {
 ///
 /// # Expected Output
 /// - Returns a path value without touching the filesystem.
-pub fn resolve_keyfile_path(config_path: &Path, keyfile: &str) -> PathBuf {
-    let keyfile_path = Path::new(keyfile);
-    if keyfile_path.is_absolute() {
-        return keyfile_path.to_path_buf();
+pub fn resolve_config_relative_path(
+    config_path: &Path,
+    relative_or_absolute_path: &str,
+) -> PathBuf {
+    let requested_path = Path::new(relative_or_absolute_path);
+    if requested_path.is_absolute() {
+        return requested_path.to_path_buf();
     }
 
     config_path
         .parent()
         .unwrap_or_else(|| Path::new("."))
-        .join(keyfile_path)
+        .join(requested_path)
+}
+
+/// Resolves a keyfile path relative to the configuration file that references it.
+///
+/// # Parameters
+/// - `config_path`: Path to the JSON/JSON5 configuration file.
+/// - `keyfile`: Configured keyfile string, which may be relative or absolute.
+///
+/// # Returns
+/// - `PathBuf`: Resolved filesystem path to the requested keyfile.
+///
+/// # Expected Output
+/// - Returns a path value without touching the filesystem.
+pub fn resolve_keyfile_path(config_path: &Path, keyfile: &str) -> PathBuf {
+    resolve_config_relative_path(config_path, keyfile)
 }
 
 /// Parses one decimal bigint field from an RSA keyfile.
@@ -971,6 +1054,48 @@ fn default_fixed_message() -> String {
     "afterstate".to_string()
 }
 
+/// Default fixed message file path.
+///
+/// # Parameters
+/// - None.
+///
+/// # Returns
+/// - `String`: Empty path so existing configs keep using `fixed_message`.
+///
+/// # Expected Output
+/// - Returns a constant default value; no side effects.
+fn default_fixed_file() -> String {
+    String::new()
+}
+
+/// Default flag for file-backed message selection.
+///
+/// # Parameters
+/// - None.
+///
+/// # Returns
+/// - `bool`: `false` so existing configs keep using `fixed_message`.
+///
+/// # Expected Output
+/// - Returns a constant default value; no side effects.
+fn default_message_use_file() -> bool {
+    false
+}
+
+/// Default flag for encrypted fixed-file inputs.
+///
+/// # Parameters
+/// - None.
+///
+/// # Returns
+/// - `bool`: `false` so fixed files default to plaintext bytes.
+///
+/// # Expected Output
+/// - Returns a constant default value; no side effects.
+fn default_message_is_encrypted() -> bool {
+    false
+}
+
 /// Default flag for random message selection.
 ///
 /// # Parameters
@@ -999,17 +1124,17 @@ fn default_message_bits() -> u32 {
     56
 }
 
-/// Default flag for homomorphic base conversion.
+/// Default flag for the alternate Avalanche rescaling path.
 ///
 /// # Parameters
 /// - None.
 ///
 /// # Returns
-/// - `bool`: Default base conversion setting.
+/// - `bool`: Default alternate-rescaling setting.
 ///
 /// # Expected Output
 /// - Returns a constant default value; no side effects.
-fn default_base_convert() -> bool {
+fn default_avalanche_rescaling_alt_mode() -> bool {
     true
 }
 
@@ -1291,6 +1416,20 @@ fn default_analysis_batch_candidates() -> u64 {
 /// - Returns a constant default value; no side effects.
 fn default_analysis_batch_batches() -> u64 {
     1
+}
+
+/// Default prime-derived RSA totient formula for Avalanche round-trip setup.
+///
+/// # Parameters
+/// - None.
+///
+/// # Returns
+/// - `AvalancheTotientMode`: `Phi` so RSA private exponents default to `(p - 1) * (q - 1)`.
+///
+/// # Expected Output
+/// - Returns a constant default value; no side effects.
+fn default_avalanche_totient_mode() -> AvalancheTotientMode {
+    AvalancheTotientMode::Phi
 }
 
 /// Default enable flag for the cross-batch Avalanche solver.
@@ -2389,6 +2528,54 @@ mod tests {
     }
 
     #[test]
+    fn test_config_default_uses_message_defaults() {
+        let config = Config::default();
+
+        assert_eq!(config.engine.message.fixed_message, "afterstate");
+        assert_eq!(config.engine.message.fixed_file, "");
+        assert!(!config.engine.message.use_file);
+        assert!(!config.engine.message.is_encrypted);
+        assert!(!config.engine.message.is_random);
+        assert_eq!(config.engine.message.bits, 56);
+    }
+
+    #[test]
+    fn test_load_config_accepts_file_backed_message_settings() {
+        let temp_dir = temp_path("message_file_settings");
+        fs::create_dir_all(&temp_dir).expect("create temp config dir");
+        fs::write(
+            temp_dir.join("config.json"),
+            concat!(
+                "{\n",
+                "  \"engine\": {\n",
+                "    \"message\": {\n",
+                "      \"fixed_message\": \"ignored\",\n",
+                "      \"fixed_file\": \"messages/sample.bin\",\n",
+                "      \"use_file\": true,\n",
+                "      \"is_encrypted\": true,\n",
+                "      \"is_random\": false,\n",
+                "      \"bits\": 128\n",
+                "    }\n",
+                "  }\n",
+                "}\n",
+            ),
+        )
+        .expect("write config");
+
+        let config = load_config(temp_dir.join("config.json").to_str().expect("utf8 path"))
+            .expect("load config");
+
+        assert_eq!(config.engine.message.fixed_message, "ignored");
+        assert_eq!(config.engine.message.fixed_file, "messages/sample.bin");
+        assert!(config.engine.message.use_file);
+        assert!(config.engine.message.is_encrypted);
+        assert!(!config.engine.message.is_random);
+        assert_eq!(config.engine.message.bits, 128);
+
+        let _ = fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
     fn test_load_config_accepts_scalar_recursive_tier_values() {
         let temp_dir = temp_path("recursive_scalar_values");
         fs::create_dir_all(&temp_dir).expect("create temp config dir");
@@ -2539,6 +2726,90 @@ mod tests {
         assert!(config.engine.avalanche_solver_enable);
         assert!(!config.engine.avalanche_solver_global_log_enable);
         assert_eq!(config.engine.avalanche_solver_max_bits, 5);
+
+        let _ = fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn test_load_config_defaults_avalanche_totient_mode_to_phi() {
+        let config = Config::default();
+        assert_eq!(
+            config.engine.avalanche_totient_mode,
+            AvalancheTotientMode::Phi
+        );
+    }
+
+    #[test]
+    fn test_load_config_accepts_lambda_avalanche_totient_mode() {
+        let temp_dir = temp_path("avalanche_totient_mode_lambda");
+        fs::create_dir_all(&temp_dir).expect("create temp config dir");
+        fs::write(
+            temp_dir.join("config.json"),
+            concat!(
+                "{\n",
+                "  \"engine\": {\n",
+                "    \"avalanche_totient_mode\": \"lambda\"\n",
+                "  }\n",
+                "}\n",
+            ),
+        )
+        .expect("write config");
+
+        let config = load_config(temp_dir.join("config.json").to_str().expect("utf8 path"))
+            .expect("load config");
+
+        assert_eq!(
+            config.engine.avalanche_totient_mode,
+            AvalancheTotientMode::Lambda
+        );
+
+        let _ = fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn test_load_config_accepts_avalanche_rescaling_alt_mode() {
+        let temp_dir = temp_path("avalanche_rescaling_alt_mode");
+        fs::create_dir_all(&temp_dir).expect("create temp config dir");
+        fs::write(
+            temp_dir.join("config.json"),
+            concat!(
+                "{\n",
+                "  \"engine\": {\n",
+                "    \"avalanche_rescaling_alt_mode\": false\n",
+                "  }\n",
+                "}\n",
+            ),
+        )
+        .expect("write config");
+
+        let config = load_config(temp_dir.join("config.json").to_str().expect("utf8 path"))
+            .expect("load config");
+
+        assert!(!config.engine.avalanche_rescaling_alt_mode);
+
+        let _ = fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn test_load_config_accepts_legacy_base_convert_alias() {
+        let temp_dir = temp_path("base_convert_alias");
+        fs::create_dir_all(&temp_dir).expect("create temp config dir");
+        fs::write(
+            temp_dir.join("config.json"),
+            concat!(
+                "{\n",
+                "  \"engine\": {\n",
+                "    \"base_convert\": false\n",
+                "  }\n",
+                "}\n",
+            ),
+        )
+        .expect("write config");
+
+        let config = load_config(temp_dir.join("config.json").to_str().expect("utf8 path"))
+            .expect("load config");
+
+        assert!(!config.engine.avalanche_rescaling_alt_mode);
 
         let _ = fs::remove_dir_all(&temp_dir);
     }

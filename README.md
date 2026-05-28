@@ -8,8 +8,7 @@ Proof of concept by Nicholas LaRoche <nlaroche@cryptifier.dev>.
 ![Example accuracy histogram from `analysis`](90histogram.png)
 
 # Resource Requirements
-- Use a ```c8a.12xlarge``` AWS instance with 48 AMD EPYC cores, 16,000 provisioned IOPS and 1,000 MB/s bandwidth for optimal performance.
-- Choose a disk size of at least 100 GB to accommodate the caching database and session artifacts.
+- Use a ```c8a.12xlarge``` AWS instance with 48 AMD EPYC cores using any Linux distribution. This analysis code can also be run on a local Core i5 machine for testing and development.
 - Keep statistics logging disabled unless you want to track per-run scoring details in the database, which can significantly increase runtime and disk usage.
 
 # Theory
@@ -20,13 +19,7 @@ Proof of concept by Nicholas LaRoche <nlaroche@cryptifier.dev>.
 
 # Setup
 - Use Linux and install Rust.
-```bash
-cargo build --bin analysis
-cargo build --bin demo
-cargo build --bin kgen
-```
 
-- Disk I/O and CPU performance should be maximized by choosing an appropriate AWS Instance Type. For example, a ```c8a.12xlarge``` instance with provisioned IOPS and bandwidth is ideal for running each batch. Without this, most of the time spent running the ```analysis``` code will be spent writing to the caching database.
 
 # Tool Usage
 ## Main test path
@@ -39,10 +32,27 @@ make demo
 This runs:
 
 ```bash
-RUNS=20 SEED_START=2100000 ./scripts/run_small_batch_beam.sh
+RUNS=1 SEED_START=2100000 AVALANCHE_BATCHES=50 ./scripts/run_small_public_key_demo.sh
 ```
 
-The runner executes `analysis` in release mode against the small-batch Avalanche configuration, records per-run logs, and summarizes match percentages across the batch sweep. Override `RUNS`, `SEED_START`, `CONFIG`, `ANALYSIS_EXTRA_ARGS`, `AVALANCHE_BATCHES`, or `AVALANCHE_BATCH_SIZE` in the environment when you want a different replay.
+The runner executes `analysis` in release mode against the small-batch Avalanche configuration, records per-run logs, and summarizes match percentages across the batch sweep. Override `RUNS`, `SEED_START`, `CONFIG`, `ANALYSIS_BITS`, `ANALYSIS_BITS_DECRYPT`, `ANALYSIS_EXTRA_ARGS`, `AVALANCHE_BATCHES`, or `AVALANCHE_BATCH_SIZE` in the environment when you want a different replay.
+
+## Public-key prep demo
+Use the public-key demo runner when you want a generated OpenPGP artifact set plus a public-key-only `analysis` replay against the first PKESK ciphertext.
+
+```bash
+./scripts/run_small_public_key_demo.sh
+```
+
+By default it:
+- calls `scripts/do_prep_pgp.sh` with `MODULUS_BITS=512`,
+- writes armored messages plus plaintext comparison artifacts under `config/pgp/512/`,
+- writes modulus-specific prep keys under `config/keys/prep_pgp_512_*`,
+- generates `config/rsa_config_small_public_key_demo_512.json` from the small-batch config,
+- runs `scripts/run_small_batch_beam.sh` against that generated config, and
+- fails unless the final `Avalanche global majority vote` hex exactly matches `config/pgp/512/prep_blob_1.pkcs1_v1_5_payload.hex`.
+
+Override `MODULUS_BITS`, `PREP_OUTPUT_SUBDIR`, `PREP_KEY_BASENAME`, `ANALYSIS_BATCHES`, `ANALYSIS_BITS_DECRYPT`, `CONFIG`, `ANALYSIS_LOG`, `SCRIPT_LOG`, or `ANALYSIS_EXTRA_ARGS` when you want a different modulus size or output location.
 
 ## `analysis.rs` (POC)
 `src/bin/analysis.rs` is where the current proof of concept lives.
@@ -73,10 +83,12 @@ cargo run --bin analysis -- --config config/rsa_config_small_batch.json
 - `--avalanche-combination-majority-vote <bool>`: Use per-bit majority-vote probabilities from each sampled combination. Default `true`.
 - `--avalanche-combination-sample-smoothing <bool>`: Apply Jeffreys smoothing to sampled majority-vote probabilities before beam search. Default `false`.
 - `--avalanche-combination-majority-vote-print <bool>`: Print a separate sampled-combination majority-vote summary for the selected sample. Default `true`.
-- `--avalanche-solver-global-log-enable <bool>`: Print a separate global majority vote across all retained final-tier Avalanche outputs when the batches target one message. Default `true`.
+- `--avalanche-solver-global-log-enable <bool>`: Print one batch-global majority vote per batch, then a final majority across those batch-global results when the batches target one message. Default `true`.
 - `--avalanche-use-top-beam <bool>`: Carry forward the prior tier's top beam-search bits between recursive Avalanche tiers instead of the prior tier's majority-vote bits. Default `true`.
 - `analysis` accepts either `rsa-private-key-v1` or `rsa-public-key-v1` in `rsa_keypair.keyfile`.
 - When the configured keyfile is public, `analysis` skips the normal RSA round trip. Set `rsa_keypair.private_keyfile` to a matching private YAML if you want a verification peek; otherwise the public-key run is selected by top beam score.
+- Set `engine.message.use_file = true` with `engine.message.fixed_file` to load a message from disk instead of `engine.message.fixed_message`.
+- Combine `engine.message.use_file = true` with `engine.message.is_encrypted = true` to load a raw or hex ciphertext file, decrypt it with the active private key or `rsa_keypair.private_keyfile`, validate PKCS#1 v1.5 padding, and use the low `engine.message.bits` payload bits as the hidden target for Avalanche comparisons and the final global majority vote.
 
 ## `demo.rs` (WORK-IN-PROGRESS)
 `src/bin/demo.rs` is separate from the proof of concept in `analysis.rs`. Treat it as a work-in-progress utility for direct encrypt/decrypt experiments rather than the main validation path.
@@ -100,6 +112,7 @@ cargo run --bin demo -- --decrypt --ciphertext 0x1234
 cargo run --bin kgen
 cargo run --bin kgen -- --size-mode modulus --modulus-bits 144 --output config/keys/private_key.yaml --public-output config/keys/public_key.yaml
 cargo run --bin kgen -- --input-private-key config/keys/private_key.yaml --public-output config/keys/public_key.yaml --force
+cargo run --bin kgen -- --input-public-key config/keys/public_key.yaml --encrypt-output config/messages/pkcs1_message.bin --encrypt-key-bits 128 --seed 7 --force
 cargo run --bin kgen -- --input-pgp-public-key public.asc --public-output config/keys/public_key.yaml --force
 cargo run --bin kgen -- --input-pgp-file message.asc --pgp-output config/keys/pgp_message.yaml --force
 ```
@@ -111,9 +124,12 @@ cargo run --bin kgen -- --input-pgp-file message.asc --pgp-output config/keys/pg
 - `-o, --output <PATH>`: Private-key YAML output path for generated keys. Default `config/keys/private_key.yaml`.
 - `--public-output <PATH>`: Optional public-key YAML output path for the generated or imported private key.
 - `--input-private-key <PATH>`: Existing `rsa-private-key-v1` YAML file to convert into `rsa-public-key-v1`, similar to extracting a public key from a private PEM with `openssl`.
+- `--input-public-key <PATH>`: Existing `rsa-public-key-v1` YAML file to normalize or to use for PKCS#1 ciphertext generation.
 - `--input-pgp-public-key <PATH>`: Existing OpenPGP public-key file to convert into `rsa-public-key-v1`. Optionally combine with `--pgp-output` to also save the unpacked packet structure.
 - `--input-pgp-file <PATH>`: Existing OpenPGP encrypted or packetized file to unpack into `pgp-file-v1` YAML.
 - `--pgp-output <PATH>`: YAML output path for the unpacked `pgp-file-v1` OpenPGP packet representation.
+- `--encrypt-output <PATH>`: Optional raw-binary ciphertext output path for an RSA PKCS#1 v1.5 encrypted random key.
+- `--encrypt-key-bits <u32>`: Bit width of the random key embedded at the end of the PKCS#1 v1.5 block. Default `128`.
 - `--force`: Overwrite an existing output file.
 - `--seed <u64>`: Optional deterministic RNG seed for reproducible key generation.
 - `--crypto-rng`: Use cryptographic RNGs instead of the standard seeded generator.
@@ -124,4 +140,6 @@ Configuration reference material has been moved to [CONFIGS.md](CONFIGS.md).
 # Public-Key Workflows
 Public-key YAML files are supported for both `analysis` and `demo`. Point `rsa_keypair.keyfile` at an `rsa-public-key-v1` file when you want the run to operate without inline `p` or `q`.
 
-For `analysis`, the plaintext used for scoring still comes from `engine.message.*`, so speculative outputs can still be compared against the chosen/generated message without learning the factorization. If you also set `rsa_keypair.private_keyfile` to a matching `rsa-private-key-v1` file, `analysis` performs a private-key verification peek; otherwise it skips round-trip RSA and ranks the public-key run by beam score.
+For `analysis`, the plaintext used for scoring still comes from `engine.message.*`, including the payload recovered from `engine.message.fixed_file` when `engine.message.is_encrypted = true`, so speculative outputs can still be compared against the chosen/generated message without learning the factorization. If you also set `rsa_keypair.private_keyfile` to a matching `rsa-private-key-v1` file, `analysis` performs a private-key verification peek for public-key runs; otherwise it skips round-trip RSA and ranks the public-key run by beam score.
+
+`scripts/run_small_public_key_demo.sh` uses that public-key path with a generated `rsa-public-key-v1` keyfile plus a matching private-key peek file so the first armored OpenPGP message in `config/pgp/<modulus-bits>/prep_blob_1.asc` can be replayed as an encrypted fixed-file input. The helper writes the extracted PKESK ciphertext, the full decrypted PKCS#1 v1.5 block, and the payload-only hex used for the final global-majority equality check beside the `.asc` file.

@@ -1,0 +1,41 @@
+[source: CONFIGS.md]
+# Notes for `config/rsa_config_small_batch.json` - This is the main replay configuration for the current POC. - It uses `rsa_keypair.generate = false` and resolves the RSA key from `rsa_keypair.keyfile`. - It enables batched Avalanche sampling, majority-vote beam search, and Hamming-distance pruning for the small-batch workflow. - It is the default config for both `analysis.rs` and `demo.rs`.
+
+[source: ARTICLE.md]
+For an RSA-encrypted OpenPGP session-key envelope, the payload of interest is the encoded session-key block rather than arbitrary user data. A compact model is
+
+[source: target/debug/build/zmq-sys-d3e7e6ceea7b9446/out/source/external/wepoll/README.md]
+* The `events` field is a bit mask containing the events being monitored/reported, and optional flags.<br> Flags are accepted by [`epoll_ctl()`](#epoll_ctl), but they are not reported back by [`epoll_wait()`](#epoll_wait). * The `data` field can be used to associate application-specific information with a socket; its value will be returned unmodified by [`epoll_wait()`](#epoll_wait). * [Linux man page][man epoll_ctl]
+
+[source: API.md]
+This document describes how the `analysis` binary drives the supported analysis workflows in this repository. It is not a Rust API reference. The focus here is execution flow, feature-specific call chains, and the helper functions available to those flows.
+
+[source: specs/ZMQ_SPEC.md]
+- `ZmqStatusContext::set_status(value)` stores `value` locally and in the process-wide global atomic mirror. - `PING` sets the status to the cumulative ping count seen by that router instance. - `STATUS` returns the current mirrored value. - `QUERY_RESPONSE` stores the latest resource snapshot for the reported `client_id`. - `ZmqStatusContext::reset_global_status()` clears the global mirror to `0`.
+
+[source: target/debug/build/zmq-sys-d3e7e6ceea7b9446/out/source/external/wepoll/README.md]
+```c struct epoll_event { uint32_t events; /* Epoll events and flags */ epoll_data_t data; /* User data variable */ }; ```
+
+[source: target/debug/build/zmq-sys-91383aaabbef1cd5/out/source/external/wepoll/README.md]
+* Receive socket events from an epoll port. * `events` should point to a caller-allocated array of [`epoll_event`](#struct-epoll_event) structs, which will receive the reported events. * `maxevents` is the maximum number of events that will be written to the `events` array, and must be greater than zero. * `timeout` specifies whether to block when no events are immediately available. - `<0` block indefinitely - `0` report any events that are already waiting, but don't block - `≥1` block for at most N milliseconds * Return value: - `-1` an error occurred - `0` timed out without any events to report - `≥1` the number of events stored in the `events` buffer * [Linux man page][man epoll_wait]
+
+[source: README.md]
+# Setup - Use Linux and install Rust. ```bash cargo build --bin analysis cargo build --bin demo cargo build --bin kgen ```
+
+[source: CONFIGS.md]
+For `config/rsa_config_small_batch.json`, sampled Avalanche now draws every combination from the full scored batch-sized pool rather than truncating to a separate top-pool limit. `engine.avalanche_combination_mixed_r_candidates` controls how many distinct `r` candidates are allowed into a sampled Avalanche input set, and each chosen `r` contributes all of its configured `c^x` message variants. `engine.avalanche_combination_recursion_depth`, `engine.avalanche_combination_recursive_group_size`, and `engine.avalanche_combination_recursive_resample_count` enable tiered Avalanche runs where prior-tier Avalanche outputs are either grouped once or resampled to a target count for subsequent recursive calls. The two `avalanche_combination_recursive_*` settings are arrays keyed by recursive level, and deeper recursion tiers reuse the last configured array entry. When `engine.avalanche_combination_majority_vote` is enabled, which is the default, the beam probabilities come from per-bit majority-vote frequencies across each sampled combination. `engine.avalanche_use_top_beam` controls which finalized prior-tier bit vector is carried into the next recursive tier: `true` reuses the top beam-search candidate and `false` reuses the prior tier's majority-vote bits. Enable `engine.avalanche_combination_sample_smoothing` or `--avalanche-combination-sample-smoothing true` to apply Jeffreys smoothing to those frequencies before beam search. `engine.avalanche_combination_majority_vote_print` controls the separate console summary for the sampled-combination majority vote and defaults to `true`. `engine.avalanche_solver_global_log_enable` controls an additional per-batch global-majority summary plus a final majority computed across those batch-global results when all batches target the same original message, and it also defaults to `true`. Set `engine.avalanche_statistics_collection` to `false` to skip recursive tier statistics and other heavy Avalanche analytics payloads while keeping the selected Avalanche result and summary metrics.
+
+[source: target/debug/build/zmq-sys-91383aaabbef1cd5/out/source/external/wepoll/README.md]
+* The `events` field is a bit mask containing the events being monitored/reported, and optional flags.<br> Flags are accepted by [`epoll_ctl()`](#epoll_ctl), but they are not reported back by [`epoll_wait()`](#epoll_wait). * The `data` field can be used to associate application-specific information with a socket; its value will be returned unmodified by [`epoll_wait()`](#epoll_wait). * [Linux man page][man epoll_ctl]
+
+[source: API.md]
+| Module | Function | Role | | --- | --- | --- | | `src/bin/analysis.rs` | `main` | CLI parsing, config loading, CLI override application, analytics session creation | | `src/methods.rs` | `run_demo` | Shared top-level runtime for key generation, message selection, RSA round-trip, and feature dispatch | | `src/methods.rs` | `run_information_sufficiency_tests` | Sufficiency workflow behind `--tests` | | `src/methods.rs` | `run_r_candidate_accuracy_batches` | Batch-scoring workflow behind `analysis_batch_enable` |
+
+[source: specs/ZMQ_SPEC.md]
+- Reply: `PONG` - Effect: increments the router ping count - Effect: updates the status context to the current ping count - Effect: mirrors the updated value into the global atomic status
+
+[source: README.md]
+For `analysis`, the plaintext used for scoring still comes from `engine.message.*`, including the payload recovered from `engine.message.fixed_file` when `engine.message.is_encrypted = true`, so speculative outputs can still be compared against the chosen/generated message without learning the factorization. If you also set `rsa_keypair.private_keyfile` to a matching `rsa-private-key-v1` file, `analysis` performs a private-key verification peek for public-key runs; otherwise it skips round-trip RSA and ranks the public-key run by beam score.
+
+[source: CHANGELOG.md]
+## 2026-W06 (2026-02-02 to 2026-02-08) - 2026-02-06: Next experiment. - 2026-02-06: Added a bit position histogram. - 2026-02-06: Cleaned up code and config. - 2026-02-06: Updated to use invert_bits setting, and also updated config. - 2026-02-06: Updated the configuration file and histogram bin number. - 2026-02-06: Added historical factors for later. It looks like the factors all end in 3 for the best_r candidate. - 2026-02-06: Added historical images showing notch and regular bell curve for either the best and worst r candidates. - 2026-02-06: Added a histogram for plotting the overlapping bit percentages across all runs. - 2026-02-06: Temporary changes removing inverted bits. - 2026-02-05: Changed the logic to use HBC in a way to make e > phi(N).
