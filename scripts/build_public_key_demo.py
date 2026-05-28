@@ -168,31 +168,7 @@ def main() -> None:
     )
 
     engine = config["engine"]
-    engine["process_min_count"] = 8
-    engine["process_count"] = 8
-    engine["process_max_best_attempts"] = 8
-    engine["min_message_trials"] = 8
-    engine["combiner_k_oracles"] = 16
-    engine["analysis_batch_enable"] = True
-    engine["analysis_batch_messages"] = 8
-    engine["analysis_batch_candidates"] = 128
     engine["analysis_batch_batches"] = max(1, args.analysis_batches)
-    engine["avalanche_solver_global_log_enable"] = True
-    engine["avalanche_beam_top_k"] = 4
-    engine["avalanche_fitness_shift_bytes"] = 0
-    engine["avalanche_fitness_r_candidate_limit"] = 32
-    engine["avalanche_fitness_cx_candidate_limit"] = 4
-    engine["avalanche_combination_mixed_r_candidates"] = 8
-    engine["avalanche_combination_samples"] = 64
-    engine["avalanche_combination_size"] = 8
-    engine["avalanche_combination_pool_size"] = 256
-    engine["avalanche_combination_recursion_depth"] = 1
-    engine["avalanche_combination_recursive_group_size"] = [8]
-    engine["avalanche_combination_recursive_resample_count"] = [0]
-    engine["avalanche_combination_hamming_distance_prune"] = False
-    engine["avalanche_combination_hamming_distance_keep_percentile"] = 100.0
-    engine["avalanche_combination_hamming_distance_outlier_preference_pct"] = 0.0
-    engine["avalanche_statistics_collection"] = False
 
     message = engine["message"]
     message["is_random"] = False
