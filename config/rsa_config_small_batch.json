@@ -73,7 +73,7 @@
     // Homomorphic base conversion mode.
     // - false: apply the rescaling as (x%p)%r
     // - true: apply the rescaling as (x*r)%p
-    "avalanche_rescaling_alt_mode": false,
+    "avalanche_rescaling_alt_mode": true,
     // Small-batch feature: score a large pool once, then draw many avalanche
     // combinations from that scored batch to estimate per-bit agreement.
     "analysis_batch_enable": true,
