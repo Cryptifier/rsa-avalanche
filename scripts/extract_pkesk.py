@@ -171,6 +171,39 @@ def read_old_length(data: bytes, pos: int, length_type: int) -> Tuple[int, int]:
     raise ValueError("Indeterminate-length old-format packets are not supported.")
 
 
+def read_new_length_component(data: bytes, pos: int) -> Tuple[int, int, bool]:
+    """
+    Read one new-format OpenPGP packet length component.
+
+    Returns:
+        (body_length, bytes_consumed_for_length, is_partial)
+
+    Partial lengths return the chunk length and `True`.
+    """
+    if pos >= len(data):
+        raise ValueError("Missing new-format length octet.")
+
+    first = data[pos]
+
+    if first < 192:
+        return first, 1, False
+
+    if 192 <= first <= 223:
+        if pos + 2 > len(data):
+            raise ValueError("Truncated 2-octet new-format length.")
+        second = data[pos + 1]
+        length = ((first - 192) << 8) + second + 192
+        return length, 2, False
+
+    if first == 255:
+        if pos + 5 > len(data):
+            raise ValueError("Truncated 5-octet new-format length.")
+        length = int.from_bytes(data[pos + 1:pos + 5], "big")
+        return length, 5, False
+
+    return 1 << (first & 0x1F), 1, True
+
+
 def read_new_length(data: bytes, pos: int) -> Tuple[int, int]:
     """
     Read a new-format OpenPGP packet length.
@@ -180,29 +213,10 @@ def read_new_length(data: bytes, pos: int) -> Tuple[int, int]:
 
     Partial Body Lengths are not supported in this minimal parser.
     """
-    if pos >= len(data):
-        raise ValueError("Missing new-format length octet.")
-
-    first = data[pos]
-
-    if first < 192:
-        return first, 1
-
-    if 192 <= first <= 223:
-        if pos + 2 > len(data):
-            raise ValueError("Truncated 2-octet new-format length.")
-        second = data[pos + 1]
-        length = ((first - 192) << 8) + second + 192
-        return length, 2
-
-    if first == 255:
-        if pos + 5 > len(data):
-            raise ValueError("Truncated 5-octet new-format length.")
-        length = int.from_bytes(data[pos + 1:pos + 5], "big")
-        return length, 5
-
-    # 224..254 => partial body lengths
-    raise ValueError("Partial body lengths are not supported by this script.")
+    length, consumed, is_partial = read_new_length_component(data, pos)
+    if is_partial:
+        raise ValueError("Partial body lengths are not supported by this script.")
+    return length, consumed
 
 
 def parse_openpgp_packets(data: bytes) -> List[Tuple[int, OpenPGPPacket]]:
@@ -226,7 +240,7 @@ def parse_openpgp_packets(data: bytes) -> List[Tuple[int, OpenPGPPacket]]:
 
         if new_format:
             tag = first & 0x3F
-            length, length_len = read_new_length(data, pos + 1)
+            length, length_len, is_partial = read_new_length_component(data, pos + 1)
             header_len = 1 + length_len
             body_start = pos + header_len
         else:
@@ -236,15 +250,47 @@ def parse_openpgp_packets(data: bytes) -> List[Tuple[int, OpenPGPPacket]]:
             header_len = 1 + length_len
             body_start = pos + header_len
 
-        body_end = body_start + length
-        if body_end > len(data):
-            raise ValueError(
-                f"Packet at offset {packet_offset} extends beyond end of data."
-            )
+        partial_body_lengths: List[int] = []
+        if new_format and is_partial:
+            raw_packet = bytearray(data[pos:body_start])
+            body_chunks: List[bytes] = []
+            chunk_pos = body_start
+            chunk_length = length
+            chunk_is_partial = is_partial
 
-        raw_header = data[pos:body_start]
-        raw_body = data[body_start:body_end]
-        raw_packet = data[pos:body_end]
+            while True:
+                chunk_end = chunk_pos + chunk_length
+                if chunk_end > len(data):
+                    raise ValueError(
+                        f"Packet at offset {packet_offset} extends beyond end of data."
+                    )
+                body_chunks.append(data[chunk_pos:chunk_end])
+                partial_body_lengths.append(chunk_length)
+                raw_packet.extend(data[chunk_pos:chunk_end])
+                if not chunk_is_partial:
+                    pos = chunk_end
+                    raw_body = b"".join(body_chunks)
+                    raw_header = data[packet_offset:body_start]
+                    raw_packet_bytes = bytes(raw_packet)
+                    break
+
+                next_length, next_length_len, next_is_partial = read_new_length_component(
+                    data, chunk_end
+                )
+                raw_packet.extend(data[chunk_end:chunk_end + next_length_len])
+                chunk_pos = chunk_end + next_length_len
+                chunk_length = next_length
+                chunk_is_partial = next_is_partial
+        else:
+            body_end = body_start + length
+            if body_end > len(data):
+                raise ValueError(
+                    f"Packet at offset {packet_offset} extends beyond end of data."
+                )
+            raw_body = data[body_start:body_end]
+            raw_header = data[pos:body_start]
+            raw_packet_bytes = data[pos:body_end]
+            pos = body_end
 
         packets.append(
             (
@@ -253,15 +299,13 @@ def parse_openpgp_packets(data: bytes) -> List[Tuple[int, OpenPGPPacket]]:
                     tag=tag,
                     new_format=new_format,
                     header_len=header_len,
-                    body_len=length,
+                    body_len=len(raw_body),
                     raw_header=raw_header,
                     raw_body=raw_body,
-                    raw_packet=raw_packet,
+                    raw_packet=raw_packet_bytes,
                 ),
             )
         )
-
-        pos = body_end
 
     return packets
 

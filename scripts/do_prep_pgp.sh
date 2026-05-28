@@ -5,11 +5,19 @@ SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 REPO_ROOT=$(cd -- "${SCRIPT_DIR}/.." && pwd)
 
 KEY_DIR="${REPO_ROOT}/config/keys"
-PGP_DIR="${REPO_ROOT}/config/pgp"
-PRIVATE_KEY="${KEY_DIR}/prep_pgp_private_key.yaml"
-PUBLIC_KEY="${KEY_DIR}/prep_pgp_public_key.yaml"
-ARMORED_PUBLIC_KEY="${KEY_DIR}/prep_pgp_public.asc"
-IDENTITY_FILE="${KEY_DIR}/prep_pgp_identity.env"
+PREP_PGP_MODULUS_BITS=${PREP_PGP_MODULUS_BITS:-2048}
+PREP_PGP_KEY_BASENAME=${PREP_PGP_KEY_BASENAME:-prep_pgp}
+PREP_PGP_OUTPUT_DIR=${PREP_PGP_OUTPUT_DIR:-config/pgp}
+PREP_PGP_CIPHER_ALGO=${PREP_PGP_CIPHER_ALGO:-}
+if [[ "${PREP_PGP_OUTPUT_DIR}" = /* ]]; then
+  PGP_DIR="${PREP_PGP_OUTPUT_DIR}"
+else
+  PGP_DIR="${REPO_ROOT}/${PREP_PGP_OUTPUT_DIR}"
+fi
+PRIVATE_KEY="${KEY_DIR}/${PREP_PGP_KEY_BASENAME}_private_key.yaml"
+PUBLIC_KEY="${KEY_DIR}/${PREP_PGP_KEY_BASENAME}_public_key.yaml"
+ARMORED_PUBLIC_KEY="${KEY_DIR}/${PREP_PGP_KEY_BASENAME}_public.asc"
+IDENTITY_FILE="${KEY_DIR}/${PREP_PGP_KEY_BASENAME}_identity.env"
 CONVERTER="${SCRIPT_DIR}/convert_rsa_yaml_to_pgp.py"
 
 mkdir -p "${KEY_DIR}" "${PGP_DIR}"
@@ -17,7 +25,7 @@ mkdir -p "${KEY_DIR}" "${PGP_DIR}"
 if [[ ! -f "${PUBLIC_KEY}" && ! -f "${PRIVATE_KEY}" ]]; then
   cargo run --quiet --bin kgen -- \
     --size-mode modulus \
-    --modulus-bits 2048 \
+    --modulus-bits "${PREP_PGP_MODULUS_BITS}" \
     --output "${PRIVATE_KEY}" \
     --public-output "${PUBLIC_KEY}"
 elif [[ ! -f "${PUBLIC_KEY}" && -f "${PRIVATE_KEY}" ]]; then
@@ -139,15 +147,19 @@ for index in 1 2 3 4 5; do
   plaintext_path="${PGP_DIR}/prep_blob_${index}.txt"
   output_path="${PGP_DIR}/prep_blob_${index}.asc"
 
-  gpg \
-    --homedir "${gnupghome}" \
-    --batch \
-    --yes \
-    --trust-model always \
-    --armor \
-    --recipient "${PREP_PGP_EMAIL}" \
-    --output "${output_path}" \
-    --encrypt "${plaintext_path}"
+  gpg_args=(
+    --homedir "${gnupghome}"
+    --batch
+    --yes
+    --trust-model always
+    --armor
+    --recipient "${PREP_PGP_EMAIL}"
+    --output "${output_path}"
+  )
+  if [[ -n "${PREP_PGP_CIPHER_ALGO}" ]]; then
+    gpg_args+=(--cipher-algo "${PREP_PGP_CIPHER_ALGO}")
+  fi
+  gpg "${gpg_args[@]}" --encrypt "${plaintext_path}"
 done
 
 printf 'Prepared RSA keypair %s and %s\n' "${PRIVATE_KEY}" "${PUBLIC_KEY}"

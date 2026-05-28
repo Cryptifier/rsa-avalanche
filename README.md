@@ -42,7 +42,24 @@ This runs:
 RUNS=20 SEED_START=2100000 ./scripts/run_small_batch_beam.sh
 ```
 
-The runner executes `analysis` in release mode against the small-batch Avalanche configuration, records per-run logs, and summarizes match percentages across the batch sweep. Override `RUNS`, `SEED_START`, `CONFIG`, `ANALYSIS_EXTRA_ARGS`, `AVALANCHE_BATCHES`, or `AVALANCHE_BATCH_SIZE` in the environment when you want a different replay.
+The runner executes `analysis` in release mode against the small-batch Avalanche configuration, records per-run logs, and summarizes match percentages across the batch sweep. Override `RUNS`, `SEED_START`, `CONFIG`, `ANALYSIS_BITS`, `ANALYSIS_BITS_DECRYPT`, `ANALYSIS_EXTRA_ARGS`, `AVALANCHE_BATCHES`, or `AVALANCHE_BATCH_SIZE` in the environment when you want a different replay.
+
+## Public-key prep demo
+Use the public-key demo runner when you want a generated OpenPGP artifact set plus a public-key-only `analysis` replay against the first PKESK ciphertext.
+
+```bash
+./scripts/run_small_public_key_demo.sh
+```
+
+By default it:
+- calls `scripts/do_prep_pgp.sh` with `MODULUS_BITS=512`,
+- writes armored messages plus plaintext comparison artifacts under `config/pgp/512/`,
+- writes modulus-specific prep keys under `config/keys/prep_pgp_512_*`,
+- generates `config/rsa_config_small_public_key_demo_512.json` from the small-batch config,
+- runs `scripts/run_small_batch_beam.sh` against that generated config, and
+- fails unless the final `Avalanche global majority vote` hex exactly matches `config/pgp/512/prep_blob_1.pkcs1_v1_5_payload.hex`.
+
+Override `MODULUS_BITS`, `PREP_OUTPUT_SUBDIR`, `PREP_KEY_BASENAME`, `ANALYSIS_BATCHES`, `ANALYSIS_BITS_DECRYPT`, `CONFIG`, `ANALYSIS_LOG`, `SCRIPT_LOG`, or `ANALYSIS_EXTRA_ARGS` when you want a different modulus size or output location.
 
 ## `analysis.rs` (POC)
 `src/bin/analysis.rs` is where the current proof of concept lives.
@@ -131,3 +148,5 @@ Configuration reference material has been moved to [CONFIGS.md](CONFIGS.md).
 Public-key YAML files are supported for both `analysis` and `demo`. Point `rsa_keypair.keyfile` at an `rsa-public-key-v1` file when you want the run to operate without inline `p` or `q`.
 
 For `analysis`, the plaintext used for scoring still comes from `engine.message.*`, including the payload recovered from `engine.message.fixed_file` when `engine.message.is_encrypted = true`, so speculative outputs can still be compared against the chosen/generated message without learning the factorization. If you also set `rsa_keypair.private_keyfile` to a matching `rsa-private-key-v1` file, `analysis` performs a private-key verification peek for public-key runs; otherwise it skips round-trip RSA and ranks the public-key run by beam score.
+
+`scripts/run_small_public_key_demo.sh` uses that public-key path with a generated `rsa-public-key-v1` keyfile plus a matching private-key peek file so the first armored OpenPGP message in `config/pgp/<modulus-bits>/prep_blob_1.asc` can be replayed as an encrypted fixed-file input. The helper writes the extracted PKESK ciphertext, the full decrypted PKCS#1 v1.5 block, and the payload-only hex used for the final global-majority equality check beside the `.asc` file.

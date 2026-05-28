@@ -45,10 +45,17 @@ cargo run --bin analysis -- \
 ```
 
 **Run the experiment (scripted)**
-- `scripts/run_small_batch_beam.sh` already uses `--bits 56` and `--bits-decrypt 128`.
+- `scripts/run_small_batch_beam.sh` defaults to `--bits 56` and `--bits-decrypt 128`, and you can override those with `ANALYSIS_BITS` and `ANALYSIS_BITS_DECRYPT`.
 - It records a session JSON per run and prints the path for use in the viewer.
 ```bash
 RUNS=1 scripts/run_small_batch_beam.sh
+```
+
+**Public-key encrypted-file demo**
+- `scripts/run_small_public_key_demo.sh` calls `scripts/do_prep_pgp.sh`, defaults to `MODULUS_BITS=512`, generates armored OpenPGP messages under `config/pgp/<modulus-bits>/`, extracts the first PKESK ciphertext into a generated small-batch-derived config, and then runs `scripts/run_small_batch_beam.sh` against that encrypted fixed-file input.
+- It also stores `prep_blob_1.pkcs1_v1_5_block.hex` and `prep_blob_1.pkcs1_v1_5_payload.hex` beside `prep_blob_1.asc`, then fails unless the final `Avalanche global majority vote` hex equals the stored payload hex.
+```bash
+RUNS=1 scripts/run_small_public_key_demo.sh
 ```
 
 **Inspect the results**
@@ -75,4 +82,3 @@ python3 scripts/session_viewer.py logs/session_<timestamp>_seed_<seed>.json
 5. Diversify r‑candidates:
    - Set `same_r_batch: false` and increase `analysis_batch_candidates`.
    - Vary `r_candidate_small_primes` and `r_candidate_small_prime_factors`.
-

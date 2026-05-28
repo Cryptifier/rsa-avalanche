@@ -6,6 +6,8 @@ SEED_START=${SEED_START:-1}
 CONFIG=${CONFIG:-"config/rsa_config_small_batch.json"}
 ANALYSIS_LOG=${ANALYSIS_LOG:-"logs_current.log"}
 SCRIPT_LOG=${SCRIPT_LOG:-"logs_current_script.log"}
+ANALYSIS_BITS=${ANALYSIS_BITS:-56}
+ANALYSIS_BITS_DECRYPT=${ANALYSIS_BITS_DECRYPT:-128}
 RESUME=${RESUME:-0}
 ANALYSIS_EXTRA_ARGS=${ANALYSIS_EXTRA_ARGS:-}
 AVALANCHE_BATCHES=${AVALANCHE_BATCHES:-${ANALYSIS_BATCHES:-}}
@@ -172,7 +174,7 @@ for i in $(seq 1 "${RUNS}"); do
   echo ""
   echo "===== RUN ${i} (seed ${seed}) ====="
   set +e
-  cargo run "${CARGO_RUN_ARGS[@]}" --bin analysis -- --true --bits 56 --bits-decrypt 128 --seed "${seed}" -c "${CONFIG}" --crypto-rng --session-json "${session_path}" \
+  cargo run "${CARGO_RUN_ARGS[@]}" --bin analysis -- --true --bits "${ANALYSIS_BITS}" --bits-decrypt "${ANALYSIS_BITS_DECRYPT}" --seed "${seed}" -c "${CONFIG}" --crypto-rng --session-json "${session_path}" \
     "${BATCH_ARGS[@]}" "${TEST_ARGS[@]}" "${EXTRA_ARGS[@]}" \
     2>&1 | tee -a "${ANALYSIS_LOG}" | tee "${run_output}" > /dev/null
   status=$?

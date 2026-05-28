@@ -1,0 +1,20 @@
+[source: target/debug/build/zmq-sys-91383aaabbef1cd5/out/source/external/wepoll/README.md]
+This library implements the [epoll][man epoll] API for Windows applications. It is fast and scalable, and it closely resembles the API and behavior of Linux' epoll.
+
+[source: LATTICES.md]
+- `modulus` is the RSA modulus `N` - `polynomial` is a monic integer polynomial `f(x)` - `bound` is the small-root bound `X` - `m` is the Coppersmith exponent parameter - `dimension` is the final square lattice dimension `d`
+
+[source: target/release/build/zmq-sys-541b50d142ccd3ce/out/source/external/wepoll/README.md]
+<sup>1</sup>: the `EPOLLERR` and `EPOLLHUP` events may always be reported by [`epoll_wait()`](#epoll_wait), regardless of the event mask that was passed to [`epoll_ctl()`](#epoll_ctl).
+
+[source: API.md]
+| Function | Purpose | | --- | --- | | `select_message` | Chooses CLI override, random message, or fixed configured message | | `random_message_under_n` | Samples a nonzero message below `n` | | `analysis_bit_width` | Resolves bit width for timeline and oracle workflows | | `build_r_candidate_settings` | Converts `EngineConfig` into `RCandidateSettings` | | `build_oracle_candidates` | Builds prepared `OracleCandidate` values from raw `r` candidates | | `select_best_candidate` | Scores candidates against the true message and returns the best one | | `screen_oracles_per_bit` | Ranks candidates per bit position across screening samples | | `compute_per_bit_best_case_match` | Computes optimistic per-bit reconstruction quality | | `build_bit_similarity_entries` | Builds shift-aware per-bit similarity diagnostics | | `run_bitwise_speculative_oracle_attempt` | Performs per-bit reconstruction using screened oracle selections | | `build_avalanche_nodes_unique_d` | Builds avalanche nodes from unique decryptions | | `run_avalanche_search` | Runs standalone avalanche reduction, beam search, and Viterbi decoding | | `run_sampled_avalanche_beam_search` | Runs sampled avalanche reduction inside batch accuracy analysis | | `record_r_candidate_trace_batch_from_prepared` | Writes prepared candidate traces into analytics |
+
+[source: ARCHITECTURE.md]
+- the best avalanche beam sample, - the best majority-vote sample when enabled, - the best `c^x` run match, - total evaluated `c^x` candidates, - and total evaluated avalanche candidates.
+
+[source: target/release/build/zmq-sys-541b50d142ccd3ce/out/source/external/wepoll/README.md]
+Using I/O completion ports isn't always practical when software is designed to be cross-platform. Wepoll offers an alternative that is much closer to a drop-in replacement for software that was designed to run on Linux.
+
+[source: target/debug/build/zmq-sys-d3e7e6ceea7b9446/out/source/external/wepoll/README.md]
+* The epoll port is a `HANDLE`, not a file descriptor. * All functions set both `errno` and `GetLastError()` on failure. * For more extensive documentation, see the [epoll(7) man page][man epoll], and the per-function man pages that are linked below.
