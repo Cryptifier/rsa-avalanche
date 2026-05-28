@@ -1,17 +1,11 @@
-[source: target/debug/build/zmq-sys-d3e7e6ceea7b9446/out/source/external/wepoll/README.md]
-This library implements the [epoll][man epoll] API for Windows applications. It is fast and scalable, and it closely resembles the API and behavior of Linux' epoll.
-
-[source: ARCHITECTURE.md]
-9. Compare the recovered candidate bits against the true message bits. This is an analysis experiment, so the code scores each candidate against the known plaintext and records match percentages, best `c^x` hits, and per-candidate analytics.
-
-[source: CONFIGS.md]
-# Notes for `config/rsa_config_small_batch.json` - This is the main replay configuration for the current POC. - It uses `rsa_keypair.generate = false` and resolves the RSA key from `rsa_keypair.keyfile`. - It enables batched Avalanche sampling, majority-vote beam search, and Hamming-distance pruning for the small-batch workflow. - It is the default config for both `analysis.rs` and `demo.rs`.
+[source: target/release/build/zmq-sys-541b50d142ccd3ce/out/source/external/wepoll/README.md]
+* Control which socket events are monitored by an epoll port. * `ephnd` must be a HANDLE created by [`epoll_create()`](#epoll_createepoll_create1) or [`epoll_create1()`](#epoll_createepoll_create1). * `op` must be one of `EPOLL_CTL_ADD`, `EPOLL_CTL_MOD`, `EPOLL_CTL_DEL`. * `sock` must be a valid socket created by [`socket()`][msdn socket], [`WSASocket()`][msdn wsasocket], or [`accept()`][msdn accept]. * `event` should be a pointer to a [`struct epoll_event`](#struct-epoll_event).<br> If `op` is `EPOLL_CTL_DEL` then the `event` parameter is ignored, and it may be `NULL`. * Returns 0 on success, -1 on failure. * It is recommended to always explicitly remove a socket from its epoll set using `EPOLL_CTL_DEL` *before* closing it.<br> As on Linux, closed sockets are automatically removed from the epoll set, but wepoll may not be able to detect that a socket was closed until the next call to [`epoll_wait()`](#epoll_wait). * [Linux man page][man epoll_ctl]
 
 [source: CGEN.md]
-1. read a row, 2. decode `N` compact gaps, 3. map those decoded indices onto the batch-local candidate pool, 4. run avalanche and beam search immediately.
+As of the current codebase, `cgen` is available as a generator, but `analysis` does not yet read this CSV. The sampled-avalanche path still selects groups at runtime with `select_scored_inputs_for_mixed_r_candidates` in [src/methods.rs](/home/nlaroche/projects/rsa/rsa-statistical-advantage/src/methods.rs#L4927).
 
-[source: README.md]
-- Disk I/O and CPU performance should be maximized by choosing an appropriate AWS Instance Type. For example, a ```c8a.12xlarge``` instance with provisioned IOPS and bandwidth is ideal for running each batch. Without this, most of the time spent running the ```analysis``` code will be spent writing to the caching database.
+[source: API.md]
+```text run_demo -> run_information_sufficiency_tests -> build_oracle_candidates -> record_r_candidate_trace_batch_from_prepared -> select_best_candidate -> optional timeline generation -> oracle screening -> per-bit best-case reconstruction -> bit-similarity export -> speculative bitwise oracle attempt -> optional standalone avalanche search -> threshold evaluation and PASS/FAIL verdict ```
 
-[source: ARTICLE.md]
-Here, **HBC** means **homomorphic base conversion**. In this method, HBC is the transformation that moves a value from one modulus domain into another related modulus domain without discarding the algebraic structure needed for the next step. The first HBC maps the RSA ciphertext view from the original modulus $N$ into the candidate modulus $r$, and the second HBC maps the candidate decryption result back into the original modulus domain for comparison with the target message. HBC is therefore the bridge that lets alternate moduli produce usable, bit-biased message estimates instead of unrelated residues.
+[source: CONFIGS.md]
+# Notes for `config/rsa_config_small_public_key_test.json` - This config exercises the public-key YAML path without changing the default private-key examples. - `rsa_keypair.keyfile` points at an `rsa-public-key-v1` file. - `rsa_keypair.private_keyfile` points at the matching private YAML so `analysis` can perform a verification peek while still operating in public-key mode.
