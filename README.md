@@ -8,8 +8,7 @@ Proof of concept by Nicholas LaRoche <nlaroche@cryptifier.dev>.
 ![Example accuracy histogram from `analysis`](90histogram.png)
 
 # Resource Requirements
-- Use a ```c8a.12xlarge``` AWS instance with 48 AMD EPYC cores, 16,000 provisioned IOPS and 1,000 MB/s bandwidth for optimal performance.
-- Choose a disk size of at least 100 GB to accommodate the caching database and session artifacts.
+- Use a ```c8a.12xlarge``` AWS instance with 48 AMD EPYC cores using any Linux distribution. This analysis code can also be run on a local Core i5 machine for testing and development.
 - Keep statistics logging disabled unless you want to track per-run scoring details in the database, which can significantly increase runtime and disk usage.
 
 # Theory
@@ -20,13 +19,7 @@ Proof of concept by Nicholas LaRoche <nlaroche@cryptifier.dev>.
 
 # Setup
 - Use Linux and install Rust.
-```bash
-cargo build --bin analysis
-cargo build --bin demo
-cargo build --bin kgen
-```
 
-- Disk I/O and CPU performance should be maximized by choosing an appropriate AWS Instance Type. For example, a ```c8a.12xlarge``` instance with provisioned IOPS and bandwidth is ideal for running each batch. Without this, most of the time spent running the ```analysis``` code will be spent writing to the caching database.
 
 # Tool Usage
 ## Main test path
@@ -39,7 +32,7 @@ make demo
 This runs:
 
 ```bash
-RUNS=20 SEED_START=2100000 ./scripts/run_small_batch_beam.sh
+RUNS=1 SEED_START=2100000 AVALANCHE_BATCHES=50 ./scripts/run_small_public_key_demo.sh
 ```
 
 The runner executes `analysis` in release mode against the small-batch Avalanche configuration, records per-run logs, and summarizes match percentages across the batch sweep. Override `RUNS`, `SEED_START`, `CONFIG`, `ANALYSIS_BITS`, `ANALYSIS_BITS_DECRYPT`, `ANALYSIS_EXTRA_ARGS`, `AVALANCHE_BATCHES`, or `AVALANCHE_BATCH_SIZE` in the environment when you want a different replay.
