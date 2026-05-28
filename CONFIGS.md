@@ -34,6 +34,7 @@ Notes:
 - Unknown keys are ignored by `analysis.rs`. The `padding` and `engine.max_overlap_min` fields are currently not used.
 - When `rsa_keypair.generate` is `false`, supply either inline `rsa_keypair.p`/`rsa_keypair.q` or `rsa_keypair.keyfile`.
 - `rsa_keypair.keyfile` may point to either `rsa-private-key-v1` or `rsa-public-key-v1`.
+- When `analysis` derives a private exponent from inline or generated `p` and `q`, `engine.avalanche_totient_mode` selects either `phi(n) = (p - 1) * (q - 1)` or `lambda(n) = lcm(p - 1, q - 1)`.
 - When the main keyfile is public, `analysis` skips round-trip RSA. Set `rsa_keypair.private_keyfile` if you want a matching private-key verification peek; otherwise the public-key run is selected by top beam score.
 - Public-key YAMLs are used the same way as private-key YAMLs in config: point `rsa_keypair.keyfile` at the file and leave `rsa_keypair.p` and `rsa_keypair.q` unset.
 
@@ -63,6 +64,7 @@ Notes:
 | `engine.analysis_batch_messages` | u64 | `1` | Number of ciphertext/message variants scored per batch before Avalanche sampling. |
 | `engine.analysis_batch_candidates` | u64 | `0` | Number of `r` candidates scored in each batch. |
 | `engine.analysis_batch_batches` | u64 | `1` | Number of batch-analysis runs. |
+| `engine.avalanche_totient_mode` | string | `phi` | Prime-derived RSA totient formula used when deriving a private exponent from configured `p` and `q`; accepts `phi` or `lambda`. |
 | `engine.avalanche_solver_global_log_enable` | bool | `true` | Print one batch-global majority vote per batch, then a final majority across those batch-global results when the batches target one message. |
 | `engine.avalanche_combination_samples` | u64 | `100` | Number of sampled combinations evaluated by Avalanche per batch. |
 | `engine.avalanche_combination_size` | usize | `50` | Legacy compatibility field retained from the older scored-item sampler. |

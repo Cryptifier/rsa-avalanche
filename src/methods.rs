@@ -54,8 +54,8 @@ use crate::avalanche::{
 };
 use crate::combiner::majority_vote_with_distribution;
 use crate::config::{
-    Config, EngineConfig, RsaKeyFileFormat, load_rsa_key_material_from_config_keyfile,
-    resolve_config_relative_path,
+    AvalancheTotientMode, Config, EngineConfig, RsaKeyFileFormat,
+    load_rsa_key_material_from_config_keyfile, resolve_config_relative_path,
 };
 use crate::database::{
     AvalancheCacheGuard, approximate_scored_avalanche_input_bytes,
@@ -88,8 +88,8 @@ use crate::helpers::{
     spread_normalized_avalanche_biases, stored_beam_value_is_one,
 };
 use crate::math::{
-    bit_length, choose_exponent, compute_totient, mod_inverse, random_biguint_bits,
-    random_prime_with_bits, shannon_entropy_bit, to_hex,
+    bit_length, choose_exponent, compute_rsa_lambda, compute_rsa_phi, compute_totient, mod_inverse,
+    random_biguint_bits, random_prime_with_bits, shannon_entropy_bit, to_hex,
 };
 use crate::r_candidates::{RCandidate, RCandidateSettings, resolve_retargeted_r_candidates_path};
 use crate::rng::{RngChoice, RngMode};
@@ -177,7 +177,8 @@ enum RoundtripVerification {
     Full {
         p: BigUint,
         q: BigUint,
-        phi: BigUint,
+        totient: BigUint,
+        totient_mode: AvalancheTotientMode,
         d: BigUint,
     },
     Peek {
@@ -191,6 +192,31 @@ struct ResolvedMessageInput {
     base_ciphertext: Option<BigUint>,
     hide_reference_displays: bool,
     loaded_from_file: bool,
+}
+
+/// Computes the RSA totient used for Avalanche round-trip setup from the configured mode.
+///
+/// # Parameters
+/// - `engine`: Engine configuration carrying `avalanche_totient_mode`.
+/// - `p`: First RSA prime factor.
+/// - `q`: Second RSA prime factor.
+///
+/// # Returns
+/// - `(BigUint, AvalancheTotientMode)`: Selected totient value plus the mode used to derive it.
+///
+/// # Expected Output
+/// - Returns the configured prime-derived totient without side effects.
+fn compute_configured_rsa_totient(
+    engine: &EngineConfig,
+    p: &BigUint,
+    q: &BigUint,
+) -> (BigUint, AvalancheTotientMode) {
+    let mode = engine.avalanche_totient_mode;
+    let totient = match mode {
+        AvalancheTotientMode::Phi => compute_rsa_phi(p, q),
+        AvalancheTotientMode::Lambda => compute_rsa_lambda(p, q),
+    };
+    (totient, mode)
 }
 
 /// Reads the configured fixed message file as raw bytes.
@@ -573,31 +599,41 @@ pub fn run_demo(
         while q == p {
             q = random_prime_with_bits(args.bits, &mut rng);
         }
-        let one = BigUint::one();
         let n = &p * &q;
-        let phi = (&p - &one) * (&q - &one);
-        let e = choose_exponent(start_e, &phi);
-        let d = mod_inverse(&e, &phi)
+        let (totient, totient_mode) = compute_configured_rsa_totient(&config.engine, &p, &q);
+        let e = choose_exponent(start_e, &totient);
+        let d = mod_inverse(&e, &totient)
             .ok_or("public exponent is not invertible; try a different size or exponent")?;
         (
             n,
             e,
             p.bits().saturating_add(q.bits()),
-            Some(RoundtripVerification::Full { p, q, phi, d }),
+            Some(RoundtripVerification::Full {
+                p,
+                q,
+                totient,
+                totient_mode,
+                d,
+            }),
         )
     } else if let (Some(p), Some(q)) = (config.rsa_keypair.p.clone(), config.rsa_keypair.q.clone())
     {
-        let one = BigUint::one();
         let n = &p * &q;
-        let phi = (&p - &one) * (&q - &one);
-        let e = choose_exponent(start_e, &phi);
-        let d = mod_inverse(&e, &phi)
+        let (totient, totient_mode) = compute_configured_rsa_totient(&config.engine, &p, &q);
+        let e = choose_exponent(start_e, &totient);
+        let d = mod_inverse(&e, &totient)
             .ok_or("public exponent is not invertible; try a different size or exponent")?;
         (
             n,
             e,
             p.bits().saturating_add(q.bits()),
-            Some(RoundtripVerification::Full { p, q, phi, d }),
+            Some(RoundtripVerification::Full {
+                p,
+                q,
+                totient,
+                totient_mode,
+                d,
+            }),
         )
     } else {
         let n = config
@@ -692,11 +728,19 @@ pub fn run_demo(
         None
     };
 
-    if let Some(RoundtripVerification::Full { p, q, phi, d }) = roundtrip_verification.as_ref() {
+    if let Some(RoundtripVerification::Full {
+        p,
+        q,
+        totient,
+        totient_mode,
+        d,
+    }) = roundtrip_verification.as_ref()
+    {
         println!("Prime p ({} bits): {p}", bit_length(p));
         println!("Prime q ({} bits): {q}", bit_length(q));
         println!("Modulus n ({} bits): {n}", n.bits());
-        println!("phi(n): {phi}");
+        println!("RSA totient mode: {}", totient_mode.as_str());
+        println!("RSA totient: {totient}");
         println!("Public exponent e: {e}");
         println!("Private exponent d: {d}");
     } else {
@@ -9570,6 +9614,31 @@ mod tests {
                 .iter()
                 .all(|variant| mod_inverse(&variant.e_x, &candidate_phi).is_some())
         );
+    }
+
+    #[test]
+    fn test_compute_configured_rsa_totient_uses_phi_mode() {
+        let engine = EngineConfig::default();
+        let p = BigUint::from(11u8);
+        let q = BigUint::from(13u8);
+
+        let (totient, mode) = compute_configured_rsa_totient(&engine, &p, &q);
+
+        assert_eq!(mode, AvalancheTotientMode::Phi);
+        assert_eq!(totient, BigUint::from(120u8));
+    }
+
+    #[test]
+    fn test_compute_configured_rsa_totient_uses_lambda_mode() {
+        let mut engine = EngineConfig::default();
+        engine.avalanche_totient_mode = AvalancheTotientMode::Lambda;
+        let p = BigUint::from(11u8);
+        let q = BigUint::from(13u8);
+
+        let (totient, mode) = compute_configured_rsa_totient(&engine, &p, &q);
+
+        assert_eq!(mode, AvalancheTotientMode::Lambda);
+        assert_eq!(totient, BigUint::from(60u8));
     }
 
     #[test]

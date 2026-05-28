@@ -64,6 +64,8 @@ pub struct AnalyticsCliArgs {
     pub avalanche_probability_spread_exponent: f64,
     /// Number of avalanche combination samples evaluated per batch.
     pub avalanche_combination_samples: u64,
+    /// Prime-derived RSA totient formula used when deriving a private exponent from `p` and `q`.
+    pub avalanche_totient_mode: String,
     /// Whether the cross-batch Avalanche solver is enabled.
     pub avalanche_solver_enable: bool,
     /// Whether Avalanche logs per-batch global majorities plus a final majority across those batch-global results.
@@ -160,6 +162,7 @@ pub(crate) struct AnalyticsCliInfo {
     avalanche_beam_top_k: usize,
     avalanche_probability_spread_exponent: f64,
     avalanche_combination_samples: u64,
+    avalanche_totient_mode: String,
     avalanche_solver_enable: bool,
     avalanche_solver_global_log_enable: bool,
     avalanche_solver_max_bits: usize,
@@ -655,6 +658,7 @@ impl SessionAnalytics {
             avalanche_beam_top_k: args.avalanche_beam_top_k,
             avalanche_probability_spread_exponent: args.avalanche_probability_spread_exponent,
             avalanche_combination_samples: args.avalanche_combination_samples,
+            avalanche_totient_mode: args.avalanche_totient_mode,
             avalanche_solver_enable: args.avalanche_solver_enable,
             avalanche_solver_global_log_enable: args.avalanche_solver_global_log_enable,
             avalanche_solver_max_bits: args.avalanche_solver_max_bits,

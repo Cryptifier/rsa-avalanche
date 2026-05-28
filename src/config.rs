@@ -111,6 +111,41 @@ pub struct MessageConfig {
     pub bits: u32,
 }
 
+/// Supported prime-derived RSA totient formulas for Avalanche round-trip setup.
+#[derive(Debug, Deserialize, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum AvalancheTotientMode {
+    /// Use Euler's totient `phi(n) = (p - 1) * (q - 1)`.
+    Phi,
+    /// Use Carmichael's lambda `lambda(n) = lcm(p - 1, q - 1)`.
+    Lambda,
+}
+
+impl AvalancheTotientMode {
+    /// Returns the config string used to serialize and log this totient mode.
+    ///
+    /// # Parameters
+    /// - None.
+    ///
+    /// # Returns
+    /// - `&'static str`: Lowercase config value for the mode.
+    ///
+    /// # Expected Output
+    /// - Returns a static string without side effects.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Phi => "phi",
+            Self::Lambda => "lambda",
+        }
+    }
+}
+
+impl Default for AvalancheTotientMode {
+    fn default() -> Self {
+        default_avalanche_totient_mode()
+    }
+}
+
 /// Engine configuration parameters for candidate generation and analysis.
 #[allow(dead_code)]
 #[derive(Debug, Deserialize, Clone)]
@@ -158,6 +193,9 @@ pub struct EngineConfig {
     pub analysis_batch_candidates: u64,
     #[serde(default = "default_analysis_batch_batches")]
     pub analysis_batch_batches: u64,
+    /// Prime-derived RSA totient formula used when Avalanche computes a private exponent from configured `p` and `q`.
+    #[serde(default = "default_avalanche_totient_mode")]
+    pub avalanche_totient_mode: AvalancheTotientMode,
     /// Whether the final-tier Avalanche solver should compare batch-pair sample products for whole-message recovery.
     #[serde(default = "default_avalanche_solver_enable")]
     pub avalanche_solver_enable: bool,
@@ -456,6 +494,7 @@ impl Default for EngineConfig {
             analysis_batch_messages: default_analysis_batch_messages(),
             analysis_batch_candidates: default_analysis_batch_candidates(),
             analysis_batch_batches: default_analysis_batch_batches(),
+            avalanche_totient_mode: default_avalanche_totient_mode(),
             avalanche_solver_enable: default_avalanche_solver_enable(),
             avalanche_solver_global_log_enable: default_avalanche_solver_global_log_enable(),
             avalanche_solver_max_bits: default_avalanche_solver_max_bits(),
@@ -1373,6 +1412,20 @@ fn default_analysis_batch_candidates() -> u64 {
 /// - Returns a constant default value; no side effects.
 fn default_analysis_batch_batches() -> u64 {
     1
+}
+
+/// Default prime-derived RSA totient formula for Avalanche round-trip setup.
+///
+/// # Parameters
+/// - None.
+///
+/// # Returns
+/// - `AvalancheTotientMode`: `Phi` so RSA private exponents default to `(p - 1) * (q - 1)`.
+///
+/// # Expected Output
+/// - Returns a constant default value; no side effects.
+fn default_avalanche_totient_mode() -> AvalancheTotientMode {
+    AvalancheTotientMode::Phi
 }
 
 /// Default enable flag for the cross-batch Avalanche solver.
@@ -2669,6 +2722,42 @@ mod tests {
         assert!(config.engine.avalanche_solver_enable);
         assert!(!config.engine.avalanche_solver_global_log_enable);
         assert_eq!(config.engine.avalanche_solver_max_bits, 5);
+
+        let _ = fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn test_load_config_defaults_avalanche_totient_mode_to_phi() {
+        let config = Config::default();
+        assert_eq!(
+            config.engine.avalanche_totient_mode,
+            AvalancheTotientMode::Phi
+        );
+    }
+
+    #[test]
+    fn test_load_config_accepts_lambda_avalanche_totient_mode() {
+        let temp_dir = temp_path("avalanche_totient_mode_lambda");
+        fs::create_dir_all(&temp_dir).expect("create temp config dir");
+        fs::write(
+            temp_dir.join("config.json"),
+            concat!(
+                "{\n",
+                "  \"engine\": {\n",
+                "    \"avalanche_totient_mode\": \"lambda\"\n",
+                "  }\n",
+                "}\n",
+            ),
+        )
+        .expect("write config");
+
+        let config = load_config(temp_dir.join("config.json").to_str().expect("utf8 path"))
+            .expect("load config");
+
+        assert_eq!(
+            config.engine.avalanche_totient_mode,
+            AvalancheTotientMode::Lambda
+        );
 
         let _ = fs::remove_dir_all(&temp_dir);
     }
