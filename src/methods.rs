@@ -4273,7 +4273,7 @@ fn count_matching_bits(a: &BigUint, b: &BigUint) -> (usize, usize) {
 ///
 /// # Expected Output
 /// - Returns the base-converted value; no side effects.
-fn homomorphic_base_conversion(x: &BigUint, r: &BigUint, p: &BigUint) -> BigUint {
+pub fn homomorphic_base_conversion(x: &BigUint, r: &BigUint, p: &BigUint) -> BigUint {
     (x % p) % r
 }
 
@@ -4290,7 +4290,7 @@ fn homomorphic_base_conversion(x: &BigUint, r: &BigUint, p: &BigUint) -> BigUint
 ///
 /// # Expected Output
 /// - Returns a converted value based on configuration; no side effects.
-fn hbc(x: &BigUint, r: &BigUint, p: &BigUint, engine: &EngineConfig) -> BigUint {
+pub fn hbc(x: &BigUint, r: &BigUint, p: &BigUint, engine: &EngineConfig) -> BigUint {
     if engine.avalanche_rescaling_alt_mode {
         homomorphic_base_conversion(x, r, p)
     } else {
